@@ -1,0 +1,28 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.18.3",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.18",
+    "daysjs": "^1.0.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "fs": "0.0.1-security",
+    "mssql": "^12.0.0",
+    "multer": "^2.0.2",
+    "mysql2": "^3.15.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.9",
+    "pdfkit": "^0.17.2",
+    "stream-buffers": "^3.0.3"
+  }
+}
