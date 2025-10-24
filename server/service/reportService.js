@@ -1,118 +1,128 @@
-import dayjs from "dayjs";
 import PDFDocument from "pdfkit";
-import streamBuffers from "stream-buffers";
 import { sql, poolPromise } from "../config/database.js";
+import dayjs from "dayjs";
 
 /**
- * 🧾 Generate Weekly Patrol Report as a PDF buffer
- * Fetches data for the previous Monday → Sunday from the correct monthly table
+ * 🧾 Generate a weekly report PDF
+ * Called by getWeeklyReportPDF() in reportController.js
+ * @param {number} clientId
+ * @param {string} client
+ * @param {string} startDate
+ * @param {string} endDate
+ * @returns {Promise<Buffer>} - PDF buffer
  */
-export async function generateWeeklyReportPDF(clientName) {
-  const today = dayjs();
+export async function generateWeeklyReportPDF(clientId, client, startDate, endDate) {
+  console.log(`🧾 Generating PDF for client: ${client}`);
 
-  // Calculate last week's Monday → Sunday
-  const startDate = today.subtract(1, "week").startOf("week").add(1, "day").startOf("day").toDate();
-  const endDate = today.subtract(1, "week").endOf("week").add(1, "day").endOf("day").toDate();
+  const pool = await poolPromise;
+  const start = dayjs(startDate).startOf("day").toDate();
+  const end = dayjs(endDate).endOf("day").toDate();
+  const tableName = `_Datos.dbo.p_recepcion${dayjs(start).format("YYYYMM")}`;
 
-  // Determine the correct table name based on month (e.g., p_recepcion202410)
-  const tableName = `_Datos.dbo.p_recepcion${dayjs(startDate).format("YYYYMM")}`;
+  // Check table existence
+  const tableExists = await pool.request()
+    .input("tableName", sql.NVarChar, tableName.split(".").pop())
+    .query(`
+      SELECT 1 AS existsFlag
+      FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_NAME = PARSENAME(@tableName, 1)
+    `);
 
-  console.log(`📅 Generating PDF report for ${clientName}`);
-  console.log(`🗓️ Period: ${dayjs(startDate).format("YYYY-MM-DD")} → ${dayjs(endDate).format("YYYY-MM-DD")}`);
-  console.log(`📦 Using table: ${tableName}`);
-
-  try {
-    const pool = await poolPromise;
-    console.log("✅ Connected to SQL Server");
-
-    // Fetch records from the correct monthly table
-    const result = await pool.request()
-      .input("startDate", sql.DateTime, startDate)
-      .input("endDate", sql.DateTime, endDate)
-      .query(`
-        SELECT 
-          r.rec_iid AS Id,
-          r.rec_iidcuenta AS Cuenta,
-          r.rec_calarma AS Codigo,
-          r.rec_tfechahora AS FechaHora,
-          r.rec_cContenido AS Descripcion,
-          r.rec_czona AS Zona,
-          r.rec_ioperador AS Operador,
-          r.usuario_cNombre AS Usuario,
-          r.zonas_cDescripcion AS ZonaDescripcion
-        FROM ${tableName} r
-        WHERE r.rec_tfechahora BETWEEN @startDate AND @endDate
-        ORDER BY r.rec_tfechahora ASC
-      `);
-
-    const records = result.recordset;
-
-    if (!records || records.length === 0) {
-      console.warn(`⚠️ No data found for ${clientName} in the selected period.`);
-      return null;
-    }
-
-    console.log(`📊 Retrieved ${records.length} records for ${clientName}`);
-
-    // Generate PDF
-    const pdfBuffer = await createPDFReport(clientName, startDate, endDate, records);
-    return pdfBuffer;
-
-  } catch (error) {
-    console.error(`❌ Error generating report for ${clientName}:`, error);
-    throw error;
+  if (tableExists.recordset.length === 0) {
+    console.warn(`⚠️ Table ${tableName} not found`);
+    return null;
   }
-}
 
-/**
- * 🖨️ Create a formatted PDF report
- */
-async function createPDFReport(clientName, startDate, endDate, records) {
-  const doc = new PDFDocument({ margin: 50 });
-  const buffer = new streamBuffers.WritableStreamBuffer({
-    initialSize: 100 * 1024,
-    incrementAmount: 10 * 1024,
-  });
+  // Get events data
+  const eventsResult = await pool.request()
+    .input("clientId", sql.Int, clientId)
+    .input("startDate", sql.DateTime, start)
+    .input("endDate", sql.DateTime, end)
+    .query(`
+      SELECT 
+        CONVERT(VARCHAR(10), r.rec_tfechahora, 120) AS Date,
+        CONVERT(VARCHAR(8), r.rec_tfechahora, 108) AS Time,
+        r.rec_czona AS Zone,
+        r.rec_cContenido AS Event,
+        r.rec_calarma AS Code,
+        r.rec_cObservaciones AS Observations
+      FROM ${tableName} r
+      WHERE r.rec_iidcuenta = @clientId
+        AND r.rec_tfechahora BETWEEN @startDate AND @endDate
+      ORDER BY r.rec_tfechahora DESC
+    `);
 
-  doc.pipe(buffer);
+  const events = eventsResult.recordset || [];
+  if (events.length === 0) {
+    console.warn(`⚠️ No events found for ${client}`);
+    return null;
+  }
+
+  // Get summary
+  const summaryResult = await pool.request()
+    .input("clientId", sql.Int, clientId)
+    .input("startDate", sql.DateTime, start)
+    .input("endDate", sql.DateTime, end)
+    .query(`
+      SELECT 
+        ISNULL(r.rec_czona, 'Unknown') AS SitePosts,
+        COUNT(*) AS ChecksCompleted,
+        DATEDIFF(day, @startDate, @endDate) * 4 AS ExpectedChecks,
+        CAST(
+          (CAST(COUNT(*) AS FLOAT) /
+          NULLIF(DATEDIFF(day, @startDate, @endDate) * 4, 0)) * 100
+          AS DECIMAL(5,1)
+        ) AS PerformanceRate
+      FROM ${tableName} r
+      WHERE r.rec_iidcuenta = @clientId
+        AND r.rec_tfechahora BETWEEN @startDate AND @endDate
+      GROUP BY r.rec_czona
+      ORDER BY PerformanceRate DESC
+    `);
+
+  const summary = summaryResult.recordset || [];
+
+  // ✅ Generate PDF
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
+  const buffers = [];
+  doc.on("data", (chunk) => buffers.push(chunk));
+  const pdfPromise = new Promise((resolve) => doc.on("end", () => resolve(Buffer.concat(buffers))));
 
   // Title
-  doc.fontSize(18).text(`Weekly Patrol Report`, { align: "center" });
-  doc.moveDown(0.5);
-  doc.fontSize(14).text(`Client: ${clientName}`, { align: "center" });
-  doc.fontSize(12).text(`Period: ${dayjs(startDate).format("YYYY-MM-DD")} → ${dayjs(endDate).format("YYYY-MM-DD")}`, { align: "center" });
+  doc.fontSize(20).text("Weekly Patrol Report", { align: "center" });
+  doc.moveDown();
+  doc.fontSize(12).text(`Client: ${client}`);
+  doc.text(`Period: ${startDate} → ${endDate}`);
   doc.moveDown(1.5);
 
-  // Table headers
-  doc.fontSize(10).text(`ID`, 50, doc.y, { width: 40 });
-  doc.text(`FechaHora`, 90, doc.y, { width: 110 });
-  doc.text(`Codigo`, 200, doc.y, { width: 60 });
-  doc.text(`Descripcion`, 260, doc.y, { width: 140 });
-  doc.text(`Zona`, 400, doc.y, { width: 60 });
-  doc.text(`Usuario`, 460, doc.y, { width: 100 });
+  // Summary Section
+  doc.fontSize(16).text("📋 Summary", { underline: true });
   doc.moveDown(0.5);
-  doc.moveTo(50, doc.y).lineTo(560, doc.y).stroke();
+  if (summary.length > 0) {
+    summary.forEach((row, i) => {
+      doc.fontSize(12).text(
+        `${i + 1}. ${row.SitePosts} — ${row.ChecksCompleted}/${row.ExpectedChecks} checks (${row.PerformanceRate}%)`
+      );
+    });
+  } else {
+    doc.fontSize(12).text("No summary data available.");
+  }
+
+  doc.moveDown(1);
+
+  // Events Section
+  doc.fontSize(16).text("🕒 Event Log", { underline: true });
   doc.moveDown(0.5);
 
-  // Records
-  records.forEach((r) => {
-    doc.fontSize(9);
-    doc.text(r.Id || "", 50, doc.y, { width: 40 });
-    doc.text(dayjs(r.FechaHora).format("YYYY-MM-DD HH:mm"), 90, doc.y, { width: 110 });
-    doc.text(r.Codigo || "", 200, doc.y, { width: 60 });
-    doc.text(r.Descripcion || "", 260, doc.y, { width: 140 });
-    doc.text(r.ZonaDescripcion || r.Zona || "", 400, doc.y, { width: 60 });
-    doc.text(r.Usuario || "", 460, doc.y, { width: 100 });
+  events.forEach((e, i) => {
+    doc.fontSize(11).text(
+      `${i + 1}. [${e.Date} ${e.Time}] ${e.Zone || "N/A"} - ${e.Event || ""}`
+    );
+    if (e.Code) doc.text(`   Code: ${e.Code}`);
+    if (e.Observations) doc.text(`   Notes: ${e.Observations}`);
     doc.moveDown(0.3);
-
-    if (doc.y > 750) {
-      doc.addPage();
-      doc.moveDown(1);
-    }
   });
 
   doc.end();
-
-  await new Promise((resolve) => buffer.on("finish", resolve));
-  return buffer.getContents();
+  return pdfPromise;
 }

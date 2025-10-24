@@ -1,23 +1,23 @@
 import { sql, poolPromise } from "../config/database.js";
 
-export const fetchWeeklyReport = async (client, startDate, endDate) => {
+export const fetchWeeklyReport = async (client, startDateTime, endDateTime) => {
   try {
     const pool = await poolPromise;
 
     const query = `
-      DECLARE @StartDate DATE = @startDateParam;
-      DECLARE @EndDate DATE = @endDateParam;
+      DECLARE @StartDateTime DATETIME = @startDateParam;
+      DECLARE @EndDateTime DATETIME = @endDateParam;
       DECLARE @ClientName NVARCHAR(255) = @clientParam;
 
       -- ✅ PERFORMANCE SUMMARY
       SELECT 
           zon.zon_cdescripcion AS [SitePosts],
           COUNT(rec.rec_iid) AS [ChecksCompleted],
-          (DATEDIFF(DAY, @StartDate, @EndDate) + 1) * 11 AS [ExpectedChecks],
+          (DATEDIFF(DAY, @StartDateTime, @EndDateTime) + 1) * 11 AS [ExpectedChecks],
           CONCAT(
               CAST(ROUND(
                   (CAST(COUNT(rec.rec_iid) AS FLOAT) /
-                  ((DATEDIFF(DAY, @StartDate, @EndDate) + 1) * 11)) * 100, 0
+                  ((DATEDIFF(DAY, @StartDateTime, @EndDateTime) + 1) * 11)) * 100, 0
               ) AS INT), '%'
           ) AS [PerformanceRate]
       FROM [_Datos].[dbo].[p_recepcion] AS rec
@@ -28,7 +28,7 @@ export const fetchWeeklyReport = async (client, startDate, endDate) => {
           ON rec.rec_iidcuenta = cue.cue_iid
       WHERE 
           cue.cue_cnombre = @ClientName
-          AND rec.rec_tfechahora BETWEEN @StartDate AND @EndDate
+          AND rec.rec_tfechahora BETWEEN @StartDateTime AND @EndDateTime
       GROUP BY 
           zon.zon_cdescripcion
       ORDER BY 
@@ -49,13 +49,13 @@ export const fetchWeeklyReport = async (client, startDate, endDate) => {
           ON rec.rec_iidcuenta = cue.cue_iid
       WHERE 
           cue.cue_cnombre = @ClientName
-          AND rec.rec_tfechahora BETWEEN @StartDate AND @EndDate
+          AND rec.rec_tfechahora BETWEEN @StartDateTime AND @EndDateTime
       ORDER BY rec.rec_tfechahora DESC;
     `;
 
     const result = await pool.request()
-      .input("startDateParam", sql.Date, startDate)
-      .input("endDateParam", sql.Date, endDate)
+      .input("startDateParam", sql.DateTime, startDateTime)
+      .input("endDateParam", sql.DateTime, endDateTime)
       .input("clientParam", sql.NVarChar, client)
       .query(query);
 

@@ -1,4 +1,4 @@
-// service/clients.js
+
 
 export const clients = [
   { name: 'ALARI CONFIGURACION 1', email: 'alari1@company.com' },

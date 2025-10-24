@@ -7,6 +7,7 @@ import cors from "cors";
 dotenv.config();
 
 // Import routes
+import scheduleRoutes from './routes/schedularRoutes.js';
 import reportRoutes from "./routes/reportRoutes.js";
 import clientRoutes from "./routes/clientRoutes.js";
 import dataSyncRoutes from "./routes/dataSyncRoutes.js";
@@ -39,6 +40,7 @@ app.use((req, res, next) => {
 });
 
 // API routes
+app.use('/api/schedules', scheduleRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/sync", dataSyncRoutes);

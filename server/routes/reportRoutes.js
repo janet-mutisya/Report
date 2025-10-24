@@ -1,10 +1,17 @@
-import express from 'express';
-import { getWeeklyReport } from '../controllers/reportController.js';
+// server/routes/reportRoutes.js
+import express from "express";
+import {
+  getWeeklyReport,
+  getWeeklyReportPDF,
+} from "../controllers/reportController.js";
 
 const router = express.Router();
 
-// Support both GET and POST
-router.get('/weekly', getWeeklyReport);
-router.post('/weekly', getWeeklyReport);
+// Regular report data
+router.get("/weekly", getWeeklyReport);
+router.post("/weekly", getWeeklyReport);
+
+// PDF export
+router.get("/weekly/pdf", getWeeklyReportPDF);
 
 export default router;
