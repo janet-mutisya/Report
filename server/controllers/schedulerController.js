@@ -22,10 +22,21 @@ export const getAllSchedules = async (req, res) => {
       ORDER BY rep_tproximoenvio ASC
     `);
 
+    // Add default values for missing columns
+    const schedulesWithDefaults = result.recordset.map(schedule => ({
+      ...schedule,
+      rep_estado: 1, // Default to active
+      rep_timezone: 'America/New_York', // Default timezone
+      rep_ultimoejecucion: null, // Default to null
+      rep_endOption: 'never', // Default recurrence
+      rep_occurrences: null,
+      rep_endDate: null
+    }));
+
     res.status(200).json({
       success: true,
-      total: result.recordset.length,
-      schedules: result.recordset,
+      total: schedulesWithDefaults.length,
+      schedules: schedulesWithDefaults,
     });
   } catch (error) {
     console.error('❌ Error fetching schedules:', error);
@@ -69,9 +80,20 @@ export const getScheduleById = async (req, res) => {
       });
     }
 
+    // Add default values for missing columns
+    const scheduleWithDefaults = {
+      ...result.recordset[0],
+      rep_estado: 1,
+      rep_timezone: 'America/New_York',
+      rep_ultimoejecucion: null,
+      rep_endOption: 'never',
+      rep_occurrences: null,
+      rep_endDate: null
+    };
+
     res.status(200).json({
       success: true,
-      schedule: result.recordset[0],
+      schedule: scheduleWithDefaults,
     });
   } catch (error) {
     console.error('❌ Error fetching schedule:', error);
@@ -89,7 +111,12 @@ export const getScheduleById = async (req, res) => {
 export const updateSchedule = async (req, res) => {
   try {
     const { id } = req.params;
-    const { rep_tproximoenvio, rep_nfrecuencia, rep_cmail } = req.body;
+    const { 
+      rep_tproximoenvio, 
+      rep_nfrecuencia, 
+      rep_cmail,
+      rep_nCadaUnidadTiempo
+    } = req.body;
 
     if (!rep_tproximoenvio || !rep_nfrecuencia || !rep_cmail) {
       return res.status(400).json({
@@ -104,12 +131,14 @@ export const updateSchedule = async (req, res) => {
       .input('rep_tproximoenvio', sql.DateTime, rep_tproximoenvio)
       .input('rep_nfrecuencia', sql.Int, rep_nfrecuencia)
       .input('rep_cmail', sql.VarChar(4000), rep_cmail)
+      .input('rep_nCadaUnidadTiempo', sql.Int, rep_nCadaUnidadTiempo || 1)
       .query(`
         UPDATE _Datos.dbo.m_reportes_automaticos
         SET 
           rep_tproximoenvio = @rep_tproximoenvio,
           rep_nfrecuencia = @rep_nfrecuencia,
-          rep_cmail = @rep_cmail
+          rep_cmail = @rep_cmail,
+          rep_nCadaUnidadTiempo = @rep_nCadaUnidadTiempo
         WHERE rep_idKey = @id
       `);
 
@@ -147,7 +176,7 @@ export const createSchedule = async (req, res) => {
       rep_cmail,
       rep_nCadaUnidadTiempo,
       rep_cMailRuteoSMS,
-      rep_cSMSParaInforme,
+      rep_cSMSParaInforme
     } = req.body;
 
     if (!rep_iidcuenta || !rep_ntipo || !rep_tproximoenvio || !rep_nfrecuencia || !rep_cmail) {
@@ -164,7 +193,7 @@ export const createSchedule = async (req, res) => {
       .input('rep_tproximoenvio', sql.DateTime, rep_tproximoenvio)
       .input('rep_nfrecuencia', sql.Int, rep_nfrecuencia)
       .input('rep_cmail', sql.VarChar(4000), rep_cmail)
-      .input('rep_nCadaUnidadTiempo', sql.Int, rep_nCadaUnidadTiempo || 0)
+      .input('rep_nCadaUnidadTiempo', sql.Int, rep_nCadaUnidadTiempo || 1)
       .input('rep_cMailRuteoSMS', sql.VarChar(150), rep_cMailRuteoSMS || '')
       .input('rep_cSMSParaInforme', sql.VarChar(150), rep_cSMSParaInforme || '')
       .query(`
@@ -203,7 +232,7 @@ export const upsertSchedule = async (req, res) => {
       rep_cmail,
       rep_nCadaUnidadTiempo,
       rep_cMailRuteoSMS,
-      rep_cSMSParaInforme,
+      rep_cSMSParaInforme
     } = req.body;
 
     if (!rep_iidcuenta || !rep_tproximoenvio || !rep_nfrecuencia || !rep_cmail) {
@@ -221,7 +250,7 @@ export const upsertSchedule = async (req, res) => {
       .input("rep_tproximoenvio", sql.DateTime, rep_tproximoenvio)
       .input("rep_nfrecuencia", sql.Int, rep_nfrecuencia)
       .input("rep_cmail", sql.VarChar(4000), rep_cmail)
-      .input("rep_nCadaUnidadTiempo", sql.Int, rep_nCadaUnidadTiempo || 0)
+      .input("rep_nCadaUnidadTiempo", sql.Int, rep_nCadaUnidadTiempo || 1)
       .input("rep_cMailRuteoSMS", sql.VarChar(150), rep_cMailRuteoSMS || "")
       .input("rep_cSMSParaInforme", sql.VarChar(150), rep_cSMSParaInforme || "")
       .query(`
@@ -237,8 +266,10 @@ export const upsertSchedule = async (req, res) => {
             rep_cMailRuteoSMS = @rep_cMailRuteoSMS,
             rep_cSMSParaInforme = @rep_cSMSParaInforme
         WHEN NOT MATCHED THEN
-          INSERT (rep_iidcuenta, rep_ntipo, rep_tproximoenvio, rep_nfrecuencia, rep_cmail, rep_nCadaUnidadTiempo, rep_cMailRuteoSMS, rep_cSMSParaInforme)
-          VALUES (@rep_iidcuenta, @rep_ntipo, @rep_tproximoenvio, @rep_nfrecuencia, @rep_cmail, @rep_nCadaUnidadTiempo, @rep_cMailRuteoSMS, @rep_cSMSParaInforme);
+          INSERT (rep_iidcuenta, rep_ntipo, rep_tproximoenvio, rep_nfrecuencia, rep_cmail, 
+                  rep_nCadaUnidadTiempo, rep_cMailRuteoSMS, rep_cSMSParaInforme)
+          VALUES (@rep_iidcuenta, @rep_ntipo, @rep_tproximoenvio, @rep_nfrecuencia, @rep_cmail, 
+                  @rep_nCadaUnidadTiempo, @rep_cMailRuteoSMS, @rep_cSMSParaInforme);
       `);
 
     res.status(200).json({
@@ -255,3 +286,38 @@ export const upsertSchedule = async (req, res) => {
   }
 };
 
+/**
+ * 🔴 DELETE a schedule
+ */
+export const deleteSchedule = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pool = await poolPromise;
+
+    const result = await pool.request()
+      .input('id', sql.Int, id)
+      .query(`
+        DELETE FROM _Datos.dbo.m_reportes_automaticos
+        WHERE rep_idKey = @id
+      `);
+
+    if (result.rowsAffected[0] === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Schedule not found',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Schedule deleted successfully',
+    });
+  } catch (error) {
+    console.error('❌ Error deleting schedule:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Database error while deleting schedule',
+      error: error.message,
+    });
+  }
+};
