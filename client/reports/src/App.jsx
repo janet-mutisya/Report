@@ -2,7 +2,8 @@ import { BrowserRouter as Router, Routes, Route, Link } from "react-router-dom";
 import WeeklyReport from "./pages/WeeklyReport";
 import BackupSync from "./pages/BackupSync";
 import ReportScheduler from "./pages/ReportScheduler";
-import { Database, FileText, Clock, Menu, X, Shield } from "lucide-react";
+import PatrolScheduleManager from "./pages/patrolScheduleManager";
+import { Database, FileText, Clock, Menu, X, Shield, MapPin } from "lucide-react";
 import { useState } from "react";
 
 function App() {
@@ -34,6 +35,14 @@ function App() {
                 >
                   <FileText className="w-5 h-5 transition-transform duration-300 group-hover:rotate-6" />
                   <span className="font-medium">Weekly Report</span>
+                </Link>
+
+                <Link
+                  to="/patrol-schedule"
+                  className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-all duration-300 hover:scale-105 hover:shadow-lg backdrop-blur-sm border border-transparent hover:border-white/30 group"
+                >
+                  <MapPin className="w-5 h-5 transition-transform duration-300 group-hover:rotate-6" />
+                  <span className="font-medium">Patrol Schedule</span>
                 </Link>
 
                 <Link
@@ -81,6 +90,15 @@ function App() {
                 </Link>
 
                 <Link
+                  to="/patrol-schedule"
+                  onClick={() => setMenuOpen(false)}
+                  className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-all duration-300 hover:translate-x-2 backdrop-blur-sm border border-transparent hover:border-white/30 group"
+                >
+                  <MapPin className="w-5 h-5 transition-transform duration-300 group-hover:scale-110" />
+                  <span className="font-medium">Patrol Schedule</span>
+                </Link>
+
+                <Link
                   to="/backup-sync"
                   onClick={() => setMenuOpen(false)}
                   className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-all duration-300 hover:translate-x-2 backdrop-blur-sm border border-transparent hover:border-white/30 group"
@@ -106,6 +124,7 @@ function App() {
         <div className="animate-in fade-in duration-500">
           <Routes>
             <Route path="/" element={<WeeklyReport />} />
+            <Route path="/patrol-schedule" element={<PatrolScheduleManager />} />
             <Route path="/backup-sync" element={<BackupSync />} />
             <Route path="/scheduler" element={<ReportScheduler />} />
           </Routes>

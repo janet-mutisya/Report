@@ -7,11 +7,13 @@ import cors from "cors";
 dotenv.config();
 
 // Import routes
+import testRoute from "./routes/testRoute.js";
 import scheduleRoutes from './routes/schedularRoutes.js';
 import reportRoutes from "./routes/reportRoutes.js";
 import clientRoutes from "./routes/clientRoutes.js";
 import dataSyncRoutes from "./routes/dataSyncRoutes.js";
 import backupSyncRoutes from "./routes/backupSyncRoute.js";
+import { patrolSchedulesRoutes } from "./routes/managePatrolScheduleRoutes.js";
 
 // Import the scheduler (this starts the cron job automatically)
 import "./service/scheduler.js";
@@ -45,6 +47,8 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/sync", dataSyncRoutes);
 app.use("/api/backup", backupSyncRoutes);
+app.use("/api", patrolSchedulesRoutes); 
+app.use("/api/test", testRoute);
 
 // Root endpoint
 app.get("/", (req, res) => {
@@ -69,5 +73,6 @@ app.listen(PORT, () => {
   console.log(`🌍 Allowed frontend: ${FRONTEND_URL}`);
   console.log(`📊 API base URL: http://localhost:${PORT}/api`);
   console.log("⏰ Scheduler loaded and waiting for its cron trigger.");
+  console.log("🛡️  Patrol Schedules API: /api/patrol-schedules"); // Add this line
   console.log("===============================================");
 });
