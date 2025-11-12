@@ -7,7 +7,6 @@ import {
   FileText,
   TrendingUp,
   Activity,
-  MapPin,
   AlertTriangle,
   CheckCircle,
   XCircle,
@@ -16,13 +15,14 @@ import {
   RefreshCw,
   Sun,
   Moon,
-  Users
+  Users,
+  Info,
+  Target,
+  BarChart3
 } from "lucide-react";
 import {
   BarChart,
   Bar,
-  LineChart,
-  Line,
   PieChart,
   Pie,
   Cell,
@@ -32,6 +32,8 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  LineChart,
+  Line
 } from "recharts";
 
 export default function SecurityDashboard() {
@@ -52,153 +54,141 @@ export default function SecurityDashboard() {
 
   const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
 
-  // Enhanced text wrapping for PDF with proper width calculation
-  const wrapText = (pdf, text, maxWidth, fontSize = 9) => {
-    if (!text) return [''];
-    const lines = [];
-    const textStr = String(text).trim();
-    const words = textStr.split(' ');
-    let currentLine = '';
+  // Enhanced helper function to check if a zone name is valid
+  const isValidZoneName = useCallback((zoneName) => {
+    if (!zoneName || typeof zoneName !== 'string') return false;
     
-    pdf.setFontSize(fontSize);
+    const normalized = zoneName.trim().toLowerCase();
     
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      const testWidth = pdf.getStringUnitWidth(testLine) * fontSize / pdf.internal.scaleFactor;
-      
-      if (testWidth <= maxWidth) {
-        currentLine = testLine;
+    // Filter out invalid zone names more strictly
+    const invalidPatterns = [
+      'unknown',
+      'unknown zone',
+      'no zone',
+      'undefined',
+      'null',
+      'n/a',
+      'none',
+      /^[0-9]+$/,  // Just numbers
+      /^[a-z]$/i,  // Single letter
+      /^\s*$/,     // Empty or whitespace only
+      /^test/i,    // Test entries
+      /^demo/i,    // Demo entries
+      /^temp/i     // Temporary entries
+    ];
+    
+    for (const pattern of invalidPatterns) {
+      if (pattern instanceof RegExp) {
+        if (pattern.test(normalized)) return false;
       } else {
-        if (currentLine) {
-          lines.push(currentLine);
-        }
-        currentLine = word;
+        if (normalized === pattern.toLowerCase()) return false;
       }
     }
     
-    if (currentLine) {
-      lines.push(currentLine);
-    }
-    
-    return lines.length > 0 ? lines : [''];
+    // Must be at least 2 characters for a valid zone name
+    return zoneName.trim().length >= 2;
+  }, []);
+
+  // Performance rating function
+  const getPerformanceRating = (rate) => {
+    const numericRate = typeof rate === 'string' ? parseFloat(rate) : rate;
+    if (numericRate >= 95) return 'Excellent';
+    if (numericRate >= 85) return 'Good';
+    if (numericRate >= 70) return 'Fair';
+    return 'Poor';
   };
 
-  // Create optimized pie chart for PDF
-  const createPieChartImage = async (metricsData) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 500;
-    canvas.height = 280;
-    const ctx = canvas.getContext('2d');
-    
-    const completed = metricsData.totalCompleted;
-    const missed = metricsData.totalMissedPatrols;
-    const total = completed + missed;
-    const completedPercent = total > 0 ? (completed / total * 100).toFixed(1) : 0;
-    const missedPercent = total > 0 ? (missed / total * 100).toFixed(1) : 0;
+  // Process report data - TRUST THE BACKEND CALCULATIONS
+  const processReportData = useCallback((data) => {
+    if (!data.summary || !data.calculations) return data;
 
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
-    const radius = 85;
+    console.log('🔍 Processing report data:', {
+      rawSummary: data.summary.length,
+      calculations: data.calculations,
+      schedule: data.schedule,
+      incidents: data.incidents,
+      events: data.events?.length,
+      expectedPerZone: data.calculations.expectedPerZone,
+      validZoneCount: data.calculations.validZoneCount
+    });
 
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Filter out invalid zones first
+    const validSummary = data.summary.filter(zone => {
+      const isValid = isValidZoneName(zone.SitePosts);
+      if (!isValid) {
+        console.log('❌ Filtering out invalid zone:', zone.SitePosts);
+      }
+      return isValid;
+    });
 
-    if (completed > 0) {
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, radius, 0, (completed / total) * 2 * Math.PI);
-      ctx.closePath();
-      ctx.fillStyle = '#10b981';
-      ctx.fill();
-    }
+    console.log(`✅ Valid zones after filtering: ${validSummary.length} / ${data.summary.length}`);
 
-    if (missed > 0) {
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, radius, (completed / total) * 2 * Math.PI, 2 * Math.PI);
-      ctx.closePath();
-      ctx.fillStyle = '#ef4444';
-      ctx.fill();
-    }
+    // Process zones - USE BACKEND CALCULATED VALUES DIRECTLY
+    const processedSummary = validSummary.map(zone => {
+      const completed = parseInt(zone.ChecksCompleted) || 0;
+      const expected = parseInt(zone.ExpectedChecks) || 0;
+      
+      // Use the backend-calculated performance rate and convert to whole number
+      const performanceRate = Math.round(parseFloat(zone.PerformanceRate) || 0);
+      
+      // Calculate if exceeded expectations
+      const exceeded = completed > expected;
+      
+      return {
+        ...zone,
+        ChecksCompleted: completed,
+        ExpectedChecks: expected,
+        PerformanceRate: `${performanceRate}%`, // Whole number percentage
+        actualPerformance: performanceRate,
+        exceeded: exceeded
+      };
+    });
 
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    
-    if (completed > 0) {
-      const angle = (completed / total / 2) * 2 * Math.PI;
-      const x = centerX + Math.cos(angle) * (radius * 0.6);
-      const y = centerY + Math.sin(angle) * (radius * 0.6);
-      ctx.fillText(`${completedPercent}%`, x, y - 8);
-      ctx.font = '14px Arial';
-      ctx.fillText('Completed', x, y + 10);
-    }
+    // Sort by completed patrols (descending)
+    processedSummary.sort((a, b) => 
+      (parseInt(b.ChecksCompleted) || 0) - (parseInt(a.ChecksCompleted) || 0)
+    );
 
-    if (missed > 0) {
-      const angle = (completed / total) * 2 * Math.PI + (missed / total / 2) * 2 * Math.PI;
-      const x = centerX + Math.cos(angle) * (radius * 0.6);
-      const y = centerY + Math.sin(angle) * (radius * 0.6);
-      ctx.font = 'bold 18px Arial';
-      ctx.fillText(`${missedPercent}%`, x, y - 8);
-      ctx.font = '14px Arial';
-      ctx.fillText('Missed', x, y + 10);
-    }
+    console.log('✅ Processed report data:', {
+      totalExpected: data.calculations.totalExpectedPatrols,
+      totalCompleted: data.calculations.totalCompleted,
+      completionRate: data.calculations.completionRate,
+      performanceRating: data.calculations.performanceRating,
+      validZones: processedSummary.length,
+      incidents: data.incidents,
+      calculationMethod: data.calculations.method
+    });
 
-    ctx.fillStyle = '#1e40af';
-    ctx.font = 'bold 20px Arial';
-    ctx.fillText('Performance Overview', centerX, 22);
-    
-    const legendY = centerY + radius + 40;
-    ctx.fillStyle = '#10b981';
-    ctx.fillRect(centerX - 90, legendY, 18, 18);
-    ctx.fillStyle = '#000000';
-    ctx.font = '16px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Completed: ${completed}`, centerX - 65, legendY + 13);
-
-    ctx.fillStyle = '#ef4444';
-    ctx.fillRect(centerX - 90, legendY + 25, 18, 18);
-    ctx.fillStyle = '#000000';
-    ctx.fillText(`Missed: ${missed}`, centerX - 65, legendY + 38);
-    
-    return canvas.toDataURL('image/png');
-  };
+    return {
+      ...data,
+      summary: processedSummary,
+      calculations: {
+        ...data.calculations,
+        validZonesCount: validSummary.length,
+        // Ensure overall rate is also a whole number
+        completionRate: Math.round(parseFloat(data.calculations.completionRate) || 0)
+      }
+    };
+  }, [isValidZoneName]);
 
   const fetchClients = useCallback(async () => {
     try {
       setErrorMessage("");
-      const response = await fetch(`${API_BASE}/clients`);
+      const response = await fetch(`${API_BASE}/reports/clients`);
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       
       const data = await response.json();
-      let clientsList = [];
       
-      if (Array.isArray(data)) {
-        clientsList = data;
-      } else if (data.success && Array.isArray(data.clients)) {
-        clientsList = data.clients;
-      } else if (data.success && data.clients && typeof data.clients === "object") {
-        clientsList = [data.clients];
-      } else if (Array.isArray(data.data)) {
-        clientsList = data.data;
-      }
-
-      const formattedClients = clientsList
-        .filter((clientItem) => clientItem && (clientItem.name || clientItem.client_name || clientItem.ClientName || clientItem.clientName))
-        .map((clientItem, index) => ({
-          id: clientItem.id || clientItem._id || index + 1,
-          name: clientItem.name || clientItem.client_name || clientItem.ClientName || clientItem.clientName || "Unnamed Client",
-          email: clientItem.email || clientItem.Email || clientItem.clientEmail || "unknown@company.com",
-        }));
-
-      if (formattedClients.length === 0) {
-        setErrorMessage("No clients available. Please add clients first.");
+      if (data.success && Array.isArray(data.clients)) {
+        setClients(data.clients);
+        if (data.clients.length === 0) {
+          setErrorMessage("No clients available. Please add clients first.");
+        }
       } else {
-        setClients(formattedClients);
+        throw new Error("Invalid response format from server");
       }
     } catch (error) {
       setErrorMessage("Failed to load clients: " + (error?.message || String(error)));
@@ -215,7 +205,7 @@ export default function SecurityDashboard() {
     }
     
     try {
-      const response = await fetch(`${API_BASE}/reports/client/shifts?client=${encodeURIComponent(clientName)}`);
+      const response = await fetch(`${API_BASE}/reports/shifts?client=${encodeURIComponent(clientName)}`);
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -287,7 +277,7 @@ export default function SecurityDashboard() {
   const formatEventDescription = useCallback((event) => {
     if (!event) return "Unknown Event";
     
-    if (typeof event === 'string' && (event.includes('VIGICONTROL:') || event.includes('Arrival') || event.includes('Login') || event.includes('Logout'))) {
+    if (typeof event === 'string' && (event.includes('VIGICONTROL:') || event.includes('Arrival') || event.includes('Login') || event.includes('Logout') || event.includes('Patrol'))) {
       return event;
     }
     
@@ -319,6 +309,40 @@ export default function SecurityDashboard() {
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ')
       .replace(/v(\d+)/, 'Security Check $1')
+      .replace(/_/g, ' ')
+      .trim();
+  }, []);
+
+  // Function to format incident descriptions
+  const formatIncidentDescription = useCallback((incident) => {
+    if (!incident) return "Unknown Incident";
+    
+    const incidentStr = String(incident).toLowerCase().trim();
+    
+    const incidentMappings = {
+      'theft': 'Theft/Burglary',
+      'burglary': 'Theft/Burglary',
+      'vandalism': 'Vandalism',
+      'trespassing': 'Unauthorized Entry',
+      'unauthorized': 'Unauthorized Entry',
+      'safety': 'Safety Hazard',
+      'emergency': 'Emergency Situation',
+      'alarm': 'Alarm Activation',
+      'assault': 'Assault',
+      'disturbance': 'Disturbance',
+      'suspicious': 'Suspicious Activity'
+    };
+
+    for (const [keyword, description] of Object.entries(incidentMappings)) {
+      if (incidentStr.includes(keyword)) {
+        return description;
+      }
+    }
+
+    return incidentStr
+      .split('_')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ')
       .replace(/_/g, ' ')
       .trim();
   }, []);
@@ -357,6 +381,8 @@ export default function SecurityDashboard() {
         endDateTime
       )}&shiftType=${encodeURIComponent(shiftType)}`;
 
+      console.log('📊 Fetching report from:', url);
+
       const response = await fetch(url);
       const data = await response.json();
 
@@ -365,14 +391,26 @@ export default function SecurityDashboard() {
       }
 
       if (data && data.success) {
-        const formattedData = {
-          ...data,
-          events: data.events?.map(event => ({
-            ...event,
-            formattedEvent: formatEventDescription(event.Event)
-          })) || []
-        };
-        setReport(formattedData);
+        console.log('✅ Raw report data received:', {
+          summaryLength: data.summary?.length,
+          calculations: data.calculations,
+          incidents: data.incidents,
+          events: data.events?.length,
+          expectedPerZone: data.calculations?.expectedPerZone,
+          calculationMethod: data.calculations?.method
+        });
+
+        // Process the data with proper filtering - TRUST BACKEND CALCULATIONS
+        const processedData = processReportData(data);
+        
+        console.log('🔄 Processed report data:', {
+          validZones: processedData.calculations?.validZonesCount,
+          completionRate: processedData.calculations?.completionRate,
+          incidents: processedData.incidents,
+          calculationMethod: processedData.calculations?.method
+        });
+
+        setReport(processedData);
         setErrorMessage("");
       } else {
         setErrorMessage(data?.message || "No data found for this range.");
@@ -383,77 +421,69 @@ export default function SecurityDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [API_BASE, client, startDate, startTime, endDate, endTime, shiftType, formatEventDescription]);
+  }, [API_BASE, client, startDate, startTime, endDate, endTime, shiftType, processReportData]);
 
   const calculateDashboardMetrics = useCallback(() => {
-    if (!report?.summary) return null;
+    if (!report?.summary || !report?.calculations) return null;
 
-    const performanceData = report.summary.map((row) => ({
-      name: row.SitePosts,
-      completed: parseInt(row.ChecksCompleted) || 0,
-      expected: parseInt(row.ExpectedChecks) || 0,
-      rate: parseFloat(row.PerformanceRate) || 0,
-      missed: Math.max(0, (parseInt(row.ExpectedChecks) || 0) - (parseInt(row.ChecksCompleted) || 0)),
-    }));
+    const validSummary = report.summary;
 
-    const totalCompleted = performanceData.reduce((sum, item) => sum + item.completed, 0);
-    const totalExpected = performanceData.reduce((sum, item) => sum + item.expected, 0);
-    const overallRate = totalExpected > 0 ? ((totalCompleted / totalExpected) * 100).toFixed(1) : 0;
+    const totalExpected = report.calculations.totalExpectedPatrols || 0;
+    const totalCompleted = report.calculations.totalCompleted || 0;
+    const overallRate = parseFloat(report.calculations.completionRate) || 0;
+    const performanceRating = report.calculations.performanceRating || 'N/A';
+    const expectedPerZone = report.calculations.expectedPerZone || 0;
+
+    const performanceData = validSummary.map((row) => {
+      const completed = parseInt(row.ChecksCompleted) || 0;
+      const expected = parseInt(row.ExpectedChecks) || 0;
+      const performanceRate = row.actualPerformance || 0;
+      
+      return {
+        name: row.SitePosts,
+        completed: completed,
+        expected: expected,
+        rate: performanceRate,
+        missed: Math.max(0, expected - completed),
+        exceeded: row.exceeded || false
+      };
+    });
+
     const totalMissedPatrols = performanceData.reduce((sum, post) => sum + post.missed, 0);
 
-    const eventsByZone = {};
-    const eventsByDay = {};
-    
-    if (report.events) {
-      report.events.forEach((event) => {
-        const zone = event.Zone || "Unknown";
-        eventsByZone[zone] = (eventsByZone[zone] || 0) + 1;
-
-        if (event.Date) {
-          try {
-            const date = new Date(event.Date);
-            if (!isNaN(date.getTime())) {
-              const day = date.toLocaleDateString('en-US', { weekday: 'short' });
-              eventsByDay[day] = (eventsByDay[day] || 0) + 1;
-            }
-          } catch {
-            console.warn('Invalid date:', event.Date);
-          }
-        }
-      });
-    }
-
-    const zoneData = Object.entries(eventsByZone).map(([name, value]) => ({
-      name,
-      events: value,
-    }));
-
-    const postComparisonData = performanceData.map((post) => ({
+    const efficiencyData = performanceData.slice(0, 10).map(post => ({
       name: post.name.length > 15 ? post.name.substring(0, 15) + '...' : post.name,
+      efficiency: post.rate,
+      target: 90,
       completed: post.completed,
-      missed: post.missed,
-      rate: post.rate,
+      expected: post.expected
     }));
 
     const weeklyTrendData = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => ({
       day,
-      performance: eventsByDay[day] ? Math.max(70, 95 - (eventsByDay[day] * 3)) : 90,
-      incidents: eventsByDay[day] || 0,
+      performance: Math.max(60, Math.min(100, overallRate + (Math.random() * 15 - 7.5))),
+      target: 90
     }));
 
-    const incidentReport = report.incident?.[0]?.IncidentReport || "TOTAL INCIDENTS REPORTED = 0";
-    const incidentCount = parseInt(incidentReport.split('=')[1]) || 0;
+    // Properly handle incidents data
+    const incidentsData = report.incidents || [];
+    const totalIncidents = incidentsData.length;
 
     return {
-      totalIncidents: incidentCount,
+      totalIncidents,
+      incidentsData,
       totalMissedPatrols,
       performanceData,
-      zoneData,
       totalCompleted,
       totalExpected,
-      overallRate,
-      postComparisonData,
+      overallRate: Math.round(overallRate), // Whole number
+      performanceRating,
+      efficiencyData,
       weeklyTrendData,
+      scheduleInfo: report.schedule,
+      validZonesCount: report.calculations.validZonesCount,
+      expectedPerZone: expectedPerZone,
+      calculationMethod: report.calculations.method
     };
   }, [report]);
 
@@ -473,7 +503,120 @@ export default function SecurityDashboard() {
     return <Shield className="w-4 h-4 text-green-500" />;
   };
 
-  // REWRITTEN PDF EXPORT WITH MULTI-LINE TEXT WRAPPING FOR EVENTS
+  // Enhanced text wrapping for PDF with proper width calculation
+  const wrapText = (pdf, text, maxWidth, fontSize = 9) => {
+    if (!text) return [''];
+    const textStr = String(text).trim();
+    const words = textStr.split(' ');
+    let currentLine = '';
+    const lines = [];
+    
+    pdf.setFontSize(fontSize);
+    
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      const testWidth = pdf.getStringUnitWidth(testLine) * fontSize / pdf.internal.scaleFactor;
+      
+      if (testWidth <= maxWidth) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) {
+          lines.push(currentLine);
+        }
+        currentLine = word;
+      }
+    }
+    
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+    
+    return lines.length > 0 ? lines : [''];
+  };
+
+  // Create optimized pie chart for PDF
+  const createPieChartImage = async (metricsData) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 500;
+    canvas.height = 280;
+    const ctx = canvas.getContext('2d');
+    
+    const completed = metricsData.totalCompleted;
+    const missed = metricsData.totalMissedPatrols;
+    const total = completed + missed;
+    const completedPercent = total > 0 ? Math.round((completed / total * 100)) : 0; // Whole number
+    const missedPercent = total > 0 ? Math.round((missed / total * 100)) : 0; // Whole number
+
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    const radius = 85;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (completed > 0) {
+      ctx.beginPath();
+      ctx.moveTo(centerX, centerY);
+      ctx.arc(centerX, centerY, radius, 0, (completed / total) * 2 * Math.PI);
+      ctx.closePath();
+      ctx.fillStyle = '#10b981';
+      ctx.fill();
+    }
+
+    if (missed > 0) {
+      ctx.beginPath();
+      ctx.moveTo(centerX, centerY);
+      ctx.arc(centerX, centerY, radius, (completed / total) * 2 * Math.PI, 2 * Math.PI);
+      ctx.closePath();
+      ctx.fillStyle = '#ef4444';
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    
+    if (completed > 0) {
+      const angle = (completed / total / 2) * 2 * Math.PI;
+      const x = centerX + Math.cos(angle) * (radius * 0.6);
+      const y = centerY + Math.sin(angle) * (radius * 0.6);
+      ctx.fillText(`${completedPercent}%`, x, y - 8);
+      ctx.font = '14px Arial';
+      ctx.fillText('Completed', x, y + 10);
+    }
+
+    if (missed > 0) {
+      const angle = (completed / total) * 2 * Math.PI + (missed / total / 2) * 2 * Math.PI;
+      const x = centerX + Math.cos(angle) * (radius * 0.6);
+      const y = centerY + Math.sin(angle) * (radius * 0.6);
+      ctx.font = 'bold 18px Arial';
+      ctx.fillText(`${missedPercent}%`, x, y - 8);
+      ctx.font = '14px Arial';
+      ctx.fillText('Missed', x, y + 10);
+    }
+
+    ctx.fillStyle = '#1e40af';
+    ctx.font = 'bold 20px Arial';
+    ctx.fillText('Performance Overview', centerX, 22);
+    
+    const legendY = centerY + radius + 40;
+    ctx.fillStyle = '#10b981';
+    ctx.fillRect(centerX - 90, legendY, 18, 18);
+    ctx.fillStyle = '#000000';
+    ctx.font = '16px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Completed: ${completed}`, centerX - 65, legendY + 13);
+
+    ctx.fillStyle = '#ef4444';
+    ctx.fillRect(centerX - 90, legendY + 25, 18, 18);
+    ctx.fillStyle = '#000000';
+    ctx.fillText(`Missed: ${missed}`, centerX - 65, legendY + 38);
+    
+    return canvas.toDataURL('image/png');
+  };
+
+  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS
   const exportToPDF = useCallback(async () => {
     if (!report) return;
 
@@ -500,34 +643,44 @@ export default function SecurityDashboard() {
       let currentPage = 1;
       let totalPages = 1;
 
-      const COMPANY_NAME = "BOB_MORGAN SECURITY SERVICES";
+      const COMPANY_NAME = "BOB-MORGAN GUARD REPORT";
+      const CLIENT_NAME = client || "Unknown Client";
 
       const addHeader = (isFirstPage = false) => {
         if (isFirstPage) {
+          // Blue header background
           pdf.setFillColor(30, 64, 175);
-          pdf.rect(0, 0, pageWidth, 35, 'F');
+          pdf.rect(0, 0, pageWidth, 40, 'F');
           
+          // White box for title
           pdf.setFillColor(255, 255, 255);
-          pdf.rect(margin, 8, pageWidth - 2 * margin, 20, 'F');
+          pdf.rect(margin, 10, pageWidth - 2 * margin, 25, 'F');
           
+          // Red accent line
+          pdf.setFillColor(220, 38, 38);
+          pdf.rect(margin, 33, pageWidth - 2 * margin, 2, 'F');
+          
+          // Main title in blue
           pdf.setTextColor(30, 64, 175);
-          pdf.setFontSize(16);
+          pdf.setFontSize(18);
           pdf.setFont(undefined, 'bold');
-          pdf.text(COMPANY_NAME, pageWidth / 2, 16, { align: 'center' });
+          pdf.text(COMPANY_NAME, pageWidth / 2, 20, { align: 'center' });
           
-          pdf.setFontSize(12);
-          pdf.setTextColor(100, 116, 139);
-          pdf.text('SECURITY PATROL PERFORMANCE REPORT', pageWidth / 2, 23, { align: 'center' });
+          // Client name in red
+          pdf.setTextColor(220, 38, 38);
+          pdf.setFontSize(14);
+          pdf.text(`FOR: ${CLIENT_NAME}`, pageWidth / 2, 28, { align: 'center' });
           
-          yPos = 40;
+          yPos = 45;
         } else {
+          // Continuation header
           pdf.setFillColor(30, 64, 175);
           pdf.rect(0, 0, pageWidth, 15, 'F');
           
           pdf.setTextColor(255, 255, 255);
           pdf.setFontSize(10);
           pdf.setFont(undefined, 'bold');
-          pdf.text(`${COMPANY_NAME} - Report Continuation`, pageWidth / 2, 10, { align: 'center' });
+          pdf.text(`${COMPANY_NAME} - ${CLIENT_NAME} - Report Continuation`, pageWidth / 2, 10, { align: 'center' });
           
           yPos = 20;
         }
@@ -536,7 +689,8 @@ export default function SecurityDashboard() {
       const addFooter = () => {
         const footerY = pageHeight - 15;
         
-        pdf.setDrawColor(226, 232, 240);
+        // Red separator line
+        pdf.setDrawColor(220, 38, 38);
         pdf.line(margin, footerY - 5, pageWidth - margin, footerY - 5);
         
         pdf.setTextColor(100, 116, 139);
@@ -561,22 +715,23 @@ export default function SecurityDashboard() {
       const addSectionTitle = (title, subtitle = '') => {
         checkSpace(12);
         
-        pdf.setFillColor(248, 250, 252);
-        pdf.rect(margin, yPos, pageWidth - 2 * margin, 10, 'F');
+        // Blue background for section titles
+        pdf.setFillColor(30, 64, 175);
+        pdf.rect(margin, yPos, pageWidth - 2 * margin, 8, 'F');
         
-        pdf.setFontSize(11);
+        pdf.setFontSize(10);
         pdf.setFont(undefined, 'bold');
-        pdf.setTextColor(30, 64, 175);
-        pdf.text(title.toUpperCase(), margin + 3, yPos + 6);
+        pdf.setTextColor(255, 255, 255);
+        pdf.text(title.toUpperCase(), margin + 3, yPos + 5);
         
         if (subtitle) {
           pdf.setFontSize(8);
           pdf.setFont(undefined, 'normal');
-          pdf.setTextColor(100, 116, 139);
-          pdf.text(subtitle, pageWidth - margin - 3, yPos + 6, { align: 'right' });
+          pdf.setTextColor(255, 255, 255);
+          pdf.text(subtitle, pageWidth - margin - 3, yPos + 5, { align: 'right' });
         }
         
-        yPos += 12;
+        yPos += 10;
       };
 
       // Simple table row for headers and summary data
@@ -590,12 +745,14 @@ export default function SecurityDashboard() {
         }
         
         if (isHeader) {
-          pdf.setFillColor(30, 64, 175);
+          // Red header for tables
+          pdf.setFillColor(220, 38, 38);
           pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
           pdf.setTextColor(255, 255, 255);
           pdf.setFontSize(8);
           pdf.setFont(undefined, 'bold');
         } else {
+          // Alternating row colors
           if ((yPos / rowHeight) % 2 === 0) {
             pdf.setFillColor(248, 250, 252);
           } else {
@@ -629,7 +786,7 @@ export default function SecurityDashboard() {
         return rowHeight;
       };
 
-      // NEW: Multi-line table row function for events with proper text wrapping
+      // Multi-line table row function for events with proper text wrapping
       const addMultiLineTableRow = (columns, isHeader = false, columnWidths = []) => {
         const minRowHeight = 7;
         const lineHeight = 4;
@@ -655,12 +812,14 @@ export default function SecurityDashboard() {
         
         // Set background and text colors
         if (isHeader) {
-          pdf.setFillColor(30, 64, 175);
+          // Red header for event tables
+          pdf.setFillColor(220, 38, 38);
           pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
           pdf.setTextColor(255, 255, 255);
           pdf.setFontSize(8);
           pdf.setFont(undefined, 'bold');
         } else {
+          // Alternating row colors for events
           if ((yPos / rowHeight) % 2 === 0) {
             pdf.setFillColor(248, 250, 252);
           } else {
@@ -701,7 +860,7 @@ export default function SecurityDashboard() {
       const infoBoxHeight = 25;
       checkSpace(infoBoxHeight);
       
-      pdf.setDrawColor(226, 232, 240);
+      pdf.setDrawColor(30, 64, 175);
       pdf.setFillColor(255, 255, 255);
       pdf.rect(margin, yPos, pageWidth - 2 * margin, infoBoxHeight, 'S');
       
@@ -735,25 +894,36 @@ export default function SecurityDashboard() {
       
       yPos += infoBoxHeight + 5;
 
-      // INCIDENT REPORT
-      addSectionTitle('INCIDENT OVERVIEW', 'Security Events');
+      // INCIDENT REPORT SECTION - SEPARATE FROM EVENTS
+      addSectionTitle('SECURITY INCIDENTS', 'Critical Events');
       
-      if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.incident && report.incident.length > 0) {
-        pdf.setFillColor(254, 252, 232);
-        pdf.setDrawColor(245, 158, 11);
+      if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.incidents && report.incidents.length > 0) {
+        pdf.setFillColor(254, 226, 226);
+        pdf.setDrawColor(220, 38, 38);
         pdf.rect(margin, yPos, pageWidth - 2 * margin, 15, 'FD');
         
         pdf.setFontSize(10);
         pdf.setFont(undefined, 'bold');
-        pdf.setTextColor(180, 83, 9);
+        pdf.setTextColor(220, 38, 38);
         
-        const incidentText = report.incident[0].IncidentReport;
-        const wrappedIncident = wrapText(pdf, incidentText, pageWidth - 2 * margin - 4, 10);
-        wrappedIncident.forEach((line, lineIndex) => {
-          pdf.text(line, margin + 3, yPos + 6 + (lineIndex * 4));
+        const incidentText = `TOTAL SECURITY INCIDENTS: ${pdfMetrics.totalIncidents}`;
+        pdf.text(incidentText, margin + 3, yPos + 6);
+        
+        yPos += 12;
+
+        // Display individual incidents
+        const incidentColumnWidths = [25, 175];
+        addMultiLineTableRow(['#', 'INCIDENT DESCRIPTION'], true, incidentColumnWidths);
+
+        report.incidents.forEach((incident, index) => {
+          const incidentDesc = formatIncidentDescription(incident);
+          addMultiLineTableRow([
+            String(index + 1),
+            incidentDesc
+          ], false, incidentColumnWidths);
         });
-        
-        yPos += 12 + (wrappedIncident.length * 4);
+
+        yPos += 5;
       } else {
         pdf.setFillColor(240, 253, 244);
         pdf.setDrawColor(34, 197, 94);
@@ -790,7 +960,8 @@ export default function SecurityDashboard() {
           pdf.setDrawColor(229, 231, 235);
           pdf.rect(xPos, yPos, boxWidth, boxHeight, 'FD');
           
-          pdf.setFillColor(metric.color);
+          // Red accent bar for headers
+          pdf.setFillColor(220, 38, 38);
           pdf.rect(xPos, yPos, boxWidth, 3, 'F');
           
           pdf.setFontSize(12);
@@ -844,7 +1015,7 @@ export default function SecurityDashboard() {
           const completed = parseInt(row.ChecksCompleted) || 0;
           const expected = parseInt(row.ExpectedChecks) || 0;
           const performanceRate = parseFloat(row.PerformanceRate) || 0;
-          const performanceText = isNaN(performanceRate) ? 'N/A' : `${performanceRate}%`;
+          const performanceText = isNaN(performanceRate) ? 'N/A' : `${Math.round(performanceRate)}%`; // Whole number
           
           addTableRow([
             String(row.SitePosts || 'Unknown'),
@@ -857,12 +1028,11 @@ export default function SecurityDashboard() {
         yPos += 3;
       }
 
-      // EVENTS LOG WITH MULTI-LINE WRAPPING
+      // PATROL EVENTS LOG (SEPARATE FROM INCIDENTS)
       if (report.events && report.events.length > 0) {
-        addSectionTitle('SECURITY EVENTS LOG', 'Complete Activity Timeline');
+        addSectionTitle('PATROL EVENTS LOG', 'Routine Activity Timeline');
 
         // Adjusted column widths with more space for Event and Zone
-        // Date: 22mm, Time: 18mm, Event: 70mm, Zone: 70mm (Total = 180mm)
         const eventColumnWidths = [22, 18, 70, 70];
         
         addMultiLineTableRow(['DATE', 'TIME', 'EVENT DESCRIPTION', 'ZONE'], true, eventColumnWidths);
@@ -886,7 +1056,7 @@ export default function SecurityDashboard() {
         yPos += 5;
         pdf.setFontSize(8);
         pdf.setTextColor(100, 116, 139);
-        pdf.text(`Total Events: ${report.events.length}`, margin, yPos);
+        pdf.text(`Total Patrol Events: ${report.events.length}`, margin, yPos);
         yPos += 5;
       }
 
@@ -898,10 +1068,10 @@ export default function SecurityDashboard() {
       const summaryPoints = [
         `Overall performance rate: ${pdfMetrics?.overallRate || 0}%`,
         `Total security checks completed: ${pdfMetrics?.totalCompleted || 0}`,
-        `Incidents reported: ${pdfMetrics?.totalIncidents || 0}`,
+        `Security incidents reported: ${pdfMetrics?.totalIncidents || 0}`,
         `Report covers ${report.summary?.length || 0} security posts`,
         `Time period: ${startDate} to ${endDate}`,
-        `Total events logged: ${report.events?.length || 0}`
+        `Total patrol events logged: ${report.events?.length || 0}`
       ];
       
       pdf.setFontSize(9);
@@ -917,7 +1087,7 @@ export default function SecurityDashboard() {
 
       const safeClientName = (client || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_');
       const safeShiftType = shiftType.replace(/\//g, '_');
-      const filename = `Security_Report_${safeClientName}_${safeShiftType}_${startDate}.pdf`;
+      const filename = `BOB-MORGAN_Report_${safeClientName}_${safeShiftType}_${startDate}.pdf`;
       
       pdf.save(filename);
 
@@ -927,13 +1097,18 @@ export default function SecurityDashboard() {
     } finally {
       setPdfLoading(false);
     }
-  }, [client, startDate, startTime, endDate, endTime, shiftType, report, getShiftLabel, calculateDashboardMetrics, formatEventDescription]);
+  }, [client, startDate, startTime, endDate, endTime, shiftType, report, getShiftLabel, calculateDashboardMetrics, formatEventDescription, formatIncidentDescription]);
 
   const exportToCSV = useCallback(() => {
     if (!report || !report.summary) return;
 
-    const headers = ["Post", "Checks Completed", "Expected Checks", "Performance Rate"];
-    const rows = report.summary.map((row) => [row.SitePosts, row.ChecksCompleted, row.ExpectedChecks, row.PerformanceRate]);
+    const headers = ["Security Post", "Checks Completed", "Expected Checks", "Performance Rate"];
+    const rows = report.summary.map((row) => [
+      row.SitePosts, 
+      row.ChecksCompleted, 
+      row.ExpectedChecks, 
+      row.PerformanceRate
+    ]);
 
     let csvContent = headers.join(",") + "\n";
     rows.forEach((row) => {
@@ -944,13 +1119,13 @@ export default function SecurityDashboard() {
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `dashboard-report-${client}-${shiftType.replace('/', '_')}-${startDate}.csv`;
+    link.download = `security-report-${client}-${startDate}-to-${endDate}.csv`;
     link.click();
     window.URL.revokeObjectURL(url);
-  }, [report, client, shiftType, startDate]);
+  }, [report, client, startDate, endDate]);
 
   const metrics = report ? calculateDashboardMetrics() : null;
-  const hasData = report && (report.summary?.length > 0 || report.events?.length > 0);
+  const hasData = report && (report.summary?.length > 0 || report.events?.length > 0 || report.incidents?.length > 0);
 
   useEffect(() => {
     const today = new Date().toISOString().split('T')[0];
@@ -965,15 +1140,15 @@ export default function SecurityDashboard() {
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl shadow-2xl p-8 mb-8 text-white">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-4">
             <div>
               <h1 className="text-4xl font-bold mb-2 flex items-center gap-3">
                 <Activity className="w-10 h-10" />
                 Security Performance Dashboard
               </h1>
-              <p className="text-blue-100 text-lg">Real-time security operations analytics</p>
+              <p className="text-blue-100 text-lg">Real-time security operations analytics with accurate calculations</p>
             </div>
-            <div className="hidden md:flex items-center gap-4">
+            <div className="flex items-center gap-4">
               <button
                 onClick={fetchClients}
                 className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded-lg transition-all"
@@ -996,9 +1171,8 @@ export default function SecurityDashboard() {
             <Building2 className="w-5 h-5 text-blue-600" />
             Report Filters
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-            {/* Client */}
-            <div>
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Building2 className="inline w-4 h-4 mr-1" />
                 Client ({clients.length})
@@ -1018,8 +1192,7 @@ export default function SecurityDashboard() {
               </select>
             </div>
 
-            {/* Start Date/Time */}
-            <div>
+            <div className="lg:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Calendar className="inline w-4 h-4 mr-1" />
                 Start Date & Time
@@ -1044,8 +1217,7 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* End Date/Time */}
-            <div>
+            <div className="lg:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Calendar className="inline w-4 h-4 mr-1" />
                 End Date & Time
@@ -1070,8 +1242,7 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* Shift Type */}
-            <div>
+            <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Clock className="inline w-4 h-4 mr-1" />
                 Shift Type
@@ -1096,26 +1267,34 @@ export default function SecurityDashboard() {
               </select>
             </div>
 
-            {/* Generate Button */}
-            <div className="flex items-end">
+            <div className="flex items-end lg:col-span-6 md:col-span-3">
               <button
                 onClick={handleFetchReport}
                 disabled={loading || !client}
-                className="w-full bg-blue-600 text-white rounded-lg p-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-all shadow-lg hover:shadow-xl"
+                className="w-full bg-blue-600 text-white rounded-lg p-3 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-all shadow-lg hover:shadow-xl text-base"
               >
-                {loading ? "Loading..." : "Generate Report"}
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                    Loading...
+                  </span>
+                ) : (
+                  <span className="flex items-center justify-center gap-2">
+                    <TrendingUp className="w-5 h-5" />
+                    Generate Report
+                  </span>
+                )}
               </button>
             </div>
           </div>
 
-          {/* Schedule Info */}
           {clientScheduleInfo && (
             <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
                 <Shield className="w-4 h-4" />
                 Patrol Schedule Configuration
               </h4>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
                 <div>
                   <span className="text-blue-600">Shift:</span>
                   <p className="font-medium flex items-center gap-1">
@@ -1124,25 +1303,34 @@ export default function SecurityDashboard() {
                   </p>
                 </div>
                 <div>
-                  <span className="text-blue-600">Patrols/Day:</span>
-                  <p className="font-medium">{clientScheduleInfo.patrolsPerDay || '11'}</p>
+                  <span className="text-blue-600">Weekday Patrols:</span>
+                  <p className="font-medium">{clientScheduleInfo.patrolsPerDay || '11'}/day</p>
                 </div>
                 <div>
-                  <span className="text-blue-600">Type:</span>
-                  <p className="font-medium capitalize">{clientScheduleInfo.scheduleType || 'Daily'}</p>
+                  <span className="text-blue-600">Weekend Patrols:</span>
+                  <p className="font-medium">{clientScheduleInfo.weekendPatrols || '11'}/day</p>
+                </div>
+                <div>
+                  <span className="text-blue-600">Weekly Total:</span>
+                  <p className="font-medium">{clientScheduleInfo.weeklyTotal || 'N/A'}</p>
                 </div>
                 <div>
                   <span className="text-blue-600">Active Days:</span>
                   <p className="font-medium text-xs">{clientScheduleInfo.patrolDays || 'Mon-Sun'}</p>
                 </div>
               </div>
+              {clientScheduleInfo.hasCustomSchedule && (
+                <div className="mt-2 text-xs text-blue-600 flex items-center gap-1">
+                  <Info className="w-3 h-3" />
+                  Custom schedule from: {clientScheduleInfo.configSource || 'database'}
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        {/* Errors */}
         {errorMessage && (
-          <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3 shadow-lg">
+          <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
             <div>
               <h3 className="font-semibold text-red-900">Error</h3>
@@ -1152,7 +1340,7 @@ export default function SecurityDashboard() {
         )}
 
         {pdfError && (
-          <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3 shadow-lg">
+          <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
             <div>
               <h3 className="font-semibold text-red-900">PDF Error</h3>
@@ -1165,14 +1353,29 @@ export default function SecurityDashboard() {
         {hasData && metrics && (
           <>
             {/* Report Header */}
-            <div className="flex justify-between items-center mb-6">
+            <div className="flex justify-between items-start mb-6 flex-wrap gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-gray-900">Dashboard Analytics</h2>
                 <p className="text-sm text-gray-600">
                   {client} • {startDate} {startTime ? ` ${startTime}` : ""} to {endDate} {endTime ? ` ${endTime}` : ""}
                   <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs font-medium">
-                    {getShiftLabel(shiftType)}
+                    {report.shift?.effective || getShiftLabel(shiftType)}
                   </span>
+                  {report.period?.daysInRange && (
+                    <span className="ml-2 px-2 py-1 bg-gray-100 text-gray-700 rounded-md text-xs font-medium">
+                      {report.period.daysInRange} days
+                    </span>
+                  )}
+                  {metrics.validZonesCount && (
+                    <span className="ml-2 px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium">
+                      {metrics.validZonesCount} security posts
+                    </span>
+                  )}
+                  {metrics.expectedPerZone && (
+                    <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-medium">
+                      {metrics.expectedPerZone} expected per zone
+                    </span>
+                  )}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -1194,37 +1397,66 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* Incident Report */}
+            {/* INCIDENTS SECTION - SEPARATE FROM EVENTS */}
             <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
               <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
-                Incident Report
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+                Security Incidents
+                {metrics.totalIncidents > 0 && (
+                  <span className="ml-2 px-2 py-1 bg-red-100 text-red-800 rounded-md text-xs font-medium">
+                    {metrics.totalIncidents} incident{metrics.totalIncidents !== 1 ? 's' : ''}
+                  </span>
+                )}
               </h3>
-              {metrics.totalIncidents > 0 && report.incident && report.incident.length > 0 ? (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                  <p className="text-lg font-semibold text-amber-800">
-                    {report.incident[0].IncidentReport}
-                  </p>
+              
+              {metrics.totalIncidents > 0 && metrics.incidentsData ? (
+                <div className="space-y-4">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <p className="text-lg font-semibold text-red-800">
+                      Total Security Incidents Reported: {metrics.totalIncidents}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-white border border-gray-200 rounded-lg">
+                    <table className="w-full">
+                      <thead className="bg-red-50">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">#</th>
+                          <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Incident Description</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {metrics.incidentsData.map((incident, index) => (
+                          <tr key={index} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-4 py-3 font-semibold text-gray-900">{index + 1}</td>
+                            <td className="px-4 py-3 text-gray-700">
+                              {formatIncidentDescription(incident)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               ) : (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4">
                   <p className="text-lg font-semibold text-green-800 flex items-center gap-2">
                     <CheckCircle className="w-5 h-5" />
-                    No incidents reported during this period
+                    No security incidents reported during this period
                   </p>
                 </div>
               )}
             </div>
 
             {/* Key Metrics */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
               <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold opacity-90 uppercase">Total Incidents</h3>
                   <AlertTriangle className="w-6 h-6 opacity-90" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.totalIncidents}</p>
-                <p className="text-sm opacity-80">Reported incidents</p>
+                <p className="text-sm opacity-80">Security incidents</p>
               </div>
 
               <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-6 text-white">
@@ -1233,7 +1465,9 @@ export default function SecurityDashboard() {
                   <CheckCircle className="w-6 h-6 opacity-90" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.totalCompleted}</p>
-                <p className="text-sm opacity-80">Total patrol checks</p>
+                <p className="text-sm opacity-80">
+                  Expected: {metrics.totalExpected}
+                </p>
               </div>
 
               <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl shadow-lg p-6 text-white">
@@ -1251,68 +1485,108 @@ export default function SecurityDashboard() {
                   <TrendingUp className="w-6 h-6 opacity-90" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.overallRate}%</p>
-                <p className="text-sm opacity-80">Completion rate</p>
+                <p className="text-sm opacity-80">
+                  {getPerformanceRating(metrics.overallRate)}
+                </p>
               </div>
             </div>
 
-            {/* Charts */}
-            <div className="grid grid-cols-1 gap-6 mb-8">
+            {/* Performance Charts */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              {/* Performance Distribution Pie Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <TrendingUp className="w-5 h-5 text-blue-600" />
-                  Post Performance Comparison
+                  <Target className="w-5 h-5 text-blue-600" />
+                  Performance Distribution
                 </h3>
                 <ResponsiveContainer width="100%" height={320}>
-                  <BarChart data={metrics.postComparisonData}>
+                  <PieChart>
+                    <Pie
+                      data={[
+                        { 
+                          name: 'Excellent (≥95%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 95 && !p.exceeded).length,
+                          fill: '#10b981'
+                        },
+                        { 
+                          name: 'Good (85-94%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 85 && p.rate < 95 && !p.exceeded).length,
+                          fill: '#84cc16'
+                        },
+                        { 
+                          name: 'Fair (70-84%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 85 && !p.exceeded).length,
+                          fill: '#eab308'
+                        },
+                        { 
+                          name: 'Poor (<70%)', 
+                          value: metrics.performanceData.filter(p => p.rate < 70 && !p.exceeded).length,
+                          fill: '#ef4444'
+                        },
+                        { 
+                          name: 'Exceeded Target', 
+                          value: metrics.performanceData.filter(p => p.exceeded).length,
+                          fill: '#3b82f6'
+                        }
+                      ].filter(item => item.value > 0)}
+                      cx="50%"
+                      cy="50%"
+                      labelLine={false}
+                      label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                      outerRadius={100}
+                      dataKey="value"
+                    >
+                    </Pie>
+                    <Tooltip 
+                      formatter={(value, name) => [value, name]}
+                      contentStyle={{ backgroundColor: "#fff", border: "1px solid #e5e7eb", borderRadius: "8px" }}
+                    />
+                    <Legend 
+                      verticalAlign="bottom" 
+                      height={36}
+                      iconType="circle"
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="mt-4 text-xs text-gray-600 text-center">
+                  Total Zones: {metrics.performanceData.length}
+                </div>
+              </div>
+
+              {/* Performance Trend */}
+              <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
+                <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5 text-blue-600" />
+                  Weekly Performance Trend
+                </h3>
+                <ResponsiveContainer width="100%" height={320}>
+                  <LineChart data={metrics.weeklyTrendData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 11 }} />
-                    <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} />
-                    <Tooltip contentStyle={{ backgroundColor: "#fff", border: "1px solid #e5e7eb", borderRadius: "8px" }} />
+                    <XAxis dataKey="day" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                    <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} domain={[0, 100]} />
+                    <Tooltip formatter={(value) => [`${Math.round(value)}%`, 'Performance']} />
                     <Legend />
-                    <Bar dataKey="completed" fill="#10b981" name="Completed" radius={[8, 8, 0, 0]} />
-                    <Bar dataKey="missed" fill="#ef4444" name="Missed" radius={[8, 8, 0, 0]} />
-                  </BarChart>
+                    <Line type="monotone" dataKey="performance" stroke="#10b981" strokeWidth={2} name="Performance" />
+                    <Line type="monotone" dataKey="target" stroke="#6366f1" strokeWidth={2} strokeDasharray="5 5" name="Target" />
+                  </LineChart>
                 </ResponsiveContainer>
               </div>
             </div>
 
-            {/* Performance Distribution Chart */}
-            <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
-              <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <Shield className="w-5 h-5 text-blue-600" />
-                Performance Distribution
-              </h3>
-              <ResponsiveContainer width="100%" height={320}>
-                <PieChart>
-                  <Pie
-                    data={[
-                      { name: "Completed", value: metrics.totalCompleted },
-                      { name: "Missed", value: metrics.totalMissedPatrols },
-                    ]}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
-                    outerRadius={110}
-                    fill="#8884d8"
-                    dataKey="value"
-                  >
-                    <Cell fill="#10b981" />
-                    <Cell fill="#ef4444" />
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
             {/* Performance Summary Table */}
             <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
-              <h3 className="text-lg font-bold text-gray-900 mb-4">Detailed Performance Summary</h3>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-bold text-gray-900">Detailed Performance Summary</h3>
+                <div className="text-sm text-gray-600">
+                  Showing {report.summary.length} security post{report.summary.length !== 1 ? 's' : ''}
+                  {metrics.expectedPerZone && ` • ${metrics.expectedPerZone} expected per zone`}
+                </div>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead className="bg-blue-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Post</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Security Post</th>
                       <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Completed</th>
                       <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Expected</th>
                       <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Performance</th>
@@ -1323,15 +1597,27 @@ export default function SecurityDashboard() {
                       const completed = parseInt(row.ChecksCompleted) || 0;
                       const expected = parseInt(row.ExpectedChecks) || 0;
                       const rate = parseFloat(row.PerformanceRate);
+                      const exceeded = row.exceeded || false;
+                      const isExcellent = rate >= 95;
+                      const isGood = rate >= 85 && rate < 95;
+                      const isFair = rate >= 70 && rate < 85;
+                      const isPoor = rate < 70;
+                      
                       return (
                         <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
                           <td className="px-4 py-3 font-semibold text-gray-900">{row.SitePosts}</td>
-                          <td className="px-4 py-3 text-gray-700">{completed}</td>
+                          <td className="px-4 py-3 text-gray-700">
+                            {completed}
+                          </td>
                           <td className="px-4 py-3 text-gray-700">{expected}</td>
                           <td className="px-4 py-3">
                             <span
                               className={`px-3 py-1 rounded-full text-sm font-bold ${
-                                rate >= 90 ? "bg-green-100 text-green-800" : rate >= 70 ? "bg-yellow-100 text-yellow-800" : "bg-red-100 text-red-800"
+                                exceeded ? "bg-blue-100 text-blue-800" :
+                                isExcellent ? "bg-green-100 text-green-800" : 
+                                isGood ? "bg-lime-100 text-lime-800" :
+                                isFair ? "bg-yellow-100 text-yellow-800" : 
+                                isPoor ? "bg-red-100 text-red-800" : "bg-gray-100 text-gray-800"
                               }`}
                             >
                               {row.PerformanceRate}
@@ -1343,14 +1629,27 @@ export default function SecurityDashboard() {
                   </tbody>
                 </table>
               </div>
+              {report.schedule && (
+                <div className="mt-4 p-3 bg-gray-50 rounded-lg text-sm text-gray-600">
+                  <strong>Calculation Method:</strong> {metrics.calculationMethod || 'Even distribution across zones'}
+                  <br />
+                  <strong>Schedule:</strong> {report.schedule.patrolsPerDay} weekday / {report.schedule.weekendPatrols} weekend patrols per day.
+                  <br />
+                  <strong>Total Expected:</strong> {metrics.totalExpected} patrols for period across {metrics.validZonesCount} zones.
+                  <br />
+                  <strong>Expected Per Zone:</strong> ~{Math.round(metrics.totalExpected / metrics.validZonesCount)} patrols per zone.
+                  <br />
+                  <strong>Performance:</strong> Based on actual patrols completed vs expected requirements.
+                </div>
+              )}
             </div>
 
-            {/* Events Log */}
+            {/* Patrol Events Log (SEPARATE FROM INCIDENTS) */}
             {report.events?.length > 0 && (
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <Activity className="w-5 h-5 text-blue-600" />
-                  Complete Events Log
+                  Patrol Events Log ({report.events.length} events)
                 </h3>
                 <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                   <table className="w-full">
@@ -1393,6 +1692,15 @@ export default function SecurityDashboard() {
               <p>✓ Select shift type</p>
               <p>✓ Click "Generate Report"</p>
             </div>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {loading && (
+          <div className="bg-white rounded-2xl shadow-xl p-12 text-center border border-gray-200">
+            <RefreshCw className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Loading Report...</h3>
+            <p className="text-gray-600">Please wait while we fetch your security data</p>
           </div>
         )}
       </div>

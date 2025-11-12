@@ -115,136 +115,111 @@ function getTableNames(startDate, endDate, usePartitions = true) {
 }
 
 /**
- * 📊 Fetch weekly report with dynamic patrol schedule integration
+ * 📊 Fetch weekly report - FIXED VERSION for PDF generation
  */
-export const fetchWeeklyReport = async (
-  client, 
-  startDateTime, 
-  endDateTime, 
-  shiftType = "Day/Night",
-  useMonthlyPartitions = true  // ⚙️ Toggle for partition support
-) => {
+export const fetchWeeklyReport = async (clientId, startDate, endDate) => {
   try {
+    console.log("🔍 Starting fetchWeeklyReport with:", {
+      clientId,
+      startDate,
+      endDate
+    });
+
     const pool = await poolPromise;
 
-    // 1️⃣ Get client ID and schedule configuration
-    let clientId = null;
-    let clientSchedule = null;
-    
+    // 1️⃣ Validate required parameters
+    if (!clientId) {
+      throw new Error("Client ID is required");
+    }
+
+    if (!startDate || !endDate) {
+      throw new Error("Start date and end date are required");
+    }
+
+    // Convert to Date objects if they're strings
+    const startDateTime = new Date(startDate);
+    const endDateTime = new Date(endDate);
+
+    // 2️⃣ Get client name from ID for querying
+    let clientName = null;
     try {
       const clientResult = await pool.request()
-        .input("clientName", sql.NVarChar, client)
+        .input("clientId", sql.Int, parseInt(clientId))
         .query(`
-          SELECT cue_iid AS id 
+          SELECT cue_cnombre AS name 
           FROM [_Datos].[dbo].[m_cuentas] 
-          WHERE cue_cnombre = @clientName
+          WHERE cue_iid = @clientId
         `);
       
       if (clientResult.recordset.length > 0) {
-        clientId = clientResult.recordset[0].id;
-        clientSchedule = await getClientSchedule(clientId);
+        clientName = clientResult.recordset[0].name;
+        console.log(`✅ Found client: ${clientName} (ID: ${clientId})`);
+      } else {
+        throw new Error(`Client not found with ID: ${clientId}`);
       }
+    } catch (clientError) {
+      console.error("❌ Client lookup error:", clientError);
+      throw new Error(`Failed to find client: ${clientError.message}`);
+    }
+
+    // 3️⃣ Get client schedule for expected patrols calculation
+    let clientSchedule = null;
+    try {
+      clientSchedule = await getClientSchedule(parseInt(clientId));
+      console.log(`📅 Client schedule: ${clientSchedule ? 'Found' : 'Using defaults'}`);
     } catch (scheduleError) {
       console.warn("⚠️ Could not fetch client schedule:", scheduleError.message);
     }
 
-    // 2️⃣ Determine effective shift type
-    const effectiveShiftType = clientSchedule?.shift_type 
-      ? normalizeShiftType(clientSchedule.shift_type)
-      : normalizeShiftType(shiftType);
-    
-    const timeFilter = buildTimeCondition(effectiveShiftType);
-    
-    console.log(`🔍 Fetching report for ${client}`);
-    console.log(`   Period: ${startDateTime} → ${endDateTime}`);
-    console.log(`   Shift: ${timeFilter.description} ${timeFilter.sql ? `(${timeFilter.sql.substring(0, 30)}...)` : '(no filter)'}`);
-    console.log(`   Schedule: ${clientSchedule ? 'Found' : 'Using defaults'}`);
-
-    // 3️⃣ Calculate expected patrols for performance metrics
+    // 4️⃣ Calculate expected patrols
     const totalExpectedPatrols = calculateExpectedPatrols(startDateTime, endDateTime, clientSchedule);
-    const daysInRange = dayjs(endDateTime).diff(dayjs(startDateTime), 'day') + 1;
+    console.log(`📊 Expected patrols: ${totalExpectedPatrols}`);
 
-    console.log(`   Expected Patrols (calculated): ${totalExpectedPatrols}`);
-    console.log(`   Days in Range: ${daysInRange}`);
+    // 5️⃣ Get table names for query
+    const tableNames = getTableNames(startDateTime, endDateTime, true);
+    console.log(`🗃️ Querying tables: ${tableNames.join(', ')}`);
 
-    // 4️⃣ Get table names (handles multi-month ranges)
-    const tableNames = getTableNames(startDateTime, endDateTime, useMonthlyPartitions);
-    console.log(`   Using tables: ${tableNames.join(', ')}`);
-
-    // 5️⃣ Build UNION query for multi-month support
-    const buildUnionQuery = (tables, alias = 'rec') => {
-      return tables.map(table => `SELECT * FROM ${table} AS ${alias}`).join('\n      UNION ALL\n      ');
+    // 6️⃣ Build UNION query for multi-table support
+    const buildUnionQuery = (tables) => {
+      return tables.map(table => `SELECT * FROM ${table}`).join('\n      UNION ALL\n      ');
     };
 
-    // 6️⃣ Build and execute query with DYNAMIC expected patrols
+    // 7️⃣ EXECUTE MAIN QUERY - Simplified and focused on PDF needs
     const query = `
-      DECLARE @StartDateTime DATETIME = @startDateParam;
-      DECLARE @EndDateTime DATETIME = @endDateParam;
-      DECLARE @ClientName NVARCHAR(255) = @clientParam;
-      DECLARE @TotalExpectedPatrols INT = @expectedPatrolsParam;
-
-      /* 🟥 INCIDENT SUMMARY */
+      -- Performance Summary by Post
       SELECT 
-          'TOTAL INCIDENTS REPORTED = ' + 
-          CAST(
-              ISNULL((
-                  SELECT COUNT(*) 
-                  FROM [_Datos].[dbo].[p_reporte_autoridades] AS rep
-                  INNER JOIN [_Datos].[dbo].[m_cuentas] AS cue
-                      ON rep.rep_iidcuenta = cue.cue_iid
-                  WHERE 
-                      cue.cue_cnombre = @ClientName
-                      AND rep.rep_dfechahora BETWEEN @StartDateTime AND @EndDateTime
-              ), 0)
-          AS NVARCHAR(20)) AS [IncidentReport];
-
-      /* 🟩 PATROL PERFORMANCE SUMMARY BY ZONE - USES DYNAMIC EXPECTED PATROLS */
-      SELECT 
-          zon.zon_cdescripcion AS [SitePosts],
-          CAST(COUNT(rec.rec_iid) AS NVARCHAR(20)) AS [ChecksCompleted],
-          @TotalExpectedPatrols AS [ExpectedChecks],
-          CONCAT(
-              CAST(ROUND(
-                  (CAST(COUNT(rec.rec_iid) AS FLOAT) / NULLIF(@TotalExpectedPatrols, 0)) * 100, 
-                  0
-              ) AS INT), '%'
-          ) AS [PerformanceRate]
-      FROM (
-          ${buildUnionQuery(tableNames)}
-      ) AS rec
+          zon.zon_cdescripcion AS SecurityPost,
+          COUNT(rec.rec_iid) AS Completed,
+          @TotalExpectedPatrols AS Expected,
+          CASE 
+            WHEN @TotalExpectedPatrols > 0 
+            THEN ROUND((COUNT(rec.rec_iid) * 100.0 / @TotalExpectedPatrols), 2)
+            ELSE 0 
+          END AS Performance
+      FROM (${buildUnionQuery(tableNames)}) AS rec
       INNER JOIN [_Datos].[dbo].[m_zonas] AS zon
           ON rec.rec_iidcuenta = zon.zon_iidcuenta
           AND rec.rec_czona = zon.zon_ccodigo
       INNER JOIN [_Datos].[dbo].[m_cuentas] AS cue
           ON rec.rec_iidcuenta = cue.cue_iid
       WHERE 
-          cue.cue_cnombre = @ClientName
-          AND rec.rec_tfechahora BETWEEN @StartDateTime AND @EndDateTime
-          ${timeFilter.sql}
-      GROUP BY 
-          zon.zon_cdescripcion
-      ORDER BY 
-          [SitePosts];
+          cue.cue_iid = @ClientId
+          AND rec.rec_tfechahora BETWEEN @StartDate AND @EndDate
+      GROUP BY zon.zon_cdescripcion
+      ORDER BY zon.zon_cdescripcion;
 
-      /* 🟦 CLEAN EVENT LOG */
+      -- Security Events Log
       SELECT 
-          CONVERT(VARCHAR(10), rec.rec_tfechahora, 120) AS [Date],
-          CONVERT(VARCHAR(8), rec.rec_tfechahora, 108) AS [Time],
-          CASE 
-              WHEN f.for_cdescripcion = 'VIGICONTROL: Arribo' THEN 'VIGICONTROL: Arrival'
-              WHEN f.for_cdescripcion = 'VIGICONTROL: Login' THEN 'VIGICONTROL: Login'
-              WHEN f.for_cdescripcion = 'VIGICONTROL: Logout' THEN 'VIGICONTROL: Logout'
-              ELSE COALESCE(
-                  NULLIF(f.for_cdescripcion, ''), 
-                  NULLIF(rec.rec_cContenido, ''), 
-                  rec.rec_calarma, 
-                  'Unknown Event'
-              )
-          END AS [Event],
-          COALESCE(zon.zon_cdescripcion, 'No Zone') AS [Zone]
-      FROM (
-          ${buildUnionQuery(tableNames)}
-      ) AS rec
+          CONVERT(VARCHAR(10), rec.rec_tfechahora, 120) AS Date,
+          CONVERT(VARCHAR(8), rec.rec_tfechahora, 108) AS Time,
+          COALESCE(
+              NULLIF(f.for_cdescripcion, ''), 
+              NULLIF(rec.rec_cContenido, ''), 
+              rec.rec_calarma, 
+              'No description'
+          ) AS Event,
+          COALESCE(zon.zon_cdescripcion, 'No Zone') AS Zone
+      FROM (${buildUnionQuery(tableNames)}) AS rec
       INNER JOIN [_Datos].[dbo].[m_cuentas] AS cue
           ON rec.rec_iidcuenta = cue.cue_iid
       LEFT JOIN [_Datos].[dbo].[m_zonas] AS zon
@@ -253,53 +228,107 @@ export const fetchWeeklyReport = async (
       LEFT JOIN [_Datos].[dbo].[m_formatos] AS f
           ON rec.rec_calarma = f.for_calarma
       WHERE 
-          cue.cue_cnombre = @ClientName
-          AND rec.rec_tfechahora BETWEEN @StartDateTime AND @EndDateTime
-          ${timeFilter.sql}
+          cue.cue_iid = @ClientId
+          AND rec.rec_tfechahora BETWEEN @StartDate AND @EndDate
       ORDER BY rec.rec_tfechahora DESC;
     `;
 
-    const result = await pool.request()
-      .input("startDateParam", sql.DateTime, startDateTime)
-      .input("endDateParam", sql.DateTime, endDateTime)
-      .input("clientParam", sql.NVarChar, client)
-      .input("expectedPatrolsParam", sql.Int, totalExpectedPatrols)
-      .query(query);
+    console.log("🚀 Executing database query...");
+    
+    const request = pool.request()
+      .input("ClientId", sql.Int, parseInt(clientId))
+      .input("StartDate", sql.DateTime, startDateTime)
+      .input("EndDate", sql.DateTime, endDateTime)
+      .input("TotalExpectedPatrols", sql.Int, totalExpectedPatrols);
 
-    console.log(`✅ Query executed successfully`);
-    console.log(`   Incidents: ${result.recordsets[0]?.length || 0}`);
-    console.log(`   Zones: ${result.recordsets[1]?.length || 0}`);
-    console.log(`   Events: ${result.recordsets[2]?.length || 0}`);
+    const result = await request.query(query);
 
+    // 8️⃣ Process results for PDF consumption
+    const posts = result.recordsets[0] || [];
+    const events = result.recordsets[1] || [];
+
+    console.log("✅ Query results:", {
+      postsCount: posts.length,
+      eventsCount: events.length,
+      postsSample: posts.slice(0, 2),
+      eventsSample: events.slice(0, 2)
+    });
+
+    // 9️⃣ Return data in the EXACT format expected by PDF generator
+    return {
+      posts: posts.map(post => ({
+        SecurityPost: post.SecurityPost || 'Unknown Post',
+        Completed: post.Completed || 0,
+        Expected: post.Expected || 0,
+        Performance: post.Performance || 0
+      })),
+      events: events.map(event => ({
+        Date: event.Date || 'N/A',
+        Time: event.Time || 'N/A', 
+        Event: event.Event || 'No description',
+        Zone: event.Zone || 'No Zone'
+      })),
+      metadata: {
+        clientId: parseInt(clientId),
+        clientName: clientName,
+        startDate: startDateTime,
+        endDate: endDateTime,
+        totalExpectedPatrols: totalExpectedPatrols,
+        generatedAt: new Date()
+      }
+    };
+
+  } catch (error) {
+    console.error("❌ fetchWeeklyReport Error:", error);
+    
+    // Return empty but valid structure for PDF generator
+    return {
+      posts: [],
+      events: [],
+      metadata: {
+        clientId: parseInt(clientId) || 0,
+        clientName: 'Unknown',
+        startDate: startDate,
+        endDate: endDate,
+        totalExpectedPatrols: 0,
+        generatedAt: new Date(),
+        error: error.message
+      }
+    };
+  }
+};
+
+/**
+ * 🧪 TEST FUNCTION: Direct data verification
+ */
+export const testWeeklyReportData = async (clientId, startDate, endDate) => {
+  try {
+    console.log("🧪 TESTING Weekly Report Data...");
+    
+    const data = await fetchWeeklyReport(clientId, startDate, endDate);
+    
     return {
       success: true,
-      incident: result.recordsets[0] || [],
-      summary: result.recordsets[1] || [],
-      events: result.recordsets[2] || [],
-      metadata: {
-        clientId,
-        shift: {
-          requested: shiftType,
-          effective: effectiveShiftType,
-          description: timeFilter.description
-        },
-        schedule: clientSchedule,
-        calculations: {
-          daysInRange,
-          totalExpectedPatrols,
-          hasSchedule: !!clientSchedule,
-          patrolsPerDay: clientSchedule?.patrols_per_day || 11,
-          weekendPatrols: clientSchedule?.weekend_patrols_per_day ?? null
-        },
-        tables: tableNames
+      data: {
+        postsCount: data.posts.length,
+        eventsCount: data.events.length,
+        posts: data.posts,
+        events: data.events,
+        metadata: data.metadata
+      },
+      diagnostics: {
+        clientIdType: typeof clientId,
+        startDateType: typeof startDate, 
+        endDateType: typeof endDate,
+        hasPosts: Array.isArray(data.posts),
+        hasEvents: Array.isArray(data.events)
       }
     };
   } catch (error) {
-    console.error("❌ Database Query Error:", error);
+    console.error("❌ Test failed:", error);
     return {
       success: false,
-      message: "Database query failed.",
-      sqlMessage: error.message,
+      error: error.message
     };
   }
 };

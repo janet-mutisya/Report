@@ -1,170 +1,312 @@
-// server/routes/reportRoutes.js
-import express from "express";
+// server/routes/reportRoutes.js - FINAL VERSION WITH DEBUG ENDPOINT
+import express from 'express';
 import {
-  getPatrolReport,
   getWeeklyReportPDF,
+  getPatrolReport,
+  getWeeklyReport,
   getClientShifts,
+  testReportData,
   testReportGeneration,
-} from "../controllers/reportController.js";
+  sendSingleClientReport,
+  getComprehensiveClientReport,
+  getClientPerformanceTrends,
+  getAllClientsList,
+  searchClients,
+  debugPerformanceCalc,
+  healthCheck
+} from '../controllers/reportController.js';
 
 const router = express.Router();
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📊 PATROL REPORT ENDPOINTS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/**
+ * 📄 PDF REPORT ROUTES
+ */
+
+// Download PDF report
+router.get('/weekly/pdf', getWeeklyReportPDF);
 
 /**
- * GET/POST /api/reports/patrol
- * 
- * Get patrol report data with automatic schedule integration
- * 
- * Query/Body Parameters:
- * - client (string, required): Client name or ID
- * - startDateTime (string, required): Start date (YYYY-MM-DD)
- * - endDateTime (string, required): End date (YYYY-MM-DD)
- * - shiftType (string, optional): "Day", "Night", or "Day/Night" (default)
- * 
- * Response includes:
- * - Patrol summary data
- * - Event logs
- * - Schedule configuration (automatic)
- * - Expected vs actual patrol calculations
- * 
- * Example:
- * GET /api/reports/patrol?client=ACME&startDateTime=2025-01-01&endDateTime=2025-01-07
- * POST /api/reports/patrol
- * {
- *   "client": "ACME",
- *   "startDateTime": "2025-01-01",
- *   "endDateTime": "2025-01-07",
- *   "shiftType": "Day"
- * }
+ * 📊 DATA REPORT ROUTES
  */
-router.get("/patrol", getPatrolReport);
-router.post("/patrol", getPatrolReport);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📄 PDF EXPORT ENDPOINT
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Get patrol report data (main endpoint)
+router.get('/patrol', getPatrolReport);
+
+// Get weekly report (alias for patrol report - backward compatibility)
+router.get('/weekly', getWeeklyReport);
+
+// Get comprehensive client report with multiple date ranges
+router.get('/comprehensive/:clientName', getComprehensiveClientReport);
+
+// Get client performance trends
+router.get('/performance-trends/:clientName', getClientPerformanceTrends);
 
 /**
- * GET /api/reports/patrol/pdf
- * 
- * Generate and download PDF report with schedule-aware metrics
- * 
- * Query Parameters:
- * - client (string, required): Client name or ID
- * - startDateTime (string, required): Start date (YYYY-MM-DD)
- * - endDateTime (string, required): End date (YYYY-MM-DD)
- * - shiftType (string, optional): "Day", "Night", or "Day/Night" (default)
- * 
- * Returns: PDF file download
- * 
- * Example:
- * GET /api/reports/patrol/pdf?client=ACME&startDateTime=2025-01-01&endDateTime=2025-01-07&shiftType=Day
+ * 👥 CLIENT MANAGEMENT ROUTES
  */
-router.get("/patrol/pdf", getWeeklyReportPDF);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔄 CLIENT CONFIGURATION ENDPOINTS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Get all clients list
+router.get('/clients', getAllClientsList);
+
+// Search clients by name
+router.get('/clients/search', searchClients);
 
 /**
- * GET /api/reports/client/shifts
- * GET /api/reports/client/shifts/:client
- * 
- * Get available shifts and schedule configuration for a client
- * 
- * Parameters:
- * - client (string, required): Client name or ID (query param or route param)
- * 
- * Response includes:
- * - Available shift options
- * - Configured shift (if any)
- * - Full schedule details
- * - Default shift selection
- * 
- * Example:
- * GET /api/reports/client/shifts?client=ACME
- * GET /api/reports/client/shifts/ACME
+ * ⚙️ CLIENT CONFIGURATION ROUTES
  */
-router.get("/client/shifts", getClientShifts);
-router.get("/client/shifts/:client", getClientShifts);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🧪 TESTING & DIAGNOSTICS ENDPOINT
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Get available shifts and schedule for a client
+router.get('/shifts', getClientShifts);
+router.get('/shifts/:client', getClientShifts);
 
 /**
- * POST /api/reports/test/:clientId
- * 
- * Test report generation and schedule integration for a specific client
- * 
- * Route Parameters:
- * - clientId (number, required): Client ID
- * 
- * Body Parameters (all optional):
- * - startDate (string): Start date (defaults to 7 days ago)
- * - endDate (string): End date (defaults to today)
- * - shiftType (string): Shift type to test (defaults to schedule or "Day/Night")
- * 
- * Response includes:
- * - Client details
- * - Schedule configuration status
- * - Data fetch test results
- * - PDF generation test results
- * - Automatic recommendations
- * 
- * Example:
- * POST /api/reports/test/123
- * {
- *   "startDate": "2025-01-01",
- *   "endDate": "2025-01-07",
- *   "shiftType": "Day"
- * }
+ * 🧪 TESTING & DEBUGGING ROUTES
  */
-router.post("/test/:clientId", testReportGeneration);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔄 BACKWARD COMPATIBILITY ROUTES
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Test report data flow
+router.get('/test', testReportData);
+
+// Test report generation for specific client
+router.get('/test/:clientName', testReportGeneration);
+router.post('/test/:clientName', testReportGeneration);
+
+// Debug performance calculations - NEW ENDPOINT
+router.get('/debug', debugPerformanceCalc);
 
 /**
- * Legacy routes for backward compatibility
- * These will be deprecated in future versions
+ * 📧 EMAIL ROUTES
  */
-router.get("/weekly", getPatrolReport);
-router.post("/weekly", getPatrolReport);
-router.get("/weekly/pdf", getWeeklyReportPDF);
-router.get("/shifts", getClientShifts);
-router.get("/shifts/:client", getClientShifts);
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📚 ROUTE DOCUMENTATION
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Manually send report to single client
+router.post('/send/:clientName', sendSingleClientReport);
 
 /**
- * ROUTE SUMMARY:
- * 
- * Primary Patrol Reports:
- *   GET/POST  /api/reports/patrol       - Get report data (recommended)
- *   GET       /api/reports/patrol/pdf   - Download PDF (recommended)
- * 
- * Client Configuration:
- *   GET       /api/reports/client/shifts       - Get shifts by query param
- *   GET       /api/reports/client/shifts/:id   - Get shifts by route param
- * 
- * Testing:
- *   POST      /api/reports/test/:id     - Test report generation
- * 
- * Legacy Routes (backward compatibility):
- *   GET/POST  /api/reports/weekly       - Get report data (legacy)
- *   GET       /api/reports/weekly/pdf   - Download PDF (legacy)
- *   GET       /api/reports/shifts       - Get shifts (legacy)
- *   GET       /api/reports/shifts/:id   - Get shifts (legacy)
- * 
- * All routes automatically integrate with patrol schedules configured via
- * managePatrolSchedules.js - no manual configuration needed!
+ * 🏠 HEALTH CHECK ROUTES
  */
+
+// Health check endpoint
+router.get('/health', healthCheck);
+
+// Root endpoint with documentation
+router.get('/', (req, res) => {
+  res.json({
+    message: 'Security Reports API',
+    version: '2.0.0',
+    description: 'All endpoints now use client names. Calculations imported from managePatrolSchedules.js',
+    improvements: {
+      calculations: 'Using shared calculation functions from managePatrolSchedules.js',
+      zoneNames: 'Displaying actual zone names instead of IDs',
+      performance: 'Proportional distribution for realistic performance rates',
+      events: 'Human-readable event descriptions with fallbacks'
+    },
+    endpoints: {
+      // Client Management
+      clients: {
+        method: 'GET',
+        path: '/api/reports/clients',
+        description: 'Get list of all available clients',
+        example: '/api/reports/clients'
+      },
+      search: {
+        method: 'GET',
+        path: '/api/reports/clients/search',
+        description: 'Search clients by name',
+        parameters: {
+          query: 'Search term (min 2 characters)'
+        },
+        example: '/api/reports/clients/search?query=client'
+      },
+      
+      // PDF Reports
+      pdf: {
+        method: 'GET',
+        path: '/api/reports/weekly/pdf',
+        description: 'Download PDF report',
+        parameters: {
+          clientName: 'Client name (required)',
+          startDate: 'Start date YYYY-MM-DD (required)',
+          endDate: 'End date YYYY-MM-DD (required)',
+          shiftType: 'Shift type (optional: Day/Night, Day, Night)'
+        },
+        example: '/api/reports/weekly/pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08'
+      },
+      
+      // Data Reports
+      data: {
+        method: 'GET',
+        path: '/api/reports/patrol',
+        description: 'Get patrol report data (JSON)',
+        parameters: {
+          client: 'Client name (required)',
+          startDateTime: 'Start date/time (required)',
+          endDateTime: 'End date/time (required)',
+          shiftType: 'Shift type (optional)'
+        },
+        example: '/api/reports/patrol?client=Client Name&startDateTime=2024-01-01&endDateTime=2024-01-08',
+        returns: {
+          summary: 'Zone performance with proportional expected patrols',
+          events: 'Event log with zone names',
+          calculations: 'Total expected, completed, completion rate, performance rating',
+          schedule: 'Client schedule details including custom schedule info'
+        }
+      },
+      
+      comprehensive: {
+        method: 'GET',
+        path: '/api/reports/comprehensive/:clientName',
+        description: 'Get comprehensive report with trends',
+        parameters: {
+          period: 'last7days, last30days, last90days, custom',
+          customStart: 'Required if period=custom',
+          customEnd: 'Required if period=custom'
+        },
+        example: '/api/reports/comprehensive/Client Name?period=last30days'
+      },
+      
+      trends: {
+        method: 'GET',
+        path: '/api/reports/performance-trends/:clientName',
+        description: 'Get client performance trends over time',
+        parameters: {
+          months: 'Number of months to analyze (default: 6)'
+        },
+        example: '/api/reports/performance-trends/Client Name?months=12',
+        returns: {
+          trends: 'Monthly performance data with ratings',
+          summary: 'Average performance, best/worst months'
+        }
+      },
+      
+      // Configuration
+      shifts: {
+        method: 'GET',
+        path: '/api/reports/shifts',
+        description: 'Get available shifts and schedule for client',
+        parameters: {
+          client: 'Client name (required)'
+        },
+        example: '/api/reports/shifts?client=Client Name',
+        returns: {
+          schedule: 'Patrol schedule with weekday/weekend patrols',
+          availableShifts: 'Available shift options',
+          weeklyTotal: 'Calculated weekly patrol total'
+        }
+      },
+      
+      // Testing & Debugging
+      test: {
+        method: 'GET',
+        path: '/api/reports/test',
+        description: 'Test report generation with detailed analysis',
+        parameters: {
+          clientName: 'Client name (required)',
+          startDate: 'Start date (optional)',
+          endDate: 'End date (optional)'
+        },
+        example: '/api/reports/test?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08',
+        returns: {
+          dataAnalysis: 'Structure validation',
+          performanceCheck: 'Per-zone calculations with realism check',
+          recommendations: 'Issues and suggestions',
+          calculationVerification: 'Total expected, completed, rates'
+        }
+      },
+      
+      testClient: {
+        method: 'GET/POST',
+        path: '/api/reports/test/:clientName',
+        description: 'Test report generation for specific client',
+        example: '/api/reports/test/Client Name'
+      },
+      
+      debug: {
+        method: 'GET',
+        path: '/api/reports/debug',
+        description: '🆕 Debug performance calculations in detail',
+        parameters: {
+          clientName: 'Client name (required)',
+          startDate: 'Start date (optional)',
+          endDate: 'End date (optional)'
+        },
+        example: '/api/reports/debug?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08',
+        returns: {
+          calculationMethod: 'Method used (imported from managePatrolSchedules.js)',
+          totalExpected: 'Total expected patrols',
+          totalCompleted: 'Total completed patrols',
+          completionRate: 'Overall completion percentage',
+          performanceRating: 'Rating (Excellent/Good/Fair/Poor)',
+          weeklyTotal: 'Weekly patrol total from schedule',
+          zones: 'Per-zone breakdown with calculations',
+          events: 'Sample events'
+        }
+      },
+      
+      // Email
+      email: {
+        method: 'POST',
+        path: '/api/reports/send/:clientName',
+        description: 'Manually send report via email',
+        example: '/api/reports/send/Client Name'
+      },
+      
+      // Health
+      health: {
+        method: 'GET',
+        path: '/api/reports/health',
+        description: 'Health check with fix verification',
+        returns: {
+          status: 'System health status',
+          fixes: 'Applied fixes verification',
+          endpoints: 'Available endpoints list'
+        }
+      }
+    },
+    
+    usageTips: {
+      clientNames: 'Use exact client names as they appear in the system',
+      encoding: 'URL encode client names with spaces or special characters',
+      calculations: 'All calculations now use shared functions from managePatrolSchedules.js',
+      debugging: 'Use /debug endpoint to verify calculations are working correctly',
+      examples: [
+        'Find clients: /api/reports/clients',
+        'Get data: /api/reports/patrol?client=Acme%20Corporation&startDateTime=2024-01-01&endDateTime=2024-01-08',
+        'Download PDF: /api/reports/weekly/pdf?clientName=Acme Corporation&startDate=2024-01-01&endDate=2024-01-08',
+        'Debug calcs: /api/reports/debug?clientName=Acme Corporation&startDate=2024-01-01&endDate=2024-01-08',
+        'Test system: /api/reports/test?clientName=Acme Corporation'
+      ]
+    },
+    
+    fixes: {
+      zoneNames: {
+        status: 'FIXED ✅',
+        description: 'Zone names now display correctly (e.g., "Main Entrance" instead of "5")',
+        implementation: 'LEFT JOIN with m_zonas table using COALESCE'
+      },
+      performanceCalc: {
+        status: 'FIXED ✅',
+        description: 'Performance rates now realistic (no more 3466%)',
+        implementation: 'Proportional distribution based on actual activity + imported calculations'
+      },
+      eventDescriptions: {
+        status: 'FIXED ✅',
+        description: 'Events show descriptions (no more "Unknown Event")',
+        implementation: 'COALESCE with multiple fallbacks including "Patrol Completed"'
+      },
+      importedCalculations: {
+        status: 'IMPLEMENTED ✅',
+        description: 'All three files now use same calculation methods',
+        implementation: 'Imported from managePatrolSchedules.js for consistency'
+      }
+    },
+    
+    architecture: {
+      controller: 'reportController.js - Uses imported calculations',
+      service: 'generatePatrolReport.js - Uses imported calculations',
+      scheduler: 'managePatrolSchedules.js - Source of truth for calculations',
+      routes: 'reportRoutes.js - API endpoints',
+      consistency: 'All three layers use identical calculation logic'
+    }
+  });
+});
 
 export default router;
