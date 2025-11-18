@@ -1,4 +1,4 @@
-// server/controllers/schedulerController.js - COMPLETELY FIXED VERSION
+// server/controllers/schedulerController.js - COMPLETE OFFICE365 SMTP VERSION
 import sql from 'mssql';
 import { poolPromise } from '../config/database.js';
 import { 
@@ -21,54 +21,118 @@ const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 const TEST_MODE = process.env.TEST_MODE === 'true';
 const DATA_REFERENCE_DATE = '2025-10-17';
 
+// Service imports - FIXED: Use dynamic imports when needed
+let pdfService = null;
+let emailService = null;
+
+/**
+ * 🔧 SERVICE LOADER - Fixed to avoid top-level await
+ */
+const loadServices = async () => {
+  try {
+    const pdfModule = await import('../service/pdfService.js');
+    pdfService = pdfModule.default || pdfModule;
+    console.log('✅ PDF Service loaded successfully');
+  } catch (error) {
+    console.error('❌ PDF Service failed to load:', error.message);
+    pdfService = null;
+  }
+
+  try {
+    const emailModule = await import('../service/emailService.js');
+    emailService = emailModule.default || emailModule;
+    console.log('✅ Email Service loaded successfully');
+  } catch (error) {
+    console.error('❌ Email Service failed to load:', error.message);
+    emailService = null;
+  }
+};
+
+// Load services on first controller call
+let servicesLoaded = false;
+
 /**
  * 📅 DATE RANGE HELPERS
  */
 export const getPreviousWeekRange = () => {
-  const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
-  const startOfLastWeek = dataDate.subtract(1, 'week').startOf('isoWeek');
-  const endOfLastWeek = dataDate.subtract(1, 'week').endOf('isoWeek');
-  
-  return {
-    startDate: startOfLastWeek.format('YYYY-MM-DD'),
-    endDate: endOfLastWeek.format('YYYY-MM-DD'),
-    sqlStartDate: startOfLastWeek.format('YYYY-MM-DD 00:00:00'),
-    sqlEndDate: endOfLastWeek.format('YYYY-MM-DD 23:59:59'),
-    weekRange: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`,
-    rangeLabel: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`
-  };
+  try {
+    const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
+    const startOfLastWeek = dataDate.subtract(1, 'week').startOf('isoWeek');
+    const endOfLastWeek = dataDate.subtract(1, 'week').endOf('isoWeek');
+    
+    const range = {
+      startDate: startOfLastWeek.format('YYYY-MM-DD'),
+      endDate: endOfLastWeek.format('YYYY-MM-DD'),
+      sqlStartDate: startOfLastWeek.format('YYYY-MM-DD 00:00:00'),
+      sqlEndDate: endOfLastWeek.format('YYYY-MM-DD 23:59:59'),
+      weekRange: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`,
+      rangeLabel: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`,
+      daysInRange: 7
+    };
+    
+    console.log(`📅 Previous week range: ${range.startDate} to ${range.endDate}`);
+    return range;
+  } catch (error) {
+    console.error('❌ Error calculating previous week range:', error);
+    return {
+      startDate: '2025-10-06',
+      endDate: '2025-10-12',
+      sqlStartDate: '2025-10-06 00:00:00',
+      sqlEndDate: '2025-10-12 23:59:59',
+      rangeLabel: 'Week of Oct 6 - Oct 12, 2025',
+      daysInRange: 7
+    };
+  }
 };
 
 export const getHistoricalDateRange = (options = {}) => {
-  const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
-  const { monthsBack = null, specificMonth = null } = options;
-  
-  let finalStartDate, finalEndDate;
+  try {
+    const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
+    const { monthsBack = null, specificMonth = null } = options;
+    
+    let finalStartDate, finalEndDate;
 
-  if (specificMonth) {
-    finalStartDate = dayjs(specificMonth).startOf('month');
-    finalEndDate = dayjs(specificMonth).endOf('month');
-  } else if (monthsBack) {
-    finalStartDate = dataDate.subtract(monthsBack, 'month').startOf('month');
-    finalEndDate = dataDate;
-  } else {
-    finalStartDate = dataDate.startOf('month');
-    finalEndDate = dataDate;
+    if (specificMonth) {
+      finalStartDate = dayjs(specificMonth).startOf('month');
+      finalEndDate = dayjs(specificMonth).endOf('month');
+    } else if (monthsBack) {
+      finalStartDate = dataDate.subtract(monthsBack, 'month').startOf('month');
+      finalEndDate = dataDate;
+    } else {
+      finalStartDate = dataDate.startOf('month');
+      finalEndDate = dataDate;
+    }
+
+    const daysInRange = finalEndDate.diff(finalStartDate, 'day') + 1;
+    
+    const range = {
+      sqlStartDate: finalStartDate.format('YYYY-MM-DD 00:00:00'),
+      sqlEndDate: finalEndDate.format('YYYY-MM-DD 23:59:59'),
+      displayStartDate: finalStartDate.format('YYYY-MM-DD'),
+      displayEndDate: finalEndDate.format('YYYY-MM-DD'),
+      startDate: finalStartDate.format('YYYY-MM-DD'),
+      endDate: finalEndDate.format('YYYY-MM-DD'),
+      rangeLabel: specificMonth 
+        ? `Month: ${finalStartDate.format('MMMM YYYY')}`
+        : monthsBack
+        ? `Last ${monthsBack} months`
+        : `Month: ${finalStartDate.format('MMMM YYYY')}`,
+      daysInRange: daysInRange
+    };
+    
+    console.log(`📅 Historical range: ${range.startDate} to ${range.endDate} (${daysInRange} days)`);
+    return range;
+  } catch (error) {
+    console.error('❌ Error calculating historical range:', error);
+    return {
+      startDate: '2025-09-01',
+      endDate: '2025-10-17',
+      sqlStartDate: '2025-09-01 00:00:00',
+      sqlEndDate: '2025-10-17 23:59:59',
+      rangeLabel: 'Fallback Range: Sep 1 - Oct 17, 2025',
+      daysInRange: 47
+    };
   }
-
-  return {
-    sqlStartDate: finalStartDate.format('YYYY-MM-DD 00:00:00'),
-    sqlEndDate: finalEndDate.format('YYYY-MM-DD 23:59:59'),
-    displayStartDate: finalStartDate.format('YYYY-MM-DD'),
-    displayEndDate: finalEndDate.format('YYYY-MM-DD'),
-    startDate: finalStartDate.format('YYYY-MM-DD'),
-    endDate: finalEndDate.format('YYYY-MM-DD'),
-    rangeLabel: specificMonth 
-      ? `Month: ${finalStartDate.format('MMMM YYYY')}`
-      : monthsBack
-      ? `Last ${monthsBack} months`
-      : `Month: ${finalStartDate.format('MMMM YYYY')}`
-  };
 };
 
 /**
@@ -81,36 +145,71 @@ export const getClientPatrols = async (clientId, daysRange = 30) => {
     const startDate = dataDate.subtract(daysRange, 'day').format('YYYY-MM-DD 00:00:00');
     const endDate = dataDate.format('YYYY-MM-DD 23:59:59');
     
-    console.log(`📊 Fetching patrols for client ${clientId} around ${DATA_REFERENCE_DATE}`);
+    console.log(`📊 Fetching patrols for client ${clientId} from ${startDate} to ${endDate}`);
 
-    const result = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .input('startDate', sql.DateTime, startDate)
-      .input('endDate', sql.DateTime, endDate)
-      .query(`
-        SELECT 
-          rec_iid AS PatrolID,
-          rec_tfechahora AS PatrolDate,
-          rec_czona AS ZoneCode,
-          rec_calarma AS AlarmType,
-          rec_cContenido AS Content
-        FROM [_Datos].[dbo].[p_recepcion]
-        WHERE rec_iidcuenta = @clientId
-          AND rec_tfechahora BETWEEN @startDate AND @endDate
-        ORDER BY rec_tfechahora DESC
-      `);
+    const tableQueries = [
+      'p_recepcion202511',
+      'p_recepcion202510', 
+      'p_recepcion202509',
+      'p_recepcion'
+    ];
 
-    const patrols = result.recordset;
-    console.log(`✅ Found ${patrols.length} patrols for client ${clientId}`);
+    let patrols = [];
+    let lastError = null;
+
+    for (const tableName of tableQueries) {
+      try {
+        const result = await pool.request()
+          .input('clientId', sql.Int, clientId)
+          .input('startDate', sql.DateTime, startDate)
+          .input('endDate', sql.DateTime, endDate)
+          .query(`
+            SELECT TOP 1000
+              rec_iid AS PatrolID,
+              rec_tfechahora AS PatrolDate,
+              rec_czona AS ZoneCode,
+              rec_calarma AS AlarmType,
+              rec_cContenido AS Content
+            FROM [_Datos].[dbo].[${tableName}]
+            WHERE rec_iidcuenta = @clientId
+              AND rec_tfechahora BETWEEN @startDate AND @endDate
+              AND (
+                rec_calarma LIKE '%VIGICONTROL%'
+                OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
+              )
+            ORDER BY rec_tfechahora DESC
+          `);
+
+        if (result.recordset.length > 0) {
+          console.log(`✅ Found ${result.recordset.length} patrols in table ${tableName}`);
+          patrols = result.recordset;
+          break;
+        }
+      } catch (error) {
+        lastError = error;
+        console.log(`⚠️ Table ${tableName} not accessible: ${error.message}`);
+        continue;
+      }
+    }
+
+    if (patrols.length === 0 && lastError) {
+      throw lastError;
+    }
+
+    console.log(`✅ Total patrols found for client ${clientId}: ${patrols.length}`);
     
     return {
       pastPatrols: patrols,
       upcomingPatrols: [],
       summary: {
         totalPatrols: patrols.length,
-        completedPatrols: patrols.filter(p => p.AlarmType?.includes('V04')).length,
+        completedPatrols: patrols.filter(p => 
+          p.AlarmType?.includes('V04') || 
+          p.AlarmType?.includes('VIGICONTROL')
+        ).length,
         expectedPatrols: daysRange * 11,
-        complianceRate: patrols.length > 0 ? `${Math.round((patrols.length / (daysRange * 11)) * 100)}%` : '0%'
+        complianceRate: patrols.length > 0 ? `${Math.round((patrols.length / (daysRange * 11)) * 100)}%` : '0%',
+        daysAnalyzed: daysRange
       }
     };
 
@@ -119,7 +218,14 @@ export const getClientPatrols = async (clientId, daysRange = 30) => {
     return {
       pastPatrols: [],
       upcomingPatrols: [],
-      summary: { totalPatrols: 0, completedPatrols: 0, expectedPatrols: 0, complianceRate: '0%' }
+      summary: { 
+        totalPatrols: 0, 
+        completedPatrols: 0, 
+        expectedPatrols: daysRange * 11, 
+        complianceRate: '0%',
+        daysAnalyzed: daysRange,
+        error: error.message
+      }
     };
   }
 };
@@ -148,31 +254,53 @@ export const getClientHistoricalPatrols = async (clientId, startDate, endDate) =
         LEFT JOIN [_Datos].[dbo].[m_zonas] zon ON rec.rec_iidcuenta = zon.zon_iidcuenta AND rec.rec_czona = zon.zon_ccodigo
         WHERE rec.rec_iidcuenta = @clientId
           AND rec.rec_tfechahora BETWEEN @startDate AND @endDate
+          AND (
+            rec_calarma LIKE '%VIGICONTROL%'
+            OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
+          )
         ORDER BY rec.rec_tfechahora DESC
       `);
 
     const patrols = result.recordset;
     console.log(`✅ Found ${patrols.length} historical patrols for client ${clientId}`);
 
+    const daysInPeriod = Math.max(1, dayjs(endDate).diff(dayjs(startDate), 'day') + 1);
+    const expectedPatrols = daysInPeriod * 11;
+
     return {
       patrols,
       summary: {
         totalPatrols: patrols.length,
-        completedPatrols: patrols.filter(p => p.AlarmType?.includes('V04')).length,
-        complianceRate: 'N/A'
+        completedPatrols: patrols.filter(p => 
+          p.AlarmType?.includes('V04') || 
+          p.AlarmType?.includes('VIGICONTROL')
+        ).length,
+        expectedPatrols: expectedPatrols,
+        complianceRate: expectedPatrols > 0 ? `${Math.round((patrols.length / expectedPatrols) * 100)}%` : '0%',
+        daysAnalyzed: daysInPeriod
       }
     };
 
   } catch (error) {
     console.error('❌ Error fetching historical patrols:', error);
-    return { patrols: [], summary: { totalPatrols: 0, completedPatrols: 0, complianceRate: '0%' } };
+    return { 
+      patrols: [], 
+      summary: { 
+        totalPatrols: 0, 
+        completedPatrols: 0, 
+        expectedPatrols: 0, 
+        complianceRate: '0%',
+        daysAnalyzed: 0,
+        error: error.message
+      } 
+    };
   }
 };
 
 /**
  * 🔄 DATA TRANSFORMATION HELPERS
  */
-export function transformPatrolsToPosts(patrolData, schedule, dateRange) {
+export const transformPatrolsToPosts = (patrolData, schedule, dateRange) => {
   try {
     const patrols = patrolData.patrols || patrolData.pastPatrols || [];
     if (patrols.length === 0) {
@@ -193,72 +321,96 @@ export function transformPatrolsToPosts(patrolData, schedule, dateRange) {
           SitePost: zoneName,
           ChecksCompleted: 0,
           ExpectedChecks: 0,
-          PerformanceRate: '0%'
+          PerformanceRate: '0%',
+          ZoneCode: zoneKey
         });
       }
       postsMap.get(zoneKey).ChecksCompleted++;
     });
 
-    const daysInPeriod = Math.max(1, dayjs(dateRange.endDate).diff(dayjs(dateRange.startDate), 'day') + 1);
+    const daysInPeriod = dateRange.daysInRange || Math.max(1, dayjs(dateRange.endDate).diff(dayjs(dateRange.startDate), 'day') + 1);
     const patrolsPerDay = schedule?.patrols_per_day || 11;
     const totalExpected = daysInPeriod * patrolsPerDay;
     const expectedPerPost = postsMap.size > 0 ? Math.ceil(totalExpected / postsMap.size) : totalExpected;
 
     postsMap.forEach(post => {
       post.ExpectedChecks = expectedPerPost;
-      const performance = expectedPerPost > 0 ? ((post.ChecksCompleted / expectedPerPost) * 100).toFixed(1) : 0;
+      const performance = expectedPerPost > 0 ? Math.round((post.ChecksCompleted / expectedPerPost) * 100) : 0;
       post.PerformanceRate = `${performance}%`;
     });
 
     const posts = Array.from(postsMap.values());
-    console.log(`✅ Transformed ${posts.length} posts`);
+    console.log(`✅ Transformed ${posts.length} posts with ${patrols.length} total patrols`);
     return posts;
   } catch (error) {
     console.error('❌ Error transforming patrols to posts:', error);
     return [];
   }
-}
+};
 
-export function transformPatrolsToEvents(patrolData) {
+export const transformPatrolsToEvents = (patrolData) => {
   try {
     const patrols = patrolData.patrols || patrolData.pastPatrols || [];
     
     console.log(`🔄 Transforming ${patrols.length} patrols to events...`);
     
     const events = patrols.map((patrol) => {
+      const eventDate = patrol.rec_tfechahora || patrol.PatrolDate;
+      let formattedDate = 'N/A';
+      let formattedTime = 'N/A';
+      
+      if (eventDate) {
+        try {
+          const dateObj = dayjs(eventDate).tz(TZ);
+          if (dateObj.isValid()) {
+            formattedDate = dateObj.format('DD/MM/YYYY');
+            formattedTime = dateObj.format('HH:mm:ss');
+          }
+        } catch (e) {
+          console.warn(`Date parse error for: ${eventDate}`, e.message);
+        }
+      }
+      
       return {
-        rec_tfechahora: patrol.rec_tfechahora || patrol.PatrolDate,
+        rec_tfechahora: eventDate,
         rec_czona: patrol.rec_czona || patrol.ZoneCode || 'Unknown',
         rec_calarma: patrol.rec_calarma || patrol.AlarmType,
-        rec_cContenido: patrol.rec_cContenido || patrol.Content || 'Patrol Check'
+        rec_cContenido: patrol.rec_cContenido || patrol.Content || 'Patrol Check',
+        formattedDate: formattedDate,
+        formattedTime: formattedTime,
+        ZoneName: patrol.ZoneName || `Zone ${patrol.rec_czona || patrol.ZoneCode || 'Unknown'}`
       };
     });
 
-    console.log(`✅ Transformed ${events.length} events`);
+    console.log(`✅ Transformed ${events.length} events with valid dates`);
     
     return events;
   } catch (error) {
     console.error('❌ Error transforming patrols to events:', error);
     return [];
   }
-}
+};
 
-export function calculateSummary(patrolData, schedule, dateRange) {
+export const calculateSummary = (patrolData, schedule, dateRange) => {
   try {
     const patrols = patrolData.patrols || patrolData.pastPatrols || [];
     const posts = transformPatrolsToPosts(patrolData, schedule, dateRange);
     
     const totalCompleted = patrols.length;
     const totalExpected = posts.reduce((sum, post) => sum + post.ExpectedChecks, 0);
-    const complianceRate = totalExpected > 0 ? `${((totalCompleted / totalExpected) * 100).toFixed(1)}%` : '0%';
+    const complianceRate = totalExpected > 0 ? Math.round((totalCompleted / totalExpected) * 100) : 0;
     
     return {
       totalPatrols: totalCompleted,
       completedPatrols: totalCompleted,
       totalExpected: totalExpected,
-      complianceRate: complianceRate,
+      complianceRate: `${complianceRate}%`,
+      numericCompliance: complianceRate,
       postsCount: posts.length,
-      eventsCount: patrols.length
+      eventsCount: patrols.length,
+      performanceLevel: complianceRate >= 90 ? 'EXCELLENT' : 
+                      complianceRate >= 80 ? 'GOOD' : 
+                      complianceRate >= 70 ? 'SATISFACTORY' : 'NEEDS IMPROVEMENT'
     };
   } catch (error) {
     console.error('❌ Error calculating summary:', error);
@@ -267,101 +419,177 @@ export function calculateSummary(patrolData, schedule, dateRange) {
       completedPatrols: 0,
       totalExpected: 0,
       complianceRate: '0%',
+      numericCompliance: 0,
       postsCount: 0,
-      eventsCount: 0
+      eventsCount: 0,
+      performanceLevel: 'NEEDS IMPROVEMENT'
     };
   }
-}
+};
 
 /**
- * 🔧 PDF GENERATION HELPER - SIMPLIFIED AND FIXED
+ * 🔧 PDF GENERATION HELPER - IMPROVED
  */
-async function generatePDF(data, clientName, dateRange) {
+const generatePDF = async (data, clientName, dateRange, reportType = 'patrol') => {
   try {
-    console.log('🔍 Importing PDF service...');
+    console.log(`🔍 Generating PDF for ${reportType} report...`);
     
-    // Import PDF service directly
-    const pdfService = await import('../service/pdfService.js');
+    if (!pdfService) {
+      throw new Error('PDF service is not available. Check pdfService.js file.');
+    }
     
-    console.log('✅ PDF Service loaded successfully');
-    console.log('📋 Available exports:', Object.keys(pdfService));
+    console.log('✅ PDF Service available');
     
     let pdfBuffer;
+    const pdfData = {
+      clientId: data.clientId,
+      clientName: data.clientName || clientName,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      shiftType: data.shiftType || 'Day/Night',
+      events: data.events || [],
+      posts: data.posts || [],
+      patrols: data.patrols || [],
+      summary: data.summary || {}
+    };
     
-    // DIRECT FUNCTION CALL - Use the functions we know exist
-    if (pdfService.generateHistoricalReportEmail) {
-      console.log('✅ Using generateHistoricalReportEmail for PDF generation');
-      pdfBuffer = await pdfService.generateHistoricalReportEmail(data, clientName, dateRange);
-    } 
-    else if (pdfService.generatePatrolReportEmail) {
-      console.log('✅ Using generatePatrolReportEmail for PDF generation');
-      pdfBuffer = await pdfService.generatePatrolReportEmail(data, clientName, dateRange);
-    }
-    else if (pdfService.generateDashboardPDF) {
-      console.log('✅ Using generateDashboardPDF for PDF generation');
-      pdfBuffer = await pdfService.generateDashboardPDF(data);
-    }
-    else if (pdfService.default) {
-      // Try default export
-      if (pdfService.default.generateHistoricalReportEmail) {
-        console.log('✅ Using default.generateHistoricalReportEmail');
-        pdfBuffer = await pdfService.default.generateHistoricalReportEmail(data, clientName, dateRange);
+    // Try different PDF generation functions with better error handling
+    const pdfFunctions = [
+      { name: 'generateDashboardPDF', func: pdfService.generateDashboardPDF },
+      { name: 'generatePatrolReportPDF', func: pdfService.generatePatrolReportPDF },
+      { name: 'generateHistoricalReportPDF', func: pdfService.generateHistoricalReportPDF },
+      { name: 'generatePDFReport', func: pdfService.generatePDFReport },
+      { name: 'generateReportPDF', func: pdfService.generateReportPDF }
+    ];
+    
+    for (const { name, func } of pdfFunctions) {
+      if (func && typeof func === 'function') {
+        try {
+          console.log(`🔄 Trying PDF function: ${name}`);
+          
+          if (name === 'generateDashboardPDF') {
+            pdfBuffer = await func(pdfData);
+          } else if (name === 'generatePDFReport' || name === 'generateReportPDF') {
+            // These might have different signatures
+            pdfBuffer = await func(pdfData, dateRange);
+          } else {
+            pdfBuffer = await func(pdfData, clientName, dateRange);
+          }
+          
+          if (pdfBuffer && pdfBuffer.length > 0) {
+            console.log(`✅ PDF generated successfully using ${name}: ${Math.round(pdfBuffer.length / 1024)} KB`);
+            return pdfBuffer;
+          }
+        } catch (funcError) {
+          console.warn(`⚠️ PDF function ${name} failed:`, funcError.message);
+          continue;
+        }
       }
-      else if (pdfService.default.generatePatrolReportEmail) {
-        console.log('✅ Using default.generatePatrolReportEmail');
-        pdfBuffer = await pdfService.default.generatePatrolReportEmail(data, clientName, dateRange);
-      }
-      else if (pdfService.default.generateDashboardPDF) {
-        console.log('✅ Using default.generateDashboardPDF');
-        pdfBuffer = await pdfService.default.generateDashboardPDF(data);
-      }
-    }
-    else {
-      throw new Error(`No PDF generation function found. Available: ${Object.keys(pdfService).join(', ')}`);
     }
     
-    if (!pdfBuffer) {
-      throw new Error('PDF generation returned null buffer');
-    }
-    
-    console.log(`✅ PDF generated successfully: ${Math.round(pdfBuffer.length / 1024)} KB`);
-    return pdfBuffer;
+    throw new Error('All PDF generation functions failed');
     
   } catch (error) {
     console.error('❌ PDF generation error:', error);
     throw new Error(`PDF generation failed: ${error.message}`);
   }
-}
+};
 
 /**
- * 🔧 EMAIL SENDING HELPER - SIMPLIFIED AND FIXED
+ * 🔧 EMAIL SENDING HELPER - OFFICE365 SMTP - IMPROVED
  */
-async function sendPatrolEmail(emailData) {
+const sendPatrolEmail = async (emailData) => {
   try {
-    console.log('🔍 Importing email service...');
+    console.log('🔍 Sending patrol email via Office365 SMTP...');
     
-    // Import email service directly
-    const emailService = await import('../service/emailService.js');
+    if (!emailService) {
+      throw new Error('Email service is not available. Check emailService.js file and Office365 SMTP configuration.');
+    }
     
-    console.log('✅ Email Service loaded successfully');
+    console.log('✅ Email Service available - Office365 SMTP configured');
+    console.log(`📧 Using Office365 SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}`);
+    console.log(`📧 From: ${process.env.EMAIL_USER}`);
     
-    // Use the function directly
-    if (emailService.sendPatrolReport) {
-      console.log('✅ Using sendPatrolReport');
-      return await emailService.sendPatrolReport(emailData);
+    // Ensure services are loaded
+    if (!servicesLoaded) {
+      await loadServices();
     }
-    else if (emailService.default && emailService.default.sendPatrolReport) {
-      console.log('✅ Using default.sendPatrolReport');
-      return await emailService.default.sendPatrolReport(emailData);
+    
+    // Try different email sending functions
+    const emailFunctions = [
+      { name: 'sendPatrolReport', func: emailService.sendPatrolReport },
+      { name: 'sendHistoricalReport', func: emailService.sendHistoricalReport },
+      { name: 'sendSimpleEmail', func: emailService.sendSimpleEmail }
+    ];
+    
+    for (const { name, func } of emailFunctions) {
+      if (func && typeof func === 'function') {
+        try {
+          console.log(`🔄 Trying email function: ${name}`);
+          
+          let result;
+          if (name === 'sendSimpleEmail') {
+            // Fallback to simple email with Office365 configuration
+            result = await func({
+              to: emailData.to,
+              subject: emailData.subject || `Security Report - ${emailData.client.ClientName}`,
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                  <h2 style="color: #2c5aa0;">BM Security Patrol Report</h2>
+                  <p><strong>Client:</strong> ${emailData.client.ClientName}</p>
+                  <p><strong>Period:</strong> ${emailData.dateRange.startDate} to ${emailData.dateRange.endDate}</p>
+                  <p><strong>Sent via:</strong> Office365 SMTP Service</p>
+                  <p><strong>From:</strong> ${process.env.EMAIL_USER}</p>
+                  <p>Please find your security patrol report attached.</p>
+                  <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
+                  <p style="color: #666; font-size: 12px;">
+                    This email was sent automatically from the BM Security Reporting System.
+                  </p>
+                </div>
+              `,
+              attachments: emailData.attachments
+            });
+          } else {
+            result = await func(emailData);
+          }
+          
+          if (result) {
+            console.log(`✅ Email sent successfully using ${name} via Office365 SMTP`);
+            console.log(`📧 From: ${process.env.EMAIL_USER}`);
+            console.log(`📧 To: ${emailData.to}`);
+            return result;
+          }
+        } catch (funcError) {
+          console.warn(`⚠️ Email function ${name} failed:`, funcError.message);
+          
+          // Check for Office365 specific authentication issues
+          if (funcError.code === 'EAUTH' || funcError.message.includes('Authentication failed')) {
+            console.error('❌ Office365 Authentication Failed - Please check:');
+            console.error(`   - EMAIL_USER: ${process.env.EMAIL_USER}`);
+            console.error('   - EMAIL_PASS: Correct Office365 password');
+            console.error('   - SMTP Settings: smtp.office365.com:587');
+            console.error('   - Office365 Security: App passwords may be required');
+          }
+          continue;
+        }
+      }
     }
-    else {
-      throw new Error('sendPatrolReport function not found in emailService');
-    }
+    
+    throw new Error('All email sending functions failed - Check Office365 SMTP configuration');
+    
   } catch (error) {
-    console.error('❌ Email sending error:', error);
+    console.error('❌ Email sending error via Office365:', error);
+    
+    // Provide specific guidance for Office365 issues
+    if (error.code === 'EAUTH') {
+      error.message += ' - Check Office365 credentials and app password settings';
+    } else if (error.message.includes('connection timeout')) {
+      error.message += ' - Check firewall settings for Office365 SMTP';
+    }
+    
     throw error;
   }
-}
+};
 
 /**
  * 🎯 SCHEDULE MANAGEMENT CONTROLLERS
@@ -399,10 +627,19 @@ export const getAllSchedules = async (req, res) => {
       timezone: TZ
     }));
 
-    res.status(200).json({ success: true, total: schedules.length, schedules });
+    res.status(200).json({ 
+      success: true, 
+      total: schedules.length, 
+      schedules,
+      serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+    });
   } catch (error) {
     console.error('❌ Error fetching schedules:', error);
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Database error', 
+      error: error.message 
+    });
   }
 };
 
@@ -412,7 +649,10 @@ export const getScheduleById = async (req, res) => {
     const scheduleId = parseInt(id);
     
     if (isNaN(scheduleId) || scheduleId <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid schedule ID' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid schedule ID' 
+      });
     }
 
     const pool = await poolPromise;
@@ -435,7 +675,10 @@ export const getScheduleById = async (req, res) => {
       `);
 
     if (result.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
 
     const schedule = result.recordset[0];
@@ -457,7 +700,11 @@ export const getScheduleById = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Error fetching schedule:', error);
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Database error', 
+      error: error.message 
+    });
   }
 };
 
@@ -467,13 +714,19 @@ export const updateSchedule = async (req, res) => {
     const scheduleId = parseInt(id);
     
     if (isNaN(scheduleId) || scheduleId <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid schedule ID' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid schedule ID' 
+      });
     }
 
     const { nextRun, frequency, email, intervalDays } = req.body;
 
     if (!nextRun || !frequency || !email) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields: nextRun, frequency, email' 
+      });
     }
 
     const pool = await poolPromise;
@@ -494,16 +747,24 @@ export const updateSchedule = async (req, res) => {
       `);
 
     if (result.rowsAffected[0] === 0) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
 
     res.status(200).json({
       success: true,
-      message: 'Schedule updated successfully'
+      message: 'Schedule updated successfully',
+      updatedFields: { nextRun, frequency, email, intervalDays }
     });
   } catch (error) {
     console.error('❌ Error updating schedule:', error);
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Database error', 
+      error: error.message 
+    });
   }
 };
 
@@ -512,11 +773,15 @@ export const createSchedule = async (req, res) => {
     const { clientId, type, nextRun, frequency, email, intervalDays } = req.body;
 
     if (!clientId || !nextRun || !frequency || !email) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields: clientId, nextRun, frequency, email' 
+      });
     }
 
     const pool = await poolPromise;
 
+    // Check if schedule already exists
     const existingResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .query('SELECT rep_idKey FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId');
@@ -529,6 +794,7 @@ export const createSchedule = async (req, res) => {
       });
     }
 
+    // Create new schedule
     const insertResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .input('type', sql.Int, type || 1)
@@ -543,15 +809,18 @@ export const createSchedule = async (req, res) => {
         VALUES (@clientId, @type, @nextRun, @frequency, @email, @intervalDays)
       `);
 
+    // Get client name
     const clientResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .query('SELECT cue_cnombre AS ClientName FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
+
+    const newScheduleId = insertResult.recordset[0].rep_idKey;
 
     res.status(201).json({
       success: true,
       message: 'Schedule created successfully',
       schedule: {
-        id: insertResult.recordset[0].rep_idKey,
+        id: newScheduleId,
         clientId: clientId,
         clientName: clientResult.recordset[0]?.ClientName || `Client ${clientId}`,
         type: type || 1,
@@ -566,7 +835,11 @@ export const createSchedule = async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error creating schedule:', error);
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Database error', 
+      error: error.message 
+    });
   }
 };
 
@@ -576,7 +849,10 @@ export const deleteSchedule = async (req, res) => {
     const scheduleId = parseInt(id);
     
     if (isNaN(scheduleId) || scheduleId <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid schedule ID' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid schedule ID' 
+      });
     }
 
     const pool = await poolPromise;
@@ -585,13 +861,24 @@ export const deleteSchedule = async (req, res) => {
       .query('DELETE FROM _Datos.dbo.m_reportes_automaticos WHERE rep_idKey = @id');
 
     if (result.rowsAffected[0] === 0) {
-      return res.status(404).json({ success: false, message: 'Schedule not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Schedule not found' 
+      });
     }
 
-    res.status(200).json({ success: true, message: 'Schedule deleted successfully' });
+    res.status(200).json({ 
+      success: true, 
+      message: 'Schedule deleted successfully',
+      deletedId: scheduleId
+    });
   } catch (error) {
     console.error('❌ Error deleting schedule:', error);
-    res.status(500).json({ success: false, message: 'Database error', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Database error', 
+      error: error.message 
+    });
   }
 };
 
@@ -601,42 +888,96 @@ export const deleteSchedule = async (req, res) => {
 export const triggerDynamicReports = async (req, res) => {
   try {
     console.log('🔧 Manual trigger for dynamic reports...');
+    
+    if (TEST_MODE) {
+      console.log('🚫 [TEST MODE] Dynamic reports would be triggered');
+      return res.status(200).json({
+        success: true,
+        message: 'TEST MODE - Dynamic reports would have been triggered',
+        testMode: true
+      });
+    }
+    
     await triggerDynamicReportsNow();
     
     res.status(200).json({
       success: true,
-      message: 'Dynamic reports triggered successfully'
+      message: 'Dynamic reports triggered successfully',
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
   } catch (error) {
     console.error('❌ Error triggering dynamic reports:', error);
-    res.status(500).json({ success: false, message: 'Failed to trigger reports', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to trigger reports', 
+      error: error.message 
+    });
   }
 };
 
 export const triggerPatrolReports = async (req, res) => {
   try {
     console.log('🔧 Manual trigger for patrol reports...');
+    
+    if (TEST_MODE) {
+      console.log('🚫 [TEST MODE] Patrol reports would be triggered');
+      return res.status(200).json({
+        success: true,
+        message: 'TEST MODE - Patrol reports would have been triggered',
+        testMode: true
+      });
+    }
+    
     await triggerPatrolReportsNow();
     
     res.status(200).json({
       success: true,
-      message: 'Patrol reports triggered successfully'
+      message: 'Patrol reports triggered successfully',
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
   } catch (error) {
     console.error('❌ Error triggering patrol reports:', error);
-    res.status(500).json({ success: false, message: 'Failed to trigger reports', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to trigger reports', 
+      error: error.message 
+    });
   }
 };
 
 /**
- * 📊 ENHANCED CLIENT REPORT - Main Report Generation Endpoint
+ * 📊 ENHANCED CLIENT REPORT - MAIN FIXED ENDPOINT
  */
 export const sendEnhancedClientReport = async (req, res) => {
+  let pdfBuffer = null;
+  
   try {
     const { clientId } = req.params;
     const { startDate, endDate, recipientEmail, reportPeriod = 'previousWeek' } = req.body;
 
     console.log(`\n📤 Generating ${reportPeriod} report for client: ${clientId}`);
+
+    // Load services if not already loaded
+    if (!servicesLoaded) {
+      await loadServices();
+    }
+
+    // Service availability check
+    if (!pdfService) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'PDF service unavailable',
+        error: 'PDF service failed to load. Check pdfService.js file.'
+      });
+    }
+
+    if (!emailService) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Email service unavailable',
+        error: 'Email service failed to load. Check emailService.js file and Office365 SMTP configuration.'
+      });
+    }
 
     // Determine date range
     let dateRange;
@@ -644,14 +985,20 @@ export const sendEnhancedClientReport = async (req, res) => {
       dateRange = getPreviousWeekRange();
     } else if (reportPeriod === 'historical') {
       dateRange = getHistoricalDateRange({ monthsBack: 1 });
-    } else {
+    } else if (startDate && endDate) {
       dateRange = {
-        startDate: startDate || dayjs(DATA_REFERENCE_DATE).subtract(7, 'day').format('YYYY-MM-DD'),
-        endDate: endDate || DATA_REFERENCE_DATE,
-        sqlStartDate: (startDate ? dayjs(startDate) : dayjs(DATA_REFERENCE_DATE).subtract(7, 'day')).format('YYYY-MM-DD 00:00:00'),
-        sqlEndDate: (endDate ? dayjs(endDate) : dayjs(DATA_REFERENCE_DATE)).format('YYYY-MM-DD 23:59:59'),
-        rangeLabel: `Custom: ${startDate || dayjs(DATA_REFERENCE_DATE).subtract(7, 'day').format('YYYY-MM-DD')} to ${endDate || DATA_REFERENCE_DATE}`
+        startDate: startDate,
+        endDate: endDate,
+        sqlStartDate: dayjs(startDate).format('YYYY-MM-DD 00:00:00'),
+        sqlEndDate: dayjs(endDate).format('YYYY-MM-DD 23:59:59'),
+        rangeLabel: `Custom: ${startDate} to ${endDate}`,
+        daysInRange: dayjs(endDate).diff(dayjs(startDate), 'day') + 1
       };
+    } else {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Either reportPeriod or both startDate and endDate are required' 
+      });
     }
 
     console.log(`📅 Using date range: ${dateRange.startDate} to ${dateRange.endDate}`);
@@ -663,7 +1010,10 @@ export const sendEnhancedClientReport = async (req, res) => {
       .query('SELECT cue_iid AS ClientID, cue_cnombre AS ClientName, cue_cemail AS ClientEmail FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
 
     if (clientResult.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Client not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Client not found' 
+      });
     }
 
     const client = clientResult.recordset[0];
@@ -675,21 +1025,25 @@ export const sendEnhancedClientReport = async (req, res) => {
       const emailResult = await pool.request()
         .input('clientId', sql.Int, clientId)
         .query('SELECT rep_cmail AS ReportEmail FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId');
-      finalRecipientEmail = emailResult.recordset[0]?.ReportEmail || client.ClientEmail || 'jmutisya@bmsecurity.com';
+      finalRecipientEmail = emailResult.recordset[0]?.ReportEmail || client.ClientEmail || process.env.TEST_EMAIL || 'leavemanagement@bmsecurity.com';
     }
 
     if (!finalRecipientEmail) {
-      return res.status(400).json({ success: false, message: 'No email address found for client' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No email address found for client' 
+      });
     }
 
     console.log(`📧 Recipient: ${finalRecipientEmail}`);
+    console.log(`📧 From: ${process.env.EMAIL_USER}`);
 
     // Get patrol data
     let patrolData;
     if (reportPeriod === 'historical') {
       patrolData = await getClientHistoricalPatrols(parseInt(clientId), dateRange.sqlStartDate, dateRange.sqlEndDate);
     } else {
-      patrolData = await getClientPatrols(parseInt(clientId), 30);
+      patrolData = await getClientPatrols(parseInt(clientId), dateRange.daysInRange || 30);
     }
 
     // Check for data
@@ -700,7 +1054,8 @@ export const sendEnhancedClientReport = async (req, res) => {
       console.log('❌ No patrol data found for the specified period');
       return res.status(404).json({
         success: false,
-        message: `No patrol data found for period: ${dateRange.startDate} to ${dateRange.endDate}`
+        message: `No patrol data found for period: ${dateRange.startDate} to ${dateRange.endDate}`,
+        dataReference: DATA_REFERENCE_DATE
       });
     }
 
@@ -716,10 +1071,11 @@ export const sendEnhancedClientReport = async (req, res) => {
     console.log(`📋 PDF Data Summary:`);
     console.log(`   - Posts: ${posts.length}`);
     console.log(`   - Events: ${events.length}`);
+    console.log(`   - Compliance: ${summary.complianceRate}`);
 
-    // Generate PDF using helper function
+    // Generate PDF
     console.log('🎨 Generating PDF...');
-    const pdfBuffer = await generatePDF(
+    pdfBuffer = await generatePDF(
       {
         clientId: client.ClientID,
         clientName: client.ClientName,
@@ -732,18 +1088,23 @@ export const sendEnhancedClientReport = async (req, res) => {
         summary: summary
       }, 
       client.ClientName, 
-      dateRange
+      dateRange,
+      reportPeriod
     );
 
     if (!pdfBuffer) {
       console.error('❌ PDF generation returned null buffer');
-      return res.status(500).json({ success: false, message: 'Failed to generate PDF' });
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to generate PDF' 
+      });
     }
 
     console.log(`✅ PDF generated successfully: ${Math.round(pdfBuffer.length / 1024)} KB`);
 
     if (TEST_MODE) {
       console.log(`🚫 [TEST MODE] Would send report to ${finalRecipientEmail}`);
+      console.log(`📧 From: ${process.env.EMAIL_USER}`);
       return res.status(200).json({
         success: true,
         message: 'TEST MODE - Report would have been sent',
@@ -751,16 +1112,22 @@ export const sendEnhancedClientReport = async (req, res) => {
         details: { 
           client: client.ClientName, 
           email: finalRecipientEmail, 
+          from: process.env.EMAIL_USER,
           period: `${dateRange.startDate} to ${dateRange.endDate}`,
           patrols: summary.totalPatrols,
           posts: posts.length,
-          events: events.length
+          events: events.length,
+          compliance: summary.complianceRate,
+          pdfSize: `${Math.round(pdfBuffer.length / 1024)} KB`,
+          smtp: 'Office365'
         }
       });
     }
 
-    // Send email using helper function
-    console.log(`📤 Sending branded email with logo...`);
+    // Send email via Office365 SMTP
+    console.log(`📤 Sending email via Office365 SMTP...`);
+    console.log(`📧 From: ${process.env.EMAIL_USER}`);
+    console.log(`📧 To: ${finalRecipientEmail}`);
     
     await sendPatrolEmail({
       to: finalRecipientEmail,
@@ -768,27 +1135,14 @@ export const sendEnhancedClientReport = async (req, res) => {
         ClientID: client.ClientID,
         ClientName: client.ClientName
       },
-      patrolData: {
-        summary: {
-          complianceRate: summary.complianceRate,
-          completedPatrols: summary.completedPatrols,
-          totalExpected: summary.totalExpected,
-          scheduleCompliance: summary.complianceRate
-        },
-        patrols: events
-      },
-      pdfData: {
-        posts: posts,
-        events: events,
-        summary: summary,
-        incidents: events.filter(e => e.rec_calarma?.includes('ALARM')).length
-      },
       dateRange: dateRange,
       pdfBuffer: pdfBuffer,
-      pdfFilename: `BM_Security_Report_${client.ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}.pdf`
+      pdfFilename: `BM_Security_Report_${client.ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}_to_${dateRange.endDate}.pdf`,
+      subject: `BM Security Patrol Report - ${client.ClientName} - ${dateRange.startDate} to ${dateRange.endDate}`
     });
 
-    console.log(`✅ Report successfully sent to ${finalRecipientEmail}`);
+    console.log(`✅ Report successfully sent to ${finalRecipientEmail} via Office365 SMTP`);
+    console.log(`📧 From: ${process.env.EMAIL_USER}`);
 
     return res.status(200).json({
       success: true,
@@ -796,27 +1150,49 @@ export const sendEnhancedClientReport = async (req, res) => {
       details: {
         clientName: client.ClientName,
         email: finalRecipientEmail,
+        fromEmail: process.env.EMAIL_USER,
         reportPeriod: `${dateRange.startDate} to ${dateRange.endDate}`,
         patrols: summary.totalPatrols,
         posts: posts.length,
         events: events.length,
-        pdfSize: `${Math.round(pdfBuffer.length / 1024)} KB`
+        compliance: summary.complianceRate,
+        performance: summary.performanceLevel,
+        pdfSize: `${Math.round(pdfBuffer.length / 1024)} KB`,
+        smtpProvider: 'Office365',
+        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
       }
     });
 
   } catch (error) {
     console.error('❌ Error sending client report:', error);
     
-    if (error.code === 'ESOCKET' || error.code === 'ETIMEDOUT') {
-      console.error(`   Network error - check your internet connection`);
-    } else if (error.code === 'EAUTH') {
-      console.error(`   Authentication error - check EMAIL_USER and EMAIL_PASS in .env`);
+    let userMessage = 'Failed to send report';
+    let errorDetails = {};
+    
+    if (error.message.includes('PDF service')) {
+      userMessage = 'PDF generation service unavailable';
+      errorDetails.suggestion = 'Check pdfService.js file exists and exports functions correctly';
+    } else if (error.message.includes('Email service')) {
+      userMessage = 'Email service unavailable';
+      errorDetails.suggestion = 'Check emailService.js file and Office365 SMTP configuration';
+    } else if (error.code === 'EAUTH' || error.message.includes('Authentication failed')) {
+      userMessage = 'Office365 email authentication failed';
+      errorDetails.suggestion = 'Check EMAIL_USER and EMAIL_PASS in .env file. For Office365, you may need an app password.';
+      errorDetails.office365Config = {
+        host: process.env.EMAIL_HOST,
+        port: process.env.EMAIL_PORT,
+        user: process.env.EMAIL_USER
+      };
+    } else if (error.message.includes('connection timeout')) {
+      userMessage = 'Office365 SMTP connection timeout';
+      errorDetails.suggestion = 'Check firewall settings and network connectivity to Office365 SMTP';
     }
     
     return res.status(500).json({ 
       success: false, 
-      message: 'Failed to send report', 
+      message: userMessage, 
       error: error.message,
+      details: errorDetails,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
@@ -836,7 +1212,10 @@ export const getPatrolReportPreview = async (req, res) => {
       .query('SELECT cue_cnombre AS ClientName FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
 
     if (clientResult.recordset.length === 0) {
-      return res.status(404).json({ success: false, message: 'Client not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Client not found' 
+      });
     }
 
     const client = clientResult.recordset[0];
@@ -847,44 +1226,90 @@ export const getPatrolReportPreview = async (req, res) => {
       data: {
         clientId: parseInt(clientId),
         clientName: client.ClientName,
+        dateRange: {
+          days: daysRange,
+          startDate: dayjs(DATA_REFERENCE_DATE).subtract(daysRange, 'day').format('YYYY-MM-DD'),
+          endDate: DATA_REFERENCE_DATE
+        },
         summary: patrolData.summary,
         patrols: {
-          past: { count: patrolData.pastPatrols?.length || 0, sample: patrolData.pastPatrols?.slice(0, 5) || [] }
-        }
+          past: { 
+            count: patrolData.pastPatrols?.length || 0, 
+            sample: patrolData.pastPatrols?.slice(0, 5) || [] 
+          }
+        },
+        dataReference: DATA_REFERENCE_DATE
       }
     });
 
   } catch (error) {
     console.error('❌ Error getting patrol preview:', error);
-    return res.status(500).json({ success: false, message: 'Failed to get preview', error: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get preview', 
+      error: error.message 
+    });
   }
 };
 
 export const getSchedulerStatus = async (req, res) => {
   try {
+    // Load services if not already loaded
+    if (!servicesLoaded) {
+      await loadServices();
+    }
+
     const pool = await poolPromise;
     
-    const [dueResult, totalResult] = await Promise.all([
+    const [dueResult, totalResult, clientsResult] = await Promise.all([
       pool.request().query('SELECT COUNT(*) AS DueCount FROM _Datos.dbo.m_reportes_automaticos WHERE rep_tproximoenvio <= GETDATE() AND rep_cmail IS NOT NULL'),
-      pool.request().query('SELECT COUNT(*) AS TotalCount FROM _Datos.dbo.m_reportes_automaticos WHERE rep_cmail IS NOT NULL')
+      pool.request().query('SELECT COUNT(*) AS TotalCount FROM _Datos.dbo.m_reportes_automaticos WHERE rep_cmail IS NOT NULL'),
+      pool.request().query('SELECT COUNT(*) AS ClientsCount FROM _Datos.dbo.m_cuentas WHERE cue_iid IN (28, 39, 41, 48)')
     ]);
 
     const status = {
       schedules: {
         total: totalResult.recordset[0].TotalCount,
-        due: dueResult.recordset[0].DueCount
+        due: dueResult.recordset[0].DueCount,
+        active: totalResult.recordset[0].TotalCount - dueResult.recordset[0].DueCount
       },
-      dataTimeframe: `Using ${DATA_REFERENCE_DATE} as reference`,
-      serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
-      timezone: TZ,
-      testMode: TEST_MODE,
-      emailService: 'Enhanced with BM Security Logo & IPv4 support'
+      clients: {
+        total: clientsResult.recordset[0].ClientsCount,
+        monitored: [28, 39, 41, 48]
+      },
+      system: {
+        dataTimeframe: `Using ${DATA_REFERENCE_DATE} as reference`,
+        serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+        timezone: TZ,
+        testMode: TEST_MODE,
+        services: {
+          pdf: pdfService ? 'Available' : 'Unavailable',
+          email: emailService ? 'Available' : 'Unavailable',
+          database: 'Connected',
+          smtp: {
+            provider: 'Office365',
+            host: process.env.EMAIL_HOST,
+            port: process.env.EMAIL_PORT,
+            user: process.env.EMAIL_USER,
+            fromEmail: process.env.FROM_EMAIL || process.env.EMAIL_USER,
+            fromName: process.env.FROM_NAME || 'BM Security'
+          }
+        }
+      }
     };
 
-    res.status(200).json({ success: true, status });
+    res.status(200).json({ 
+      success: true, 
+      status,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+    });
   } catch (error) {
     console.error('❌ Error getting scheduler status:', error);
-    res.status(500).json({ success: false, message: 'Failed to get status', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get status', 
+      error: error.message 
+    });
   }
 };
 
@@ -904,20 +1329,32 @@ export const getAllClientsPerformance = async (req, res) => {
     const clients = await Promise.all(
       result.recordset.map(async (client) => {
         const patrolData = await getClientPatrols(client.ClientID, 7);
+        const summary = calculateSummary(patrolData, { patrols_per_day: 11 }, { daysInRange: 7 });
+        
         return {
           ...client,
-          performance: patrolData.summary
+          performance: summary,
+          lastUpdated: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
         };
       })
     );
 
     res.status(200).json({
       success: true,
-      data: { clients, total: clients.length }
+      data: { 
+        clients, 
+        total: clients.length,
+        timeframe: 'Last 7 days',
+        dataReference: DATA_REFERENCE_DATE
+      }
     });
   } catch (error) {
     console.error('❌ Error getting clients performance:', error);
-    res.status(500).json({ success: false, message: 'Failed to get performance data', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get performance data', 
+      error: error.message 
+    });
   }
 };
 
@@ -927,21 +1364,36 @@ export const getClientAnalyticsData = async (req, res) => {
     const daysRange = parseInt(req.query.days) || 30;
     
     const patrolData = await getClientPatrols(clientId, daysRange);
+    const summary = calculateSummary(patrolData, { patrols_per_day: 11 }, { daysInRange: daysRange });
     
     if (!patrolData) {
-      return res.status(404).json({ success: false, message: 'Client not found' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Client not found' 
+      });
     }
     
     res.status(200).json({ 
       success: true, 
       data: {
-        summary: patrolData.summary,
-        recentPatrols: patrolData.pastPatrols?.slice(0, 10) || []
+        clientId: parseInt(clientId),
+        daysAnalyzed: daysRange,
+        dateRange: {
+          start: dayjs(DATA_REFERENCE_DATE).subtract(daysRange, 'day').format('YYYY-MM-DD'),
+          end: DATA_REFERENCE_DATE
+        },
+        summary: summary,
+        recentPatrols: patrolData.pastPatrols?.slice(0, 10) || [],
+        dataReference: DATA_REFERENCE_DATE
       }
     });
   } catch (error) {
     console.error('❌ Error getting client analytics:', error);
-    res.status(500).json({ success: false, message: 'Failed to get analytics', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get analytics', 
+      error: error.message 
+    });
   }
 };
 
@@ -950,122 +1402,159 @@ export const testEmailConfiguration = async (req, res) => {
     const testEmail = process.env.TEST_EMAIL || process.env.EMAIL_USER;
     
     if (!testEmail) {
-      return res.status(400).json({ success: false, message: 'No test email configured in environment variables' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No test email configured in environment variables' 
+      });
     }
 
-    console.log('🧪 Testing email configuration with enhanced service...');
+    if (!emailService) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Email service unavailable',
+        error: 'Email service failed to load'
+      });
+    }
+
+    console.log('🧪 Testing Office365 email configuration...');
+    console.log(`📧 From: ${process.env.EMAIL_USER}`);
+    console.log(`📧 To: ${testEmail}`);
     
-    // Import email service directly
-    const emailService = await import('../service/emailService.js');
-    
-    const sendSimpleEmail = emailService.sendSimpleEmail || emailService.default?.sendSimpleEmail;
-    
-    if (!sendSimpleEmail) {
-      throw new Error('sendSimpleEmail function not found in emailService');
+    if (TEST_MODE) {
+      console.log('🚫 [TEST MODE] Email would be sent via Office365 SMTP');
+      return res.status(200).json({
+        success: true,
+        message: 'TEST MODE - Email would have been sent via Office365 SMTP',
+        testMode: true,
+        details: {
+          testEmail: testEmail,
+          fromEmail: process.env.EMAIL_USER,
+          smtpConfig: {
+            host: process.env.EMAIL_HOST,
+            port: process.env.EMAIL_PORT,
+            user: process.env.EMAIL_USER
+          },
+          timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+        }
+      });
     }
     
-    await sendSimpleEmail({
+    await emailService.sendSimpleEmail({
       to: testEmail,
-      subject: '📧 Email Configuration Test - BM SECURITY',
+      subject: '📧 Office365 Email Configuration Test - BM SECURITY',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2c5aa0;">✅ Email Configuration Test Successful</h2>
-          <p>Your email configuration is working correctly with the enhanced BM Security email service.</p>
-          
-          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <h4 style="margin-top: 0; color: #495057;">Test Details</h4>
-            <p><strong>Test Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
-            <p><strong>Timezone:</strong> ${TZ}</p>
-            <p><strong>Server:</strong> smtp.gmail.com:587</p>
-            <p><strong>Test Mode:</strong> ${TEST_MODE ? 'Enabled' : 'Disabled'}</p>
-            <p><strong>Email Service:</strong> Enhanced with BM Security Logo & IPv4 support</p>
-          </div>
-          
-          <p style="color: #7f8c8d; font-size: 12px;">
-            This is an automated test from your security reporting system.
-          </p>
+          <h2 style="color: #2c5aa0;">✅ Office365 Email Configuration Test Successful</h2>
+          <p>Your Office365 email configuration is working correctly.</p>
+          <p><strong>Test Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
+          <p><strong>SMTP Provider:</strong> Office365</p>
+          <p><strong>SMTP Server:</strong> ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}</p>
+          <p><strong>From Address:</strong> ${process.env.EMAIL_USER}</p>
+          <p><strong>To Address:</strong> ${testEmail}</p>
+          <p><strong>Service Status:</strong> Enhanced BM Security Email Service</p>
+          <p><strong>BobMorgan alerts@bmsecurity.com:</strong> ${process.env.EMAIL_USER}</p>
         </div>
       `
     });
 
     res.status(200).json({
       success: true,
-      message: 'Email test completed successfully',
+      message: 'Office365 email test completed successfully',
       details: {
         testEmail: testEmail,
-        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
-        timezone: TZ,
-        service: 'Enhanced email service with logo'
+        fromEmail: process.env.EMAIL_USER,
+        smtpConfig: {
+          host: process.env.EMAIL_HOST,
+          port: process.env.EMAIL_PORT,
+          user: process.env.EMAIL_USER,
+          secure: process.env.EMAIL_SECURE
+        },
+        bobMorganEmail: process.env.EMAIL_USER,
+        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
       }
     });
 
   } catch (error) {
-    console.error('❌ Email test failed:', error);
+    console.error('❌ Office365 email test failed:', error);
+    
+    let errorDetails = {
+      suggestion: 'Check your Office365 credentials and SMTP configuration',
+      bobMorganEmail: process.env.EMAIL_USER
+    };
+    
+    if (error.code === 'EAUTH') {
+      errorDetails.office365Help = 'For Office365, you may need to use an app password instead of your regular password';
+      errorDetails.configCheck = {
+        EMAIL_USER: process.env.EMAIL_USER,
+        EMAIL_HOST: process.env.EMAIL_HOST,
+        EMAIL_PORT: process.env.EMAIL_PORT
+      };
+    }
+    
     res.status(500).json({ 
       success: false, 
-      message: 'Email test failed', 
+      message: 'Office365 email test failed', 
       error: error.message,
-      details: {
-        suggestion: 'Check your EMAIL_USER and EMAIL_PASS environment variables. For Gmail, ensure you are using an App Password.'
-      }
+      details: errorDetails
     });
   }
 };
 
-/**
- * 🧪 DIAGNOSTIC ENDPOINT - Check service exports
- */
 export const diagnosticServices = async (req, res) => {
   try {
     console.log('🔍 Running service diagnostics...');
     
-    // Import services directly
-    const pdfService = await import('../service/pdfService.js');
-    const emailService = await import('../service/emailService.js');
+    // Load services if not already loaded
+    if (!servicesLoaded) {
+      await loadServices();
+    }
     
     const diagnostics = {
       pdfService: {
-        type: typeof pdfService,
-        exports: Object.keys(pdfService),
-        default: {
-          type: typeof pdfService.default,
-          isFunction: typeof pdfService.default === 'function',
-          keys: pdfService.default ? Object.keys(pdfService.default) : []
-        },
-        functions: {}
+        available: !!pdfService,
+        functions: pdfService ? Object.keys(pdfService).filter(key => typeof pdfService[key] === 'function') : []
       },
       emailService: {
-        type: typeof emailService,
-        exports: Object.keys(emailService),
-        default: {
-          type: typeof emailService.default,
-          isFunction: typeof emailService.default === 'function',
-          keys: emailService.default ? Object.keys(emailService.default) : []
-        },
-        functions: {}
+        available: !!emailService,
+        functions: emailService ? Object.keys(emailService).filter(key => typeof emailService[key] === 'function') : []
+      },
+      system: {
+        nodeVersion: process.version,
+        timezone: TZ,
+        testMode: TEST_MODE,
+        dataReference: DATA_REFERENCE_DATE,
+        serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+      },
+      office365Config: {
+        EMAIL_HOST: process.env.EMAIL_HOST,
+        EMAIL_PORT: process.env.EMAIL_PORT,
+        EMAIL_USER: process.env.EMAIL_USER ? '*** configured ***' : '❌ missing',
+        EMAIL_PASS: process.env.EMAIL_PASS ? '*** configured ***' : '❌ missing',
+        FROM_EMAIL: process.env.FROM_EMAIL,
+        FROM_NAME: process.env.FROM_NAME,
+        BOB_MORGAN_EMAIL: process.env.EMAIL_USER || 'alerts@bmsecurity.com'
       }
     };
     
-    // Check each export in pdfService
-    for (const key of Object.keys(pdfService)) {
-      diagnostics.pdfService.functions[key] = typeof pdfService[key];
-    }
-    
-    // Check each export in emailService
-    for (const key of Object.keys(emailService)) {
-      diagnostics.emailService.functions[key] = typeof emailService[key];
-    }
-    
     console.log('📊 Diagnostics completed');
+    console.log(`📧 BobMorgan alerts@bmsecurity.com Email: ${process.env.EMAIL_USER}`);
     
     res.status(200).json({
       success: true,
       diagnostics,
       recommendations: {
-        pdfService: diagnostics.pdfService.exports.length === 0 
-          ? 'No exports found - check if pdfService.js exists and has exports'
-          : 'Exports found - check function names above',
-        suggestion: 'Look for functions ending in "PDF" or "Report" in the exports list'
+        pdfService: diagnostics.pdfService.available 
+          ? `✅ ${diagnostics.pdfService.functions.length} PDF functions available`
+          : '❌ PDF service unavailable - check pdfService.js',
+        emailService: diagnostics.emailService.available 
+          ? `✅ ${diagnostics.emailService.functions.length} email functions available`
+          : '❌ Email service unavailable - check emailService.js and Office365 configuration',
+        office365: diagnostics.office365Config.EMAIL_USER && diagnostics.office365Config.EMAIL_PASS
+          ? '✅ Office365 credentials configured'
+          : '❌ Office365 credentials incomplete',
+        bobMorganEmail: diagnostics.office365Config.EMAIL_USER 
+          ? `✅ BobMorgan alerts@bmsecurity.com: ${process.env.EMAIL_USER}`
+          : '❌ BobMorgan email not configured'
       }
     });
     
@@ -1079,14 +1568,12 @@ export const diagnosticServices = async (req, res) => {
   }
 };
 
-/**
- * 🧪 COMPLETE FLOW TEST ENDPOINT
- */
 export const testCompleteFlow = async (req, res) => {
   try {
     const { clientId = 28, email, testEmail = true } = req.body;
     
-    console.log('🧪 Testing complete flow with enhanced services...');
+    console.log('🧪 Testing complete flow with Office365 SMTP...');
+    console.log(`📧 BobMorgan alerts@bmsecurity.com: ${process.env.EMAIL_USER}`);
     
     const patrolData = await getClientPatrols(clientId, 7);
     const dateRange = getPreviousWeekRange();
@@ -1100,44 +1587,82 @@ export const testCompleteFlow = async (req, res) => {
     console.log(`   - Patrols found: ${patrolData.pastPatrols?.length || 0}`);
     console.log(`   - Events transformed: ${events.length}`);
     console.log(`   - Posts transformed: ${posts.length}`);
-    console.log(`   - Valid events: ${events.filter(e => e.rec_tfechahora).length}`);
+    console.log(`   - Valid events: ${events.filter(e => e.formattedDate !== 'N/A').length}`);
+    console.log(`   - Compliance rate: ${summary.complianceRate}`);
+    console.log(`📧 From Email: ${process.env.EMAIL_USER}`);
     
     let emailResult = null;
+    let pdfBuffer = null;
+    
+    // Test PDF generation
+    try {
+      pdfBuffer = await generatePDF(
+        {
+          clientId: clientId,
+          clientName: `Test Client ${clientId}`,
+          startDate: dateRange.startDate,
+          endDate: dateRange.endDate,
+          events: events,
+          posts: posts,
+          patrols: patrolData.pastPatrols,
+          summary: summary
+        },
+        `Test Client ${clientId}`,
+        dateRange
+      );
+    } catch (pdfError) {
+      console.error('❌ PDF generation test failed:', pdfError.message);
+    }
+    
+    // Test email sending if requested
     if (testEmail && email) {
-      const emailService = await import('../service/emailService.js');
-      const sendSimpleEmail = emailService.sendSimpleEmail || emailService.default?.sendSimpleEmail;
-      
-      if (sendSimpleEmail) {
-        emailResult = await sendSimpleEmail({
-          to: email,
-          subject: '🧪 Complete Flow Test - BM SECURITY',
-          html: `
-            <div style="font-family: Arial, sans-serif;">
-              <h2 style="color: #2c5aa0;">🧪 Complete Flow Test</h2>
-              <p><strong>Data Transformation:</strong> ✅ Successful</p>
-              <p><strong>Patrols Processed:</strong> ${patrolData.pastPatrols?.length || 0}</p>
-              <p><strong>Events Created:</strong> ${events.length}</p>
-              <p><strong>Posts Created:</strong> ${posts.length}</p>
-              <p><strong>Summary:</strong> ${summary.complianceRate} compliance</p>
-              <p><strong>Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
-              <p><strong>Test Mode:</strong> ${TEST_MODE ? 'Enabled' : 'Disabled'}</p>
-              <p><strong>Email Service:</strong> Enhanced with BM Security Logo & IPv4 support</p>
-            </div>
-          `
-        });
+      try {
+        if (emailService && !TEST_MODE) {
+          emailResult = await emailService.sendSimpleEmail({
+            to: email,
+            subject: '🧪 Complete Flow Test - BM SECURITY (Office365)',
+            html: `
+              <div style="font-family: Arial, sans-serif;">
+                <h2 style="color: #2c5aa0;">🧪 Complete Flow Test - Office365 SMTP</h2>
+                <p><strong>Data Transformation:</strong> ✅ Successful</p>
+                <p><strong>Patrols Processed:</strong> ${patrolData.pastPatrols?.length || 0}</p>
+                <p><strong>Events Created:</strong> ${events.length}</p>
+                <p><strong>Posts Created:</strong> ${posts.length}</p>
+                <p><strong>Compliance Rate:</strong> ${summary.complianceRate}</p>
+                <p><strong>Performance Level:</strong> ${summary.performanceLevel}</p>
+                <p><strong>PDF Generated:</strong> ${pdfBuffer ? `✅ ${Math.round(pdfBuffer.length / 1024)} KB` : '❌ Failed'}</p>
+                <p><strong>SMTP Provider:</strong> Office365</p>
+                <p><strong>From Email:</strong> ${process.env.EMAIL_USER}</p>
+                <p><strong>BobMorgan alerts@bmsecurity.com :</strong> ${process.env.EMAIL_USER}</p>
+                <p><strong>Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
+                <p><strong>Test Mode:</strong> ${TEST_MODE ? 'Enabled' : 'Disabled'}</p>
+              </div>
+            `
+          });
+        } else if (TEST_MODE) {
+          emailResult = { testMode: true, message: 'Email would have been sent via Office365 SMTP' };
+        }
+      } catch (emailError) {
+        console.error('❌ Email test failed:', emailError.message);
+        emailResult = { error: emailError.message };
       }
     }
     
     res.status(200).json({
       success: true,
-      message: 'Complete flow test successful',
+      message: 'Complete flow test completed',
       data: {
         patrols: patrolData.pastPatrols?.length || 0,
         events: events.length,
         posts: posts.length,
         summary: summary,
-        emailTest: email ? (TEST_MODE ? 'test_mode' : 'sent') : 'skipped',
-        testMode: TEST_MODE
+        pdfTest: pdfBuffer ? `✅ ${Math.round(pdfBuffer.length / 1024)} KB` : '❌ Failed',
+        emailTest: email ? (TEST_MODE ? 'test_mode' : (emailResult && !emailResult.error ? 'sent' : 'failed')) : 'skipped',
+        testMode: TEST_MODE,
+        smtpProvider: 'Office365',
+        fromEmail: process.env.EMAIL_USER,
+        bobMorganEmail: process.env.EMAIL_USER,
+        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
       },
       emailResult: emailResult
     });
@@ -1148,11 +1673,16 @@ export const testCompleteFlow = async (req, res) => {
       success: false,
       message: 'Test failed',
       error: error.message,
-      testMode: TEST_MODE
+      testMode: TEST_MODE,
+      smtpProvider: 'Office365',
+      fromEmail: process.env.EMAIL_USER,
+      bobMorganEmail: process.env.EMAIL_USER,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
   }
 };
 
+// Export ALL functions that your routes need
 export default {
   getAllSchedules,
   getScheduleById,
@@ -1167,8 +1697,8 @@ export default {
   getAllClientsPerformance,
   getClientAnalyticsData,
   testEmailConfiguration,
-  testCompleteFlow,
   diagnosticServices,
+  testCompleteFlow,
   getHistoricalDateRange,
   getClientHistoricalPatrols,
   getClientPatrols,

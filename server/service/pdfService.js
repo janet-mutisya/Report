@@ -1,4 +1,4 @@
-// server/service/pdfService.js - FIXED VERSION
+// server/service/pdfService.js - FIXED VERSION (No Patrol Incidents in Events)
 import PDFDocument from "pdfkit";
 import dayjs from "dayjs";
 import { sql, poolPromise } from "../config/database.js";
@@ -17,25 +17,16 @@ const __dirname = path.dirname(__filename);
 
 const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
+// SIMPLIFIED COLOR SCHEME - Blue, White, Black only
 const COLORS = {
-  primary: '#1e40af',
-  primaryDark: '#1e3a8a',
-  secondary: '#64748b',
-  success: '#10b981',
-  warning: '#f59e0b',
-  danger: '#ef4444',
-  background: '#f8fafc',
-  white: '#ffffff',
+  primary: '#1e40af',     // Blue for headers, important elements
+  primaryDark: '#1e3a8a', // Darker blue
+  white: '#ffffff',       // White for backgrounds, text on dark
+  black: '#000000',       // Black for main text
   gray: {
-    100: '#f3f4f6',
-    200: '#e5e7eb',
-    300: '#d1d5db',
-    400: '#9ca3af',
-    500: '#6b7280',
-    600: '#4b5563',
-    700: '#374151',
-    800: '#1f2937',
-    900: '#111827'
+    300: '#d1d5db',       // Light gray for subtle backgrounds
+    600: '#4b5563',       // Medium gray for secondary text
+    800: '#1f2937'        // Dark gray for body text
   }
 };
 
@@ -71,18 +62,36 @@ function loadLogoFromFile() {
 }
 
 /**
+ * Calculate days in range - EXACT SAME AS EMAIL SERVICE
+ */
+function calculateDaysInRange(startDate, endDate) {
+  try {
+    const startDateObj = dayjs.tz(startDate, TZ);
+    const endDateObj = dayjs.tz(endDate, TZ);
+    const daysInRange = endDateObj.diff(startDateObj, 'day') + 1;
+    
+    console.log(`📅 [PDF] Days in range calculation: ${daysInRange} days (${startDate} to ${endDate})`);
+    return daysInRange;
+  } catch (error) {
+    console.error(`❌ [PDF] Error calculating days in range:`, error.message);
+    // Fallback calculation
+    return dayjs(endDate).diff(dayjs(startDate), 'day') + 1;
+  }
+}
+
+/**
  * Fetch client schedule and calculate expected patrols
  */
 async function fetchClientScheduleAndExpectedPatrols(clientId, startDate, endDate) {
   try {
-    console.log(`📅 Fetching client schedule for client ${clientId}`);
+    console.log(`📅 [PDF] Fetching client schedule for client ${clientId}`);
     
     // Get client schedule configuration
     const scheduleResult = await getPatrolScheduleConfig(clientId);
     
     if (scheduleResult.success && scheduleResult.data) {
       const schedule = scheduleResult.data;
-      console.log(`✅ Found custom schedule: ${schedule.PatrolsPerDay} patrols/day, ${schedule.ShiftType} shift`);
+      console.log(`✅ [PDF] Found custom schedule: ${schedule.PatrolsPerDay} patrols/day, ${schedule.ShiftType} shift`);
       
       // Calculate expected patrols based on schedule and date range
       const expectedPatrols = calculateExpectedPatrolsFromSchedule(schedule, startDate, endDate);
@@ -97,7 +106,7 @@ async function fetchClientScheduleAndExpectedPatrols(clientId, startDate, endDat
       };
     } else {
       // Fallback to default schedule
-      console.log(`📋 Using default schedule for client ${clientId}`);
+      console.log(`📋 [PDF] Using default schedule for client ${clientId}`);
       const defaultSchedule = await getClientSchedule(clientId);
       const expectedPatrols = calculateExpectedPatrolsFromSchedule(defaultSchedule, startDate, endDate);
       
@@ -111,9 +120,9 @@ async function fetchClientScheduleAndExpectedPatrols(clientId, startDate, endDat
       };
     }
   } catch (error) {
-    console.error(`❌ Error fetching client schedule:`, error.message);
+    console.error(`❌ [PDF] Error fetching client schedule:`, error.message);
     // Ultimate fallback
-    const daysInRange = dayjs(endDate).diff(dayjs(startDate), 'day') + 1;
+    const daysInRange = calculateDaysInRange(startDate, endDate);
     const defaultExpected = 11 * daysInRange;
     
     return {
@@ -155,12 +164,12 @@ function calculateExpectedPatrolsFromSchedule(schedule, startDate, endDate) {
       currentDate = currentDate.add(1, 'day');
     }
     
-    console.log(`📊 Expected patrols calculation: ${expected} total (${patrolsPerDay} weekdays, ${weekendPatrols} weekends)`);
+    console.log(`📊 [PDF] Expected patrols calculation: ${expected} total (${patrolsPerDay} weekdays, ${weekendPatrols} weekends)`);
     return expected;
   } catch (error) {
-    console.error(`❌ Error calculating expected patrols:`, error.message);
+    console.error(`❌ [PDF] Error calculating expected patrols:`, error.message);
     // Fallback calculation
-    const daysInRange = dayjs(endDate).diff(dayjs(startDate), 'day') + 1;
+    const daysInRange = calculateDaysInRange(startDate, endDate);
     return 11 * daysInRange;
   }
 }
@@ -170,7 +179,7 @@ function calculateExpectedPatrolsFromSchedule(schedule, startDate, endDate) {
  */
 async function fetchSitePostNames(clientId) {
   try {
-    console.log(`🏢 Fetching site post names for client ${clientId}`);
+    console.log(`🏢 [PDF] Fetching site post names for client ${clientId}`);
     
     const pool = await poolPromise;
     
@@ -204,14 +213,14 @@ async function fetchSitePostNames(clientId) {
           }
         }
       });
-      console.log(`✅ Found ${postsResult.recordset.length} site posts`);
+      console.log(`✅ [PDF] Found ${postsResult.recordset.length} site posts`);
     } else {
-      console.log(`⚠️ No posts found for client ${clientId}`);
+      console.log(`⚠️ [PDF] No posts found for client ${clientId}`);
     }
 
     return postMap;
   } catch (error) {
-    console.error(`❌ Error fetching site post names:`, error.message);
+    console.error(`❌ [PDF] Error fetching site post names:`, error.message);
     return new Map();
   }
 }
@@ -221,7 +230,7 @@ async function fetchSitePostNames(clientId) {
  */
 async function fetchEventDescriptions() {
   try {
-    console.log(`📋 Fetching event descriptions`);
+    console.log(`📋 [PDF] Fetching event descriptions`);
     
     const pool = await poolPromise;
     const eventsResult = await pool.request().query(`
@@ -262,40 +271,40 @@ async function fetchEventDescriptions() {
       }
     });
 
-    console.log(`✅ Found ${eventMap.size} event descriptions`);
+    console.log(`✅ [PDF] Found ${eventMap.size} event descriptions`);
     return eventMap;
   } catch (error) {
-    console.error(`❌ Error fetching event descriptions:`, error.message);
+    console.error(`❌ [PDF] Error fetching event descriptions:`, error.message);
     return new Map();
   }
 }
 
 /**
- * Fetch FILTERED events from reception tables (matches PDF logic)
+ * Fetch FILTERED events - EXCLUDING PATROL INCIDENTS (only VIGICONTROL arrivals and verified alarms)
  */
 async function fetchFilteredEvents(clientId, startDate, endDate, receptionTables = ['p_recepcion202511', 'p_recepcion202510']) {
   try {
-    console.log(`🔍 Fetching FILTERED events for client ${clientId} (${startDate} to ${endDate})`);
+    console.log(`🔍 [PDF] Fetching FILTERED events (NO patrol incidents) for client ${clientId} (${startDate} to ${endDate})`);
     
     const validTables = receptionTables.filter(table => 
       /^p_recepcion\d{6}$/.test(table)
     );
     
     if (validTables.length === 0) {
-      console.warn('⚠️ No valid reception tables provided');
+      console.warn('⚠️ [PDF] No valid reception tables provided');
       return [];
     }
     
     const pool = await poolPromise;
     
+    // UPDATED: Exclude _PI and patrol incident codes, only include VIGICONTROL and verified alarms
     const unions = validTables.map(table => 
       `SELECT rec_iid, rec_iidcuenta, rec_czona, rec_tfechahora, rec_cContenido, rec_calarma 
        FROM [_Datos].[dbo].[${table}]
        WHERE rec_iidcuenta = @clientId
          AND rec_tfechahora BETWEEN @startDate AND @endDate
          AND (
-           rec_calarma LIKE '%_PI%' 
-           OR rec_calarma LIKE '%SMARTPANICS%'
+           rec_calarma LIKE '%VIGICONTROL%'
            OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
          )`
     ).join('\nUNION ALL\n');
@@ -311,10 +320,10 @@ async function fetchFilteredEvents(clientId, startDate, endDate, receptionTables
       .input('endDate', sql.DateTime, endDate)
       .query(query);
 
-    console.log(`✅ Found ${eventsResult.recordset.length} FILTERED events (operational only)`);
+    console.log(`✅ [PDF] Found ${eventsResult.recordset.length} FILTERED events (VIGICONTROL arrivals only)`);
     return eventsResult.recordset;
   } catch (error) {
-    console.error(`❌ Error fetching filtered events:`, error.message);
+    console.error(`❌ [PDF] Error fetching filtered events:`, error.message);
     return [];
   }
 }
@@ -324,27 +333,27 @@ async function fetchFilteredEvents(clientId, startDate, endDate, receptionTables
  */
 async function fetchCompletedPatrolCounts(clientId, startDate, endDate, receptionTables = ['p_recepcion202511', 'p_recepcion202510']) {
   try {
-    console.log(`📊 Fetching completed patrol counts for client ${clientId} (${startDate} to ${endDate})`);
+    console.log(`📊 [PDF] Fetching completed patrol counts for client ${clientId} (${startDate} to ${endDate})`);
     
     const validTables = receptionTables.filter(table => 
       /^p_recepcion\d{6}$/.test(table)
     );
     
     if (validTables.length === 0) {
-      console.warn('⚠️ No valid reception tables provided');
+      console.warn('⚠️ [PDF] No valid reception tables provided');
       return new Map();
     }
     
     const pool = await poolPromise;
     
+    // Count only VIGICONTROL arrivals for patrol completion
     const unions = validTables.map(table => 
       `SELECT rec_iid, rec_iidcuenta, rec_czona, rec_tfechahora, rec_cContenido, rec_calarma 
        FROM [_Datos].[dbo].[${table}]
        WHERE rec_iidcuenta = @clientId
          AND rec_tfechahora BETWEEN @startDate AND @endDate
          AND (
-           rec_calarma LIKE '%_PI%' 
-           OR rec_calarma LIKE '%SMARTPANICS%'
+           rec_calarma LIKE '%VIGICONTROL%'
            OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
          )`
     ).join('\nUNION ALL\n');
@@ -380,20 +389,20 @@ async function fetchCompletedPatrolCounts(clientId, startDate, endDate, receptio
       }
     });
 
-    console.log(`✅ Found patrol counts for ${completedMap.size} posts`);
+    console.log(`✅ [PDF] Found patrol counts for ${completedMap.size} posts`);
     return completedMap;
   } catch (error) {
-    console.error(`❌ Error fetching patrol counts:`, error.message);
+    console.error(`❌ [PDF] Error fetching patrol counts:`, error.message);
     return new Map();
   }
 }
 
 /**
- * Fetch REPORTED INCIDENTS from m_incidencias table
+ * Fetch ONLY REPORTED INCIDENTS from m_incidencias table (no patrol incidents)
  */
 async function fetchReportedIncidents(clientId, startDate, endDate) {
   try {
-    console.log(`🚨 Fetching REPORTED incidents for client ${clientId}`);
+    console.log(`🚨 [PDF] Fetching REPORTED incidents ONLY for client ${clientId}`);
     
     const pool = await poolPromise;
     
@@ -414,56 +423,10 @@ async function fetchReportedIncidents(clientId, startDate, endDate) {
 
     const incidentCount = incidentResult.recordset[0]?.IncidentCount || 0;
     
-    console.log(`✅ Found ${incidentCount} REPORTED incidents`);
+    console.log(`✅ [PDF] Found ${incidentCount} REPORTED incidents`);
     return incidentCount;
   } catch (error) {
-    console.error(`❌ Error fetching reported incidents:`, error.message);
-    return 0;
-  }
-}
-
-/**
- * Fetch PATROL INCIDENTS (_PI events) from reception tables
- */
-async function fetchPatrolIncidents(clientId, startDate, endDate, receptionTables = ['p_recepcion202511', 'p_recepcion202510']) {
-  try {
-    console.log(`🚨 Fetching PATROL incidents for client ${clientId}`);
-    
-    const validTables = receptionTables.filter(table => 
-      /^p_recepcion\d{6}$/.test(table)
-    );
-    
-    if (validTables.length === 0) {
-      console.warn('⚠️ No valid reception tables provided');
-      return 0;
-    }
-    
-    const pool = await poolPromise;
-    
-    const unions = validTables.map(table => 
-      `SELECT rec_iid, rec_iidcuenta, rec_czona, rec_tfechahora, rec_cContenido, rec_calarma 
-       FROM [_Datos].[dbo].[${table}]
-       WHERE rec_iidcuenta = @clientId
-         AND rec_tfechahora BETWEEN @startDate AND @endDate
-         AND rec_calarma IN ('_PI', 'SMARTPANICS: SOS', 'SMARTPANICS: FUEGO', 'SMARTPANICS: ASISTENCIA')`
-    ).join('\nUNION ALL\n');
-
-    const query = `
-      ${unions}
-    `;
-    
-    const incidentResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .input('startDate', sql.DateTime, startDate)
-      .input('endDate', sql.DateTime, endDate)
-      .query(query);
-
-    const patrolIncidentCount = incidentResult.recordset.length || 0;
-    
-    console.log(`✅ Found ${patrolIncidentCount} PATROL incidents`);
-    return patrolIncidentCount;
-  } catch (error) {
-    console.error(`❌ Error fetching patrol incidents:`, error.message);
+    console.error(`❌ [PDF] Error fetching reported incidents:`, error.message);
     return 0;
   }
 }
@@ -492,24 +455,15 @@ function formatEventDescription(alarmCode, eventMap, fallbackContent = '') {
     'V26': 'Security Round',
     'V10': 'Login',
     'V11': 'Logout',
-    '_PI': 'Patrol Incident',
-    '_PD': 'Patrol Departure',
     'VIGICONTROL: ARRIBO': 'Arrival',
     'VIGICONTROL: LOGIN': 'Login',
     'VIGICONTROL: LOGOUT': 'Logout',
     'VIGICONTROL: SALIDA': 'Departure',
     'VIGICONTROL: ENTRADA': 'Entry',
-    'SMARTPANICS: SOS': 'Emergency SOS',
-    'SMARTPANICS: FUEGO': 'Fire Alarm',
-    'SMARTPANICS: ASISTENCIA': 'Assistance Request',
-    'SMARTPANICS: PANICO': 'Panic Alert',
     'ARRIBO': 'Arrival',
     'SALIDA': 'Departure',
     'ENTRADA': 'Entry',
-    'RONDA': 'Patrol Round',
-    'INCIDENTE': 'Incident',
-    'ALARMA': 'Alarm',
-    'EMERGENCIA': 'Emergency'
+    'RONDA': 'Patrol Round'
   };
 
   return commonMappings[code] || code || "Unknown Event";
@@ -578,6 +532,17 @@ function extractEventData(event, zoneMap, eventMap) {
 }
 
 /**
+ * Clean post name by removing leading numbers and dots
+ */
+function cleanPostName(postName) {
+  if (!postName) return postName;
+  
+  // Remove leading numbers followed by dot and space (e.g., "6. Aloy" -> "Aloy")
+  // Matches patterns like: "1. ", "14. ", "123. "
+  return postName.replace(/^\d+\.\s*/, '').trim();
+}
+
+/**
  * Calculate performance metrics - NO DECIMALS IN PERCENTAGES
  */
 function calculatePerformance(completedPatrols, expectedPatrolsPerPost) {
@@ -596,7 +561,7 @@ function calculatePerformance(completedPatrols, expectedPatrolsPerPost) {
     if (numericPercentage >= 90) excellentZones++;
     
     performanceData.push({
-      SitePost: postName,
+      SitePost: cleanPostName(postName), // Clean the post name
       Actual: completed,
       Expected: expected,
       Percentage: percentageDisplay,
@@ -650,8 +615,8 @@ function wrapText(doc, text, maxWidth, fontSize = 8) {
 /**
  * Generate Historical Report PDF
  */
-export async function generateHistoricalReportEmail(data, clientName, dateRange) {
-  console.log(`📊 [Historical Report] Generating for: ${clientName}`);
+export async function generateHistoricalReportPDF(data, clientName, dateRange) {
+  console.log(`📊 [PDF] Generating Historical Report for: ${clientName}`);
   
   const pdfData = {
     clientId: data.clientId || data.client?.ClientID || 28,
@@ -670,8 +635,8 @@ export async function generateHistoricalReportEmail(data, clientName, dateRange)
 /**
  * Generate Patrol Report PDF
  */
-export async function generatePatrolReportEmail(data, clientName, dateRange) {
-  console.log(`📊 [Patrol Report] Generating for: ${clientName}`);
+export async function generatePatrolReportPDF(data, clientName, dateRange) {
+  console.log(`📊 [PDF] Generating Patrol Report for: ${clientName}`);
   
   const pdfData = {
     clientId: data.clientId || data.client?.ClientID || 28,
@@ -688,7 +653,7 @@ export async function generatePatrolReportEmail(data, clientName, dateRange) {
 }
 
 /**
- * MAIN: Generate Dashboard PDF - WITH CLIENT SCHEDULE INTEGRATION
+ * MAIN: Generate Dashboard PDF - UPDATED (No Patrol Incidents, No Executive Summary)
  */
 export async function generateDashboardPDF(clientData) {
   console.log(`\n🎨 [PDF Generation - Starting]`);
@@ -704,10 +669,8 @@ export async function generateDashboardPDF(clientData) {
     console.log(`   Client: ${clientName} (ID: ${clientId})`);
     console.log(`   Period: ${startDate} → ${endDate}`);
     
-    // Calculate date range
-    const startDateObj = dayjs.tz(startDate, TZ);
-    const endDateObj = dayjs.tz(endDate, TZ);
-    const daysInRange = endDateObj.diff(startDateObj, 'day') + 1;
+    // Calculate date range using consistent function
+    const daysInRange = calculateDaysInRange(startDate, endDate);
 
     console.log(`📅 Date Range: ${daysInRange} days`);
     
@@ -722,7 +685,7 @@ export async function generateDashboardPDF(clientData) {
     
     console.log(`🎯 Expected Patrols per Post: ${expectedPatrolsPerPost} (${scheduleData.scheduleInfo})`);
     
-    // Fetch mappings and FILTERED events from database
+    // Fetch mappings and FILTERED events from database (NO patrol incidents)
     console.log(`\n🔄 Fetching database data...`);
     const zoneMap = await fetchSitePostNames(clientId);
     const eventMap = await fetchEventDescriptions();
@@ -731,13 +694,11 @@ export async function generateDashboardPDF(clientData) {
     
     console.log(`📊 Zone mappings loaded: ${zoneMap.size} entries`);
     
-    // Fetch BOTH types of incidents
+    // Fetch ONLY reported incidents (no patrol incidents)
     const reportedIncidents = await fetchReportedIncidents(clientId, startDate, endDate);
-    const patrolIncidents = await fetchPatrolIncidents(clientId, startDate, endDate);
-    const totalIncidents = reportedIncidents + patrolIncidents;
 
-    // Process FILTERED events only
-    console.log(`\n🔄 Processing ${filteredEvents.length} FILTERED events...`);
+    // Process FILTERED events only (VIGICONTROL arrivals)
+    console.log(`\n🔄 Processing ${filteredEvents.length} FILTERED events (NO patrol incidents)...`);
     const enhancedEvents = filteredEvents.map(event => {
       return extractEventData(event, zoneMap, eventMap);
     });
@@ -746,21 +707,18 @@ export async function generateDashboardPDF(clientData) {
       event.Date !== 'N/A' && event.Zone !== 'Unknown Post'
     );
     
-    console.log(`✅ Processing ${validEvents.length} valid filtered events for display`);
+    console.log(`Processing ${validEvents.length} valid filtered events for display`);
 
     const performanceResults = calculatePerformance(completedPatrols, expectedPatrolsPerPost);
     
-    console.log(`\n📊 Final Metrics:`);
+    console.log(`\n✅ Final Metrics:`);
     console.log(`   - Days in Range: ${daysInRange}`);
     console.log(`   - Posts: ${performanceResults.totalZones}`);
     console.log(`   - Completed: ${performanceResults.totalCompleted}/${performanceResults.totalExpected} = ${performanceResults.overallRate}%`);
     console.log(`   - Reported Incidents: ${reportedIncidents}`);
-    console.log(`   - Patrol Incidents: ${patrolIncidents}`);
-    console.log(`   - TOTAL Incidents: ${totalIncidents}`);
     console.log(`   - Filtered Events: ${filteredEvents.length}`);
     console.log(`   - Valid Events to display: ${validEvents.length}`);
     console.log(`   - Shift Type: ${shiftType}`);
-    console.log(`   - Expected Patrols: ${expectedPatrolsPerPost} (based on client schedule)`);
 
     // Create PDF
     const doc = new PDFDocument({ 
@@ -806,7 +764,7 @@ export async function generateDashboardPDF(clientData) {
       return false;
     };
 
-    // ========== HEADER WITH LARGER LEFT-ALIGNED BM SECURITY LOGO ==========
+    // HEADER WITH LARGER LEFT-ALIGNED BM SECURITY LOGO 
     const logoWidth = 160;
     const logoHeight = 80;
     const logoX = 40;
@@ -843,7 +801,7 @@ export async function generateDashboardPDF(clientData) {
        .fontSize(20)
        .text('PATROL SUMMARY', headerTextX, headerTextY);
     
-    doc.fillColor(COLORS.secondary)
+    doc.fillColor(COLORS.black)
        .fontSize(14)
        .text(clientName.toUpperCase(), headerTextX, headerTextY + 28);
     
@@ -866,49 +824,44 @@ export async function generateDashboardPDF(clientData) {
     const performanceLevel = performanceResults.overallRateNumeric >= 90 ? 'EXCELLENT' : 
                            performanceResults.overallRateNumeric >= 80 ? 'GOOD' : 
                            performanceResults.overallRateNumeric >= 70 ? 'SATISFACTORY' : 'NEEDS IMPROVEMENT';
-    const performanceColor = performanceResults.overallRateNumeric >= 90 ? COLORS.success : 
-                           performanceResults.overallRateNumeric >= 80 ? COLORS.warning : COLORS.danger;
 
     const complianceRate = Math.round((performanceResults.totalCompleted / performanceResults.totalExpected) * 100);
     
+    // UPDATED: Single metric for reported incidents only
     const metrics = [
       { 
         label: 'Overall Performance', 
         value: `${performanceResults.overallRate}%`, 
-        color: performanceColor,
         subtext: `${performanceResults.totalCompleted}/${performanceResults.totalExpected} patrols (${performanceLevel})`
       },
       { 
         label: 'Security Posts', 
         value: performanceResults.totalZones, 
-        color: COLORS.primary,
         subtext: `${performanceResults.excellentZones} excellent, ${performanceResults.underperformingZones} needs attention`
       },
       { 
         label: 'Reported Incidents', 
-        value: totalIncidents, 
-        color: totalIncidents > 0 ? COLORS.danger : COLORS.success,
-        subtext: totalIncidents > 0 ? `${reportedIncidents} reported, ${patrolIncidents} from patrols` : 'All clear'
+        value: reportedIncidents, 
+        subtext: reportedIncidents === 0 ? 'No incidents reported' : `${reportedIncidents} incident${reportedIncidents > 1 ? 's' : ''} logged`
       },
       { 
         label: 'Compliance Rate', 
         value: `${complianceRate}%`, 
-        color: complianceRate >= 90 ? COLORS.success : COLORS.warning,
         subtext: `Expected: ${expectedPatrolsPerPost} per post`
       }
     ];
 
-    // Metrics grid
+    // Metrics grid - ALL IN BLUE FOR VALUES
     metrics.forEach((metric, index) => {
       const xPos = 40 + (index % 2) * 270;
       const yMetric = yPos + Math.floor(index / 2) * 50;
       
-      doc.fillColor(metric.color)
+      doc.fillColor(COLORS.primary)
          .fontSize(20)
          .font('Helvetica-Bold')
          .text(String(metric.value), xPos, yMetric);
       
-      doc.fillColor(COLORS.gray[700])
+      doc.fillColor(COLORS.black)
          .fontSize(10)
          .font('Helvetica-Bold')
          .text(metric.label, xPos, yMetric + 22);
@@ -939,7 +892,7 @@ export async function generateDashboardPDF(clientData) {
       
       yPos += 20;
 
-      // Table header
+      // Table header - BLUE BACKGROUND, WHITE TEXT
       doc.fillColor(COLORS.primary)
          .rect(40, yPos, 515, 20)
          .fill();
@@ -962,15 +915,10 @@ export async function generateDashboardPDF(clientData) {
         checkPageBreak(15);
         
         if (index % 2 === 0) {
-          doc.fillColor(COLORS.background).rect(40, yPos, 515, 15).fill();
+          doc.fillColor(COLORS.gray[300]).rect(40, yPos, 515, 15).fill();
         }
         
-        let textColor = COLORS.danger;
-        if (post.numericPercentage >= 70) textColor = COLORS.warning;
-        if (post.numericPercentage >= 90) textColor = COLORS.success;
-        if (post.numericPercentage >= 95) textColor = COLORS.primary;
-        
-        doc.fillColor(textColor)
+        doc.fillColor(COLORS.black)
            .fontSize(8)
            .font('Helvetica')
            .text(post.SitePost, 45, yPos + 5, { width: 240 })
@@ -981,13 +929,10 @@ export async function generateDashboardPDF(clientData) {
         yPos += 15;
       });
 
-      // Grand total
+      // Grand total - BLUE BACKGROUND, WHITE TEXT
       checkPageBreak(20);
       
-      const overallColor = performanceResults.overallRateNumeric >= 90 ? COLORS.success : 
-                          performanceResults.overallRateNumeric >= 80 ? COLORS.warning : COLORS.danger;
-      
-      doc.fillColor(overallColor)
+      doc.fillColor(COLORS.primary)
          .rect(40, yPos, 515, 20)
          .fill();
       
@@ -1002,7 +947,7 @@ export async function generateDashboardPDF(clientData) {
       yPos += 35;
     }
 
-    // ========== PATROL EVENTS LOG - SHOW FILTERED EVENTS ONLY ==========
+    // ========== PATROL EVENTS LOG - VIGICONTROL ARRIVALS ONLY ==========
     if (validEvents.length > 0) {
       checkPageBreak(50);
       
@@ -1024,11 +969,11 @@ export async function generateDashboardPDF(clientData) {
       doc.fillColor(COLORS.gray[600])
          .fontSize(9)
          .font('Helvetica')
-         .text(`Operational events: ${validEvents.length}`, 40, yPos);
+         .text(`VIGICONTROL arrivals logged: ${validEvents.length}`, 40, yPos);
       
       yPos += 20;
 
-      // Table header
+      // Table header - BLUE BACKGROUND, WHITE TEXT
       doc.fillColor(COLORS.primary)
          .rect(40, yPos, 515, 25)
          .fill();
@@ -1043,17 +988,9 @@ export async function generateDashboardPDF(clientData) {
       
       yPos += 30;
 
-      // Event rows with incident highlighting - SHOW FILTERED EVENTS
+      // Event rows - ALL BLACK TEXT, gray alternating backgrounds
       let eventsDisplayed = 0;
       eventsToShow.forEach((event, index) => {
-        const alarmCode = (event.rawData?.rec_calarma || '').toUpperCase().trim();
-        
-        const isIncident = 
-          alarmCode === '_PI' ||
-          alarmCode === 'SMARTPANICS: SOS' ||
-          alarmCode === 'SMARTPANICS: FUEGO' ||
-          alarmCode === 'SMARTPANICS: ASISTENCIA';
-        
         const eventLines = wrapText(doc, event.Event, 195, 9);
         const zoneLines = wrapText(doc, event.Zone, 135, 9);
         const maxLines = Math.max(eventLines.length, zoneLines.length);
@@ -1061,20 +998,15 @@ export async function generateDashboardPDF(clientData) {
         
         checkPageBreak(rowHeight + 5);
         
-        // Background color for incidents
-        if (isIncident) {
-          doc.fillColor(COLORS.danger + '20')
-             .rect(40, yPos, 515, rowHeight)
-             .fill();
-        } else if (index % 2 === 0) {
-          doc.fillColor(COLORS.background)
+        // Background color - light gray for alternating
+        if (index % 2 === 0) {
+          doc.fillColor(COLORS.gray[300])
              .rect(40, yPos, 515, rowHeight)
              .fill();
         }
         
-        const textColor = isIncident ? COLORS.danger : COLORS.gray[800];
-        
-        doc.fillColor(textColor)
+        // All text in black
+        doc.fillColor(COLORS.black)
            .fontSize(9)
            .font('Helvetica')
            .text(event.Date, 45, yPos + 6, { width: 70 })
@@ -1085,7 +1017,7 @@ export async function generateDashboardPDF(clientData) {
           doc.text(line, 195, yPos + 6 + (lineIndex * 12), { width: 195 });
         });
         
-        // Multi-line zone (now shows actual post names)
+        // Multi-line zone
         zoneLines.forEach((line, lineIndex) => {
           doc.text(line, 405, yPos + 6 + (lineIndex * 12), { width: 135 });
         });
@@ -1094,90 +1026,44 @@ export async function generateDashboardPDF(clientData) {
         eventsDisplayed++;
       });
 
-      console.log(`📋 Displayed ${eventsDisplayed} FILTERED events in PDF`);
+      console.log(`📋 Displayed ${eventsDisplayed} VIGICONTROL arrival events in PDF`);
       yPos += 20;
     } else {
       checkPageBreak(40);
       
-      doc.fillColor(COLORS.warning)
+      doc.fillColor(COLORS.black)
          .fontSize(12)
          .font('Helvetica')
-         .text('No operational event data available for this period', 40, yPos, { align: 'center' });
+         .text('No patrol event data available for this period', 40, yPos, { align: 'center' });
       
       yPos += 30;
     }
 
-    // ========== EXECUTIVE SUMMARY ==========
-    checkPageBreak(150);
-    
-    doc.fillColor(COLORS.primary)
-       .fontSize(16)
-       .font('Helvetica-Bold')
-       .text('EXECUTIVE SUMMARY', 40, yPos);
-    
-    yPos += 25;
-    
-    // Color-coded summary items
-    const summaryComplianceRate = Math.round((performanceResults.totalCompleted / performanceResults.totalExpected) * 100);
-    
-    const summaryItems = [
-      { 
-        text: `Overall Performance: ${performanceResults.overallRate}%`, 
-        subtext: performanceLevel,
-        color: performanceColor,
-        bullet: '•'
-      },
-      { 
-        text: `Security Coverage: ${performanceResults.totalZones} posts monitored`, 
-        subtext: `${performanceResults.excellentZones} excellent, ${performanceResults.underperformingZones} need attention`,
-        color: performanceResults.underperformingZones > 0 ? COLORS.warning : COLORS.success,
-        bullet: '•'
-      },
-      { 
-        text: `Patrol Compliance: ${summaryComplianceRate}%`, 
-        subtext: `${performanceResults.totalCompleted} completed of ${performanceResults.totalExpected} expected patrols`,
-        color: summaryComplianceRate >= 90 ? COLORS.success : COLORS.warning,
-        bullet: '•'
-      },
-      { 
-        text: `Security Incidents: ${totalIncidents}`, 
-        subtext: totalIncidents > 0 ? `${reportedIncidents} reported incidents, ${patrolIncidents} patrol alerts` : 'All clear',
-        color: totalIncidents > 0 ? COLORS.danger : COLORS.success,
-        bullet: '•'
-      },
-      { 
-        text: `Operational Events: ${validEvents.length} recorded`, 
-        subtext: `Filtered to show only patrols, incidents, and verified alarms`,
-        color: COLORS.success,
-        bullet: '•'
-      },
-      { 
-        text: `Schedule Compliance: ${scheduleData.hasCustomSchedule ? 'Custom' : 'Standard'}`, 
-        subtext: `${scheduleData.patrolsPerDay} patrols/day - ${shiftType} shift`,
-        color: COLORS.primary,
-        bullet: '•'
-      }
-    ];
-
-    summaryItems.forEach((item, index) => {
-      checkPageBreak(30);
+    // ========== INCIDENTS OVERVIEW (if any reported) ==========
+    if (reportedIncidents > 0) {
+      checkPageBreak(100);
       
-      doc.fillColor(item.color)
-         .fontSize(12)
-         .text(item.bullet, 50, yPos);
-      
-      doc.fillColor(COLORS.gray[800])
-         .fontSize(10)
+      doc.fillColor(COLORS.primary)
+         .fontSize(16)
          .font('Helvetica-Bold')
-         .text(item.text, 65, yPos);
+         .text('INCIDENTS OVERVIEW', 40, yPos);
+      
+      yPos += 25;
+      
+      doc.fillColor(COLORS.black)
+         .fontSize(10)
+         .font('Helvetica')
+         .text(`During this reporting period, ${reportedIncidents} incident${reportedIncidents > 1 ? 's were' : ' was'} formally reported and logged in the system.`, 40, yPos, { width: 515 });
+      
+      yPos += 25;
       
       doc.fillColor(COLORS.gray[600])
          .fontSize(9)
          .font('Helvetica')
-         .text(item.subtext, 65, yPos + 14);
+         .text('All incidents are documented with detailed reports including timestamps, locations, and resolution status. For complete incident details, please refer to the dedicated incident management system.', 40, yPos, { width: 515 });
       
-      yPos += 30;
-    });
+      yPos += 40;
+    }
 
     // ========== FOOTER ==========
     const pageCount = doc.bufferedPageRange().count;
@@ -1186,7 +1072,7 @@ export async function generateDashboardPDF(clientData) {
       
       let footerY = 780;
       
-      doc.fillColor(COLORS.gray[500])
+      doc.fillColor(COLORS.gray[600])
          .fontSize(8)
          .font('Helvetica')
          .text('Confidential Security Report - For Authorized Personnel Only', 40, footerY)
@@ -1197,11 +1083,11 @@ export async function generateDashboardPDF(clientData) {
     
     console.log(`\n✅ PDF generated successfully!`);
     console.log(`   - Total pages: ${pageCount}`);
-    console.log(`   - ${validEvents.length} events processed and displayed`);
+    console.log(`   - ${validEvents.length} VIGICONTROL arrivals displayed`);
     console.log(`   - ${performanceResults.totalZones} security posts analyzed`);
-    console.log(`   - ${totalIncidents} TOTAL incidents (${reportedIncidents} reported + ${patrolIncidents} patrol alerts)`);
+    console.log(`   - ${reportedIncidents} reported incidents`);
     console.log(`   - Shift Type: ${shiftType}`);
-    console.log(`   - Expected Patrols: ${expectedPatrolsPerPost} (based on client schedule)`);
+    console.log(`   - Expected Patrols: ${expectedPatrolsPerPost}`);
     
     return pdfPromise;
 
@@ -1211,15 +1097,14 @@ export async function generateDashboardPDF(clientData) {
   }
 }
 
-// ADD THE MISSING FUNCTION THAT'S CAUSING THE ERROR
 export async function generatePDFReport(clientData) {
-  console.log(`📄 [PDF Report] Generating PDF report...`);
+  console.log(`📄 [PDF] Generating PDF report...`);
   return await generateDashboardPDF(clientData);
 }
 
 export default {
   generateDashboardPDF,
-  generateHistoricalReportEmail,
-  generatePatrolReportEmail,
-  generatePDFReport // ADD THIS TO EXPORTS
+  generateHistoricalReportPDF,
+  generatePatrolReportPDF,
+  generatePDFReport 
 };
