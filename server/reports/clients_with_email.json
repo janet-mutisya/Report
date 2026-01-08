@@ -1,0 +1,22 @@
+[
+  {
+    "accountNumber": "A011      ",
+    "email": "rirungu@bmsecurity.com",
+    "name": "HIGHCHEM LTD",
+    "company": "",
+    "type": "5",
+    "partition": "0",
+    "phone": "0720 736 241",
+    "active": "unknown"
+  },
+  {
+    "accountNumber": "TST6      ",
+    "email": "bmsystems@bmsecurity.com",
+    "name": "SMART PANIC",
+    "company": "",
+    "type": "0",
+    "partition": "5",
+    "phone": "0725326961",
+    "active": "unknown"
+  }
+]

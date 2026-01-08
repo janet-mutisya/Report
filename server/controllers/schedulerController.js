@@ -1,113 +1,181 @@
-// server/controllers/schedulerController.js - COMPLETE OFFICE365 SMTP VERSION
-import sql from 'mssql';
-import { poolPromise } from '../config/database.js';
-import { 
-  triggerPatrolReportsNow,
-  triggerDynamicReportsNow
-} from '../service/scheduler.js';
+// server/controllers/schedulerController.js - UPDATED TO USE OPTIMIZED REPORT MODEL
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import weekOfYear from 'dayjs/plugin/weekOfYear.js';
 import isoWeek from 'dayjs/plugin/isoWeek.js';
+import { sql, poolPromise } from '../config/database.js';
 
-// Enable timezone and week support
+// ✅ Import the optimized report model
+import { fetchWeeklyReport } from '../models/reportModel.js';
+
+// ✅ Import the updated scheduler service
+import * as schedulerService from '../service/scheduler.js';
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(weekOfYear);
 dayjs.extend(isoWeek);
 
 const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
-const TEST_MODE = process.env.TEST_MODE === 'true';
-const DATA_REFERENCE_DATE = '2025-10-17';
 
-// Service imports - FIXED: Use dynamic imports when needed
-let pdfService = null;
-let emailService = null;
+// =====================================================
+// 📅 DATE RANGE FUNCTIONS
+// =====================================================
 
 /**
- * 🔧 SERVICE LOADER - Fixed to avoid top-level await
+ * Calculate nights in range for night shift reporting
  */
-const loadServices = async () => {
+export const calculateNightsInRange = (startDate, endDate) => {
   try {
-    const pdfModule = await import('../service/pdfService.js');
-    pdfService = pdfModule.default || pdfModule;
-    console.log('✅ PDF Service loaded successfully');
+    const start = dayjs(startDate, 'YYYY-MM-DD').startOf('day');
+    const end = dayjs(endDate, 'YYYY-MM-DD').startOf('day');
+    const nightsInRange = end.diff(start, 'day') + 1;
+    return nightsInRange;
   } catch (error) {
-    console.error('❌ PDF Service failed to load:', error.message);
-    pdfService = null;
-  }
-
-  try {
-    const emailModule = await import('../service/emailService.js');
-    emailService = emailModule.default || emailModule;
-    console.log('✅ Email Service loaded successfully');
-  } catch (error) {
-    console.error('❌ Email Service failed to load:', error.message);
-    emailService = null;
+    console.error(`❌ Error calculating nights in range:`, error.message);
+    return dayjs(endDate, 'YYYY-MM-DD').diff(dayjs(startDate, 'YYYY-MM-DD'), 'day') + 1;
   }
 };
 
-// Load services on first controller call
-let servicesLoaded = false;
-
 /**
- * 📅 DATE RANGE HELPERS
+ * Get database query dates for night shifts (18:00-06:00)
  */
-export const getPreviousWeekRange = () => {
+export const getDatabaseQueryDates = (startDate, endDate) => {
   try {
-    const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
-    const startOfLastWeek = dataDate.subtract(1, 'week').startOf('isoWeek');
-    const endOfLastWeek = dataDate.subtract(1, 'week').endOf('isoWeek');
+    // Parse dates in Nairobi timezone
+    const start = dayjs.tz(startDate, 'YYYY-MM-DD', TZ);
+    const end = dayjs.tz(endDate, 'YYYY-MM-DD', TZ);
+    
+    // Night shift timing in Nairobi: 18:00 current day to 06:00 next day
+    const nairobiStartTime = start.set('hour', 18).set('minute', 0).set('second', 0);
+    const nairobiEndTime = end.add(1, 'day').set('hour', 6).set('minute', 0).set('second', 0);
+    
+    // Convert Nairobi times to CST for database
+    // Nairobi (UTC+3) → CST (UTC-6) = subtract 9 hours
+    const cstStartTime = nairobiStartTime.subtract(9, 'hour');
+    const cstEndTime = nairobiEndTime.subtract(9, 'hour');
+    
+    const nightsCount = calculateNightsInRange(startDate, endDate);
+    
+    return {
+      dbStartDate: cstStartTime.format('YYYY-MM-DD HH:mm:ss'),
+      dbEndDate: cstEndTime.format('YYYY-MM-DD HH:mm:ss'),
+      displayStartDate: start.format('YYYY-MM-DD'),
+      displayEndDate: end.format('YYYY-MM-DD'),
+      nightsCount: nightsCount,
+      totalHours: cstEndTime.diff(cstStartTime, 'hour'),
+      nairobiStartTime: nairobiStartTime.format('YYYY-MM-DD HH:mm:ss'),
+      nairobiEndTime: nairobiEndTime.format('YYYY-MM-DD HH:mm:ss')
+    };
+  } catch (error) {
+    console.error(`❌ Error calculating database query dates:`, error.message);
+    
+    // Fallback with basic conversion
+    const fallbackStart = dayjs(startDate + ' 18:00:00').subtract(9, 'hour');
+    const fallbackEnd = dayjs(endDate).add(1, 'day').format('YYYY-MM-DD') + ' 06:00:00';
+    
+    return {
+      dbStartDate: fallbackStart.format('YYYY-MM-DD HH:mm:ss'),
+      dbEndDate: dayjs(fallbackEnd).subtract(9, 'hour').format('YYYY-MM-DD HH:mm:ss'),
+      displayStartDate: startDate,
+      displayEndDate: endDate,
+      nightsCount: calculateNightsInRange(startDate, endDate)
+    };
+  }
+};
+
+// ✅ Use scheduler's date range functions directly
+export const getTodayRange = () => schedulerService.getPreviousWeekRange(); // Fallback
+export const getYesterdayRange = () => schedulerService.getPreviousWeekRange(); // Fallback
+export const getLast7DaysRange = schedulerService.getLast7DaysRange;
+export const getPreviousWeekRange = schedulerService.getPreviousWeekRange;
+export const getCurrentWeekRange = schedulerService.getCurrentWeekRange;
+export const getLast30DaysRange = () => schedulerService.getPreviousWeekRange(); // Fallback
+export const getPreviousMonthRange = () => schedulerService.getPreviousWeekRange(); // Fallback
+export const getCurrentMonthRange = () => schedulerService.getCurrentWeekRange(); // Fallback
+
+export const getCustomDateRange = (startDate, endDate) => {
+  try {
+    if (!startDate || !endDate) {
+      throw new Error('Start date and end date are required for custom range');
+    }
+    
+    const start = dayjs(startDate).tz(TZ);
+    const end = dayjs(endDate).tz(TZ);
+    
+    if (!start.isValid() || !end.isValid()) {
+      throw new Error('Invalid date format');
+    }
+    
+    if (end.isBefore(start)) {
+      throw new Error('End date must be after start date');
+    }
+    
+    const nightsInRange = calculateNightsInRange(
+      start.format('YYYY-MM-DD'), 
+      end.format('YYYY-MM-DD')
+    );
+    
+    const dbDates = getDatabaseQueryDates(
+      start.format('YYYY-MM-DD'),
+      end.format('YYYY-MM-DD')
+    );
     
     const range = {
-      startDate: startOfLastWeek.format('YYYY-MM-DD'),
-      endDate: endOfLastWeek.format('YYYY-MM-DD'),
-      sqlStartDate: startOfLastWeek.format('YYYY-MM-DD 00:00:00'),
-      sqlEndDate: endOfLastWeek.format('YYYY-MM-DD 23:59:59'),
-      weekRange: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`,
-      rangeLabel: `Week of ${startOfLastWeek.format('MMM D')} - ${endOfLastWeek.format('MMM D, YYYY')}`,
-      daysInRange: 7
+      startDate: start.format('YYYY-MM-DD'),
+      endDate: end.format('YYYY-MM-DD'),
+      sqlStartDate: dbDates.dbStartDate,
+      sqlEndDate: dbDates.dbEndDate,
+      rangeLabel: `Custom: ${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
+      nightsInRange: nightsInRange,
+      daysInRange: nightsInRange,
+      periodType: 'custom'
     };
     
-    console.log(`📅 Previous week range: ${range.startDate} to ${range.endDate}`);
+    console.log(`📅 Custom range: ${range.startDate} to ${range.endDate} (${nightsInRange} nights)`);
     return range;
   } catch (error) {
-    console.error('❌ Error calculating previous week range:', error);
-    return {
-      startDate: '2025-10-06',
-      endDate: '2025-10-12',
-      sqlStartDate: '2025-10-06 00:00:00',
-      sqlEndDate: '2025-10-12 23:59:59',
-      rangeLabel: 'Week of Oct 6 - Oct 12, 2025',
-      daysInRange: 7
-    };
+    console.error('❌ Error calculating custom range:', error);
+    throw error;
   }
 };
 
 export const getHistoricalDateRange = (options = {}) => {
   try {
-    const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
-    const { monthsBack = null, specificMonth = null } = options;
+    const today = dayjs().tz(TZ);
+    const { monthsBack = null, specificMonth = null, startDate = null, endDate = null } = options;
     
     let finalStartDate, finalEndDate;
 
+    if (startDate && endDate) {
+      return getCustomDateRange(startDate, endDate);
+    }
+    
     if (specificMonth) {
       finalStartDate = dayjs(specificMonth).startOf('month');
       finalEndDate = dayjs(specificMonth).endOf('month');
     } else if (monthsBack) {
-      finalStartDate = dataDate.subtract(monthsBack, 'month').startOf('month');
-      finalEndDate = dataDate;
+      finalStartDate = today.subtract(monthsBack, 'month').startOf('month');
+      finalEndDate = today;
     } else {
-      finalStartDate = dataDate.startOf('month');
-      finalEndDate = dataDate;
+      finalStartDate = today.startOf('month');
+      finalEndDate = today;
     }
 
-    const daysInRange = finalEndDate.diff(finalStartDate, 'day') + 1;
+    const nightsInRange = calculateNightsInRange(
+      finalStartDate.format('YYYY-MM-DD'), 
+      finalEndDate.format('YYYY-MM-DD')
+    );
+    
+    const dbDates = getDatabaseQueryDates(
+      finalStartDate.format('YYYY-MM-DD'),
+      finalEndDate.format('YYYY-MM-DD')
+    );
     
     const range = {
-      sqlStartDate: finalStartDate.format('YYYY-MM-DD 00:00:00'),
-      sqlEndDate: finalEndDate.format('YYYY-MM-DD 23:59:59'),
+      sqlStartDate: dbDates.dbStartDate,
+      sqlEndDate: dbDates.dbEndDate,
       displayStartDate: finalStartDate.format('YYYY-MM-DD'),
       displayEndDate: finalEndDate.format('YYYY-MM-DD'),
       startDate: finalStartDate.format('YYYY-MM-DD'),
@@ -116,484 +184,212 @@ export const getHistoricalDateRange = (options = {}) => {
         ? `Month: ${finalStartDate.format('MMMM YYYY')}`
         : monthsBack
         ? `Last ${monthsBack} months`
-        : `Month: ${finalStartDate.format('MMMM YYYY')}`,
-      daysInRange: daysInRange
+        : `Current Month: ${finalStartDate.format('MMMM YYYY')}`,
+      nightsInRange: nightsInRange,
+      daysInRange: nightsInRange,
+      periodType: 'historical'
     };
     
-    console.log(`📅 Historical range: ${range.startDate} to ${range.endDate} (${daysInRange} days)`);
+    console.log(`📅 Historical range: ${range.startDate} to ${range.endDate} (${nightsInRange} nights)`);
     return range;
   } catch (error) {
     console.error('❌ Error calculating historical range:', error);
+    const today = dayjs().tz(TZ);
     return {
-      startDate: '2025-09-01',
-      endDate: '2025-10-17',
-      sqlStartDate: '2025-09-01 00:00:00',
-      sqlEndDate: '2025-10-17 23:59:59',
-      rangeLabel: 'Fallback Range: Sep 1 - Oct 17, 2025',
-      daysInRange: 47
+      startDate: today.subtract(1, 'month').format('YYYY-MM-DD'),
+      endDate: today.format('YYYY-MM-DD'),
+      sqlStartDate: today.subtract(1, 'month').format('YYYY-MM-DD') + ' 18:00:00',
+      sqlEndDate: today.add(1, 'day').format('YYYY-MM-DD') + ' 06:00:00',
+      rangeLabel: 'Last Month (Fallback)',
+      nightsInRange: 30,
+      daysInRange: 30,
+      periodType: 'historical'
     };
   }
 };
 
+export const getDateRangeForPeriod = (reportPeriod, customStart = null, customEnd = null) => {
+  console.log(`🎯 Getting date range for period: ${reportPeriod}`);
+  
+  switch (reportPeriod) {
+    case 'today':
+      return getTodayRange();
+    case 'yesterday':
+      return getYesterdayRange();
+    case 'last7days':
+      return getLast7DaysRange();
+    case 'previousWeek':
+      return getPreviousWeekRange();
+    case 'currentWeek':
+      return getCurrentWeekRange();
+    case 'last30days':
+      return getLast30DaysRange();
+    case 'previousMonth':
+      return getPreviousMonthRange();
+    case 'currentMonth':
+      return getCurrentMonthRange();
+    case 'custom':
+      if (!customStart || !customEnd) {
+        console.warn('⚠️  Custom period requested without dates, falling back to last 7 days');
+        return getLast7DaysRange();
+      }
+      return getCustomDateRange(customStart, customEnd);
+    case 'historical':
+      return getHistoricalDateRange({ monthsBack: 1 });
+    default:
+      console.warn(`⚠️  Unknown period '${reportPeriod}', using previous week as default`);
+      return getPreviousWeekRange();
+  }
+};
+
+// =====================================================
+// 📧 EMAIL PARSING FUNCTIONS
+// =====================================================
+
+export const parseEmails = (emailString) => {
+  if (!emailString || typeof emailString !== 'string') {
+    return [];
+  }
+  
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const emails = emailString.match(emailRegex) || [];
+  
+  const uniqueEmails = [...new Set(emails.map(email => email.toLowerCase().trim()))];
+  
+  const validEmails = uniqueEmails.filter(email => {
+    const parts = email.split('@');
+    if (parts.length !== 2) return false;
+    if (parts[0].length === 0 || parts[1].length === 0) return false;
+    if (parts[1].indexOf('.') === -1) return false;
+    return true;
+  });
+  
+  return validEmails;
+};
+
+export const formatEmailsForDisplay = (emailString) => {
+  const emails = parseEmails(emailString);
+  return emails.map(email => {
+    const parts = email.split('@');
+    return `${parts[0]}@${parts[1]}`;
+  }).join(', ');
+};
+
+// =====================================================
+// 📊 DATA FETCHING USING OPTIMIZED REPORT MODEL
+// =====================================================
+
 /**
- * 🗃️ PATROL DATA FETCHING
+ * Fetch patrol data using optimized report model
  */
-export const getClientPatrols = async (clientId, daysRange = 30) => {
+export const getClientPatrols = async (clientId, nightsRange = 7) => {
   try {
-    const pool = await poolPromise;
-    const dataDate = dayjs(DATA_REFERENCE_DATE).tz(TZ);
-    const startDate = dataDate.subtract(daysRange, 'day').format('YYYY-MM-DD 00:00:00');
-    const endDate = dataDate.format('YYYY-MM-DD 23:59:59');
+    const endDate = dayjs().tz(TZ).format('YYYY-MM-DD');
+    const startDate = dayjs().tz(TZ).subtract(nightsRange - 1, 'day').format('YYYY-MM-DD');
     
-    console.log(`📊 Fetching patrols for client ${clientId} from ${startDate} to ${endDate}`);
-
-    const tableQueries = [
-      'p_recepcion202511',
-      'p_recepcion202510', 
-      'p_recepcion202509',
-      'p_recepcion'
-    ];
-
-    let patrols = [];
-    let lastError = null;
-
-    for (const tableName of tableQueries) {
-      try {
-        const result = await pool.request()
-          .input('clientId', sql.Int, clientId)
-          .input('startDate', sql.DateTime, startDate)
-          .input('endDate', sql.DateTime, endDate)
-          .query(`
-            SELECT TOP 1000
-              rec_iid AS PatrolID,
-              rec_tfechahora AS PatrolDate,
-              rec_czona AS ZoneCode,
-              rec_calarma AS AlarmType,
-              rec_cContenido AS Content
-            FROM [_Datos].[dbo].[${tableName}]
-            WHERE rec_iidcuenta = @clientId
-              AND rec_tfechahora BETWEEN @startDate AND @endDate
-              AND (
-                rec_calarma LIKE '%VIGICONTROL%'
-                OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
-              )
-            ORDER BY rec_tfechahora DESC
-          `);
-
-        if (result.recordset.length > 0) {
-          console.log(`✅ Found ${result.recordset.length} patrols in table ${tableName}`);
-          patrols = result.recordset;
-          break;
-        }
-      } catch (error) {
-        lastError = error;
-        console.log(`⚠️ Table ${tableName} not accessible: ${error.message}`);
-        continue;
-      }
-    }
-
-    if (patrols.length === 0 && lastError) {
-      throw lastError;
-    }
-
-    console.log(`✅ Total patrols found for client ${clientId}: ${patrols.length}`);
+    console.log(`📊 Fetching patrol data for client ${clientId} using optimized report model`);
+    console.log(`   Period: ${startDate} to ${endDate} (${nightsRange} nights)`);
     
-    return {
-      pastPatrols: patrols,
-      upcomingPatrols: [],
-      summary: {
-        totalPatrols: patrols.length,
-        completedPatrols: patrols.filter(p => 
-          p.AlarmType?.includes('V04') || 
-          p.AlarmType?.includes('VIGICONTROL')
-        ).length,
-        expectedPatrols: daysRange * 11,
-        complianceRate: patrols.length > 0 ? `${Math.round((patrols.length / (daysRange * 11)) * 100)}%` : '0%',
-        daysAnalyzed: daysRange
-      }
-    };
-
+    const reportData = await fetchWeeklyReport(
+      clientId, 
+      startDate, 
+      endDate,
+      true  // usePartitions
+    );
+    
+    if (!reportData.metadata.success) {
+      console.warn(`⚠️ Report data fetch failed: ${reportData.metadata.error?.message || 'Unknown error'}`);
+      return {
+        pastPatrols: [],
+        guardReports: [],
+        posts: [],
+        metadata: reportData.metadata
+      };
+    }
+    
+    console.log(`✅ Report data loaded successfully:`, {
+      posts: reportData.posts.length,
+      events: reportData.events.length,
+      guardReports: reportData.guardReports.length,
+      performance: `${reportData.metadata.overallPerformance}%`,
+      dataSource: reportData.metadata.dataSource,
+      processingTime: `${reportData.metadata.processingTime}ms`
+    });
+    
+    return reportData;
+    
   } catch (error) {
-    console.error(`❌ Error fetching patrols for client ${clientId}:`, error.message);
+    console.error(`❌ Error fetching patrol data for client ${clientId}:`, error.message);
+    
     return {
       pastPatrols: [],
-      upcomingPatrols: [],
-      summary: { 
-        totalPatrols: 0, 
-        completedPatrols: 0, 
-        expectedPatrols: daysRange * 11, 
-        complianceRate: '0%',
-        daysAnalyzed: daysRange,
-        error: error.message
+      guardReports: [],
+      posts: [],
+      metadata: {
+        success: false,
+        error: error.message,
+        dataSource: 'Error',
+        processingTime: 0
       }
     };
   }
 };
 
+/**
+ * Fetch historical patrol data using optimized report model
+ */
 export const getClientHistoricalPatrols = async (clientId, startDate, endDate) => {
   try {
-    const pool = await poolPromise;
+    console.log(`📋 Fetching historical patrol data for client ${clientId}`);
+    console.log(`   Period: ${startDate} to ${endDate}`);
     
-    console.log(`📋 Fetching historical patrols for client ${clientId} from ${startDate} to ${endDate}`);
-
-    const result = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .input('startDate', sql.DateTime, startDate)
-      .input('endDate', sql.DateTime, endDate)
-      .query(`
-        SELECT 
-          rec_iid AS PatrolID,
-          rec_tfechahora AS PatrolDate,
-          rec_czona AS ZoneCode,
-          rec_calarma AS AlarmType,
-          rec_cContenido AS Content,
-          zon.zon_cdescripcion AS ZoneName,
-          cue.cue_cnombre AS ClientName
-        FROM [_Datos].[dbo].[p_recepcion] rec
-        INNER JOIN [_Datos].[dbo].[m_cuentas] cue ON rec.rec_iidcuenta = cue.cue_iid
-        LEFT JOIN [_Datos].[dbo].[m_zonas] zon ON rec.rec_iidcuenta = zon.zon_iidcuenta AND rec.rec_czona = zon.zon_ccodigo
-        WHERE rec.rec_iidcuenta = @clientId
-          AND rec.rec_tfechahora BETWEEN @startDate AND @endDate
-          AND (
-            rec_calarma LIKE '%VIGICONTROL%'
-            OR rec_calarma IN ('V04', 'V08', 'V20', 'V21', 'V26')
-          )
-        ORDER BY rec.rec_tfechahora DESC
-      `);
-
-    const patrols = result.recordset;
-    console.log(`✅ Found ${patrols.length} historical patrols for client ${clientId}`);
-
-    const daysInPeriod = Math.max(1, dayjs(endDate).diff(dayjs(startDate), 'day') + 1);
-    const expectedPatrols = daysInPeriod * 11;
-
-    return {
-      patrols,
-      summary: {
-        totalPatrols: patrols.length,
-        completedPatrols: patrols.filter(p => 
-          p.AlarmType?.includes('V04') || 
-          p.AlarmType?.includes('VIGICONTROL')
-        ).length,
-        expectedPatrols: expectedPatrols,
-        complianceRate: expectedPatrols > 0 ? `${Math.round((patrols.length / expectedPatrols) * 100)}%` : '0%',
-        daysAnalyzed: daysInPeriod
-      }
-    };
-
-  } catch (error) {
-    console.error('❌ Error fetching historical patrols:', error);
-    return { 
-      patrols: [], 
-      summary: { 
-        totalPatrols: 0, 
-        completedPatrols: 0, 
-        expectedPatrols: 0, 
-        complianceRate: '0%',
-        daysAnalyzed: 0,
-        error: error.message
-      } 
-    };
-  }
-};
-
-/**
- * 🔄 DATA TRANSFORMATION HELPERS
- */
-export const transformPatrolsToPosts = (patrolData, schedule, dateRange) => {
-  try {
-    const patrols = patrolData.patrols || patrolData.pastPatrols || [];
-    if (patrols.length === 0) {
-      console.log('⚠️ No patrols found for post transformation');
-      return [];
-    }
-
-    console.log(`🔄 Transforming ${patrols.length} patrols to posts...`);
-
-    const postsMap = new Map();
+    const reportData = await fetchWeeklyReport(
+      clientId, 
+      startDate, 
+      endDate,
+      true  // usePartitions
+    );
     
-    patrols.forEach(patrol => {
-      const zoneKey = patrol.rec_czona || patrol.ZoneCode || 'Unknown';
-      const zoneName = patrol.ZoneName || `Zone ${zoneKey}`;
-      
-      if (!postsMap.has(zoneKey)) {
-        postsMap.set(zoneKey, {
-          SitePost: zoneName,
-          ChecksCompleted: 0,
-          ExpectedChecks: 0,
-          PerformanceRate: '0%',
-          ZoneCode: zoneKey
-        });
-      }
-      postsMap.get(zoneKey).ChecksCompleted++;
-    });
-
-    const daysInPeriod = dateRange.daysInRange || Math.max(1, dayjs(dateRange.endDate).diff(dayjs(dateRange.startDate), 'day') + 1);
-    const patrolsPerDay = schedule?.patrols_per_day || 11;
-    const totalExpected = daysInPeriod * patrolsPerDay;
-    const expectedPerPost = postsMap.size > 0 ? Math.ceil(totalExpected / postsMap.size) : totalExpected;
-
-    postsMap.forEach(post => {
-      post.ExpectedChecks = expectedPerPost;
-      const performance = expectedPerPost > 0 ? Math.round((post.ChecksCompleted / expectedPerPost) * 100) : 0;
-      post.PerformanceRate = `${performance}%`;
-    });
-
-    const posts = Array.from(postsMap.values());
-    console.log(`✅ Transformed ${posts.length} posts with ${patrols.length} total patrols`);
-    return posts;
-  } catch (error) {
-    console.error('❌ Error transforming patrols to posts:', error);
-    return [];
-  }
-};
-
-export const transformPatrolsToEvents = (patrolData) => {
-  try {
-    const patrols = patrolData.patrols || patrolData.pastPatrols || [];
-    
-    console.log(`🔄 Transforming ${patrols.length} patrols to events...`);
-    
-    const events = patrols.map((patrol) => {
-      const eventDate = patrol.rec_tfechahora || patrol.PatrolDate;
-      let formattedDate = 'N/A';
-      let formattedTime = 'N/A';
-      
-      if (eventDate) {
-        try {
-          const dateObj = dayjs(eventDate).tz(TZ);
-          if (dateObj.isValid()) {
-            formattedDate = dateObj.format('DD/MM/YYYY');
-            formattedTime = dateObj.format('HH:mm:ss');
-          }
-        } catch (e) {
-          console.warn(`Date parse error for: ${eventDate}`, e.message);
-        }
-      }
-      
+    if (!reportData.metadata.success) {
+      console.warn(`⚠️ Historical report data fetch failed: ${reportData.metadata.error?.message || 'Unknown error'}`);
       return {
-        rec_tfechahora: eventDate,
-        rec_czona: patrol.rec_czona || patrol.ZoneCode || 'Unknown',
-        rec_calarma: patrol.rec_calarma || patrol.AlarmType,
-        rec_cContenido: patrol.rec_cContenido || patrol.Content || 'Patrol Check',
-        formattedDate: formattedDate,
-        formattedTime: formattedTime,
-        ZoneName: patrol.ZoneName || `Zone ${patrol.rec_czona || patrol.ZoneCode || 'Unknown'}`
+        pastPatrols: [],
+        guardReports: [],
+        posts: [],
+        metadata: reportData.metadata
       };
+    }
+    
+    console.log(`✅ Historical report data loaded:`, {
+      posts: reportData.posts.length,
+      events: reportData.events.length,
+      guardReports: reportData.guardReports.length,
+      dataSource: reportData.metadata.dataSource
     });
-
-    console.log(`✅ Transformed ${events.length} events with valid dates`);
     
-    return events;
+    return reportData;
+    
   } catch (error) {
-    console.error('❌ Error transforming patrols to events:', error);
-    return [];
-  }
-};
-
-export const calculateSummary = (patrolData, schedule, dateRange) => {
-  try {
-    const patrols = patrolData.patrols || patrolData.pastPatrols || [];
-    const posts = transformPatrolsToPosts(patrolData, schedule, dateRange);
-    
-    const totalCompleted = patrols.length;
-    const totalExpected = posts.reduce((sum, post) => sum + post.ExpectedChecks, 0);
-    const complianceRate = totalExpected > 0 ? Math.round((totalCompleted / totalExpected) * 100) : 0;
+    console.error(`❌ Error fetching historical patrol data:`, error.message);
     
     return {
-      totalPatrols: totalCompleted,
-      completedPatrols: totalCompleted,
-      totalExpected: totalExpected,
-      complianceRate: `${complianceRate}%`,
-      numericCompliance: complianceRate,
-      postsCount: posts.length,
-      eventsCount: patrols.length,
-      performanceLevel: complianceRate >= 90 ? 'EXCELLENT' : 
-                      complianceRate >= 80 ? 'GOOD' : 
-                      complianceRate >= 70 ? 'SATISFACTORY' : 'NEEDS IMPROVEMENT'
-    };
-  } catch (error) {
-    console.error('❌ Error calculating summary:', error);
-    return {
-      totalPatrols: 0,
-      completedPatrols: 0,
-      totalExpected: 0,
-      complianceRate: '0%',
-      numericCompliance: 0,
-      postsCount: 0,
-      eventsCount: 0,
-      performanceLevel: 'NEEDS IMPROVEMENT'
-    };
-  }
-};
-
-/**
- * 🔧 PDF GENERATION HELPER - IMPROVED
- */
-const generatePDF = async (data, clientName, dateRange, reportType = 'patrol') => {
-  try {
-    console.log(`🔍 Generating PDF for ${reportType} report...`);
-    
-    if (!pdfService) {
-      throw new Error('PDF service is not available. Check pdfService.js file.');
-    }
-    
-    console.log('✅ PDF Service available');
-    
-    let pdfBuffer;
-    const pdfData = {
-      clientId: data.clientId,
-      clientName: data.clientName || clientName,
-      startDate: dateRange.startDate,
-      endDate: dateRange.endDate,
-      shiftType: data.shiftType || 'Day/Night',
-      events: data.events || [],
-      posts: data.posts || [],
-      patrols: data.patrols || [],
-      summary: data.summary || {}
-    };
-    
-    // Try different PDF generation functions with better error handling
-    const pdfFunctions = [
-      { name: 'generateDashboardPDF', func: pdfService.generateDashboardPDF },
-      { name: 'generatePatrolReportPDF', func: pdfService.generatePatrolReportPDF },
-      { name: 'generateHistoricalReportPDF', func: pdfService.generateHistoricalReportPDF },
-      { name: 'generatePDFReport', func: pdfService.generatePDFReport },
-      { name: 'generateReportPDF', func: pdfService.generateReportPDF }
-    ];
-    
-    for (const { name, func } of pdfFunctions) {
-      if (func && typeof func === 'function') {
-        try {
-          console.log(`🔄 Trying PDF function: ${name}`);
-          
-          if (name === 'generateDashboardPDF') {
-            pdfBuffer = await func(pdfData);
-          } else if (name === 'generatePDFReport' || name === 'generateReportPDF') {
-            // These might have different signatures
-            pdfBuffer = await func(pdfData, dateRange);
-          } else {
-            pdfBuffer = await func(pdfData, clientName, dateRange);
-          }
-          
-          if (pdfBuffer && pdfBuffer.length > 0) {
-            console.log(`✅ PDF generated successfully using ${name}: ${Math.round(pdfBuffer.length / 1024)} KB`);
-            return pdfBuffer;
-          }
-        } catch (funcError) {
-          console.warn(`⚠️ PDF function ${name} failed:`, funcError.message);
-          continue;
-        }
+      pastPatrols: [],
+      guardReports: [],
+      posts: [],
+      metadata: {
+        success: false,
+        error: error.message,
+        dataSource: 'Error',
+        processingTime: 0
       }
-    }
-    
-    throw new Error('All PDF generation functions failed');
-    
-  } catch (error) {
-    console.error('❌ PDF generation error:', error);
-    throw new Error(`PDF generation failed: ${error.message}`);
+    };
   }
 };
 
-/**
- * 🔧 EMAIL SENDING HELPER - OFFICE365 SMTP - IMPROVED
- */
-const sendPatrolEmail = async (emailData) => {
-  try {
-    console.log('🔍 Sending patrol email via Office365 SMTP...');
-    
-    if (!emailService) {
-      throw new Error('Email service is not available. Check emailService.js file and Office365 SMTP configuration.');
-    }
-    
-    console.log('✅ Email Service available - Office365 SMTP configured');
-    console.log(`📧 Using Office365 SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}`);
-    console.log(`📧 From: ${process.env.EMAIL_USER}`);
-    
-    // Ensure services are loaded
-    if (!servicesLoaded) {
-      await loadServices();
-    }
-    
-    // Try different email sending functions
-    const emailFunctions = [
-      { name: 'sendPatrolReport', func: emailService.sendPatrolReport },
-      { name: 'sendHistoricalReport', func: emailService.sendHistoricalReport },
-      { name: 'sendSimpleEmail', func: emailService.sendSimpleEmail }
-    ];
-    
-    for (const { name, func } of emailFunctions) {
-      if (func && typeof func === 'function') {
-        try {
-          console.log(`🔄 Trying email function: ${name}`);
-          
-          let result;
-          if (name === 'sendSimpleEmail') {
-            // Fallback to simple email with Office365 configuration
-            result = await func({
-              to: emailData.to,
-              subject: emailData.subject || `Security Report - ${emailData.client.ClientName}`,
-              html: `
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                  <h2 style="color: #2c5aa0;">BM Security Patrol Report</h2>
-                  <p><strong>Client:</strong> ${emailData.client.ClientName}</p>
-                  <p><strong>Period:</strong> ${emailData.dateRange.startDate} to ${emailData.dateRange.endDate}</p>
-                  <p><strong>Sent via:</strong> Office365 SMTP Service</p>
-                  <p><strong>From:</strong> ${process.env.EMAIL_USER}</p>
-                  <p>Please find your security patrol report attached.</p>
-                  <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
-                  <p style="color: #666; font-size: 12px;">
-                    This email was sent automatically from the BM Security Reporting System.
-                  </p>
-                </div>
-              `,
-              attachments: emailData.attachments
-            });
-          } else {
-            result = await func(emailData);
-          }
-          
-          if (result) {
-            console.log(`✅ Email sent successfully using ${name} via Office365 SMTP`);
-            console.log(`📧 From: ${process.env.EMAIL_USER}`);
-            console.log(`📧 To: ${emailData.to}`);
-            return result;
-          }
-        } catch (funcError) {
-          console.warn(`⚠️ Email function ${name} failed:`, funcError.message);
-          
-          // Check for Office365 specific authentication issues
-          if (funcError.code === 'EAUTH' || funcError.message.includes('Authentication failed')) {
-            console.error('❌ Office365 Authentication Failed - Please check:');
-            console.error(`   - EMAIL_USER: ${process.env.EMAIL_USER}`);
-            console.error('   - EMAIL_PASS: Correct Office365 password');
-            console.error('   - SMTP Settings: smtp.office365.com:587');
-            console.error('   - Office365 Security: App passwords may be required');
-          }
-          continue;
-        }
-      }
-    }
-    
-    throw new Error('All email sending functions failed - Check Office365 SMTP configuration');
-    
-  } catch (error) {
-    console.error('❌ Email sending error via Office365:', error);
-    
-    // Provide specific guidance for Office365 issues
-    if (error.code === 'EAUTH') {
-      error.message += ' - Check Office365 credentials and app password settings';
-    } else if (error.message.includes('connection timeout')) {
-      error.message += ' - Check firewall settings for Office365 SMTP';
-    }
-    
-    throw error;
-  }
-};
+// =====================================================
+// 🎯 SCHEDULE MANAGEMENT CONTROLLERS
+// =====================================================
 
-/**
- * 🎯 SCHEDULE MANAGEMENT CONTROLLERS
- */
 export const getAllSchedules = async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -603,6 +399,7 @@ export const getAllSchedules = async (req, res) => {
         R.rep_iidcuenta AS ClientID,
         C.cue_cnombre AS ClientName,
         C.cue_cemail AS ClientEmail,
+        C.cue_ncuenta AS AccountNumber,
         R.rep_ntipo,
         R.rep_tproximoenvio AS NextRun,
         R.rep_nfrecuencia AS Frequency,
@@ -613,25 +410,36 @@ export const getAllSchedules = async (req, res) => {
       ORDER BY R.rep_tproximoenvio ASC
     `);
 
-    const schedules = result.recordset.map(schedule => ({
-      id: schedule.rep_idKey,
-      clientId: schedule.ClientID,
-      clientName: schedule.ClientName,
-      clientEmail: schedule.ClientEmail,
-      type: schedule.rep_ntipo,
-      nextRun: schedule.NextRun,
-      frequency: schedule.Frequency,
-      email: schedule.Email,
-      intervalDays: schedule.IntervalDays,
-      status: 1,
-      timezone: TZ
-    }));
+    const schedules = result.recordset.map(schedule => {
+      const emails = schedule.Email || '';
+      const emailCount = parseEmails(emails).length;
+      
+      return {
+        id: schedule.rep_idKey,
+        clientId: schedule.ClientID,
+        clientName: schedule.ClientName,
+        clientEmail: schedule.ClientEmail,
+        accountNumber: schedule.AccountNumber,
+        type: schedule.rep_ntipo,
+        nextRun: schedule.NextRun,
+        frequency: schedule.Frequency,
+        email: emails,
+        emails: emails,
+        intervalDays: schedule.IntervalDays,
+        status: 1,
+        timezone: TZ,
+        emailCount: emailCount,
+        formattedEmails: formatEmailsForDisplay(emails),
+        apiIntegration: 'Optimized Report Model'
+      };
+    });
 
     res.status(200).json({ 
       success: true, 
       total: schedules.length, 
       schedules,
-      serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+      serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+      usingOptimizedModel: true
     });
   } catch (error) {
     console.error('❌ Error fetching schedules:', error);
@@ -664,6 +472,7 @@ export const getScheduleById = async (req, res) => {
           R.rep_iidcuenta AS ClientID,
           C.cue_cnombre AS ClientName,
           C.cue_cemail AS ClientEmail,
+          C.cue_ncuenta AS AccountNumber,
           R.rep_ntipo,
           R.rep_tproximoenvio AS NextRun,
           R.rep_nfrecuencia AS Frequency,
@@ -682,6 +491,9 @@ export const getScheduleById = async (req, res) => {
     }
 
     const schedule = result.recordset[0];
+    const emails = schedule.Email || '';
+    const emailCount = parseEmails(emails).length;
+    
     res.status(200).json({ 
       success: true, 
       schedule: {
@@ -689,14 +501,20 @@ export const getScheduleById = async (req, res) => {
         clientId: schedule.ClientID,
         clientName: schedule.ClientName,
         clientEmail: schedule.ClientEmail,
+        accountNumber: schedule.AccountNumber,
         type: schedule.rep_ntipo,
         nextRun: schedule.NextRun,
         frequency: schedule.Frequency,
-        email: schedule.Email,
+        email: emails,
+        emails: emails,
         intervalDays: schedule.IntervalDays,
         status: 1,
-        timezone: TZ
-      }
+        timezone: TZ,
+        emailCount: emailCount,
+        formattedEmails: formatEmailsForDisplay(emails),
+        apiIntegration: 'Optimized Report Model'
+      },
+      usingOptimizedModel: true
     });
   } catch (error) {
     console.error('❌ Error fetching schedule:', error);
@@ -720,12 +538,21 @@ export const updateSchedule = async (req, res) => {
       });
     }
 
-    const { nextRun, frequency, email, intervalDays } = req.body;
+    const { nextRun, frequency, email, emails, intervalDays } = req.body;
+    const finalEmails = emails || email;
 
-    if (!nextRun || !frequency || !email) {
+    if (!nextRun || !frequency || !finalEmails) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields: nextRun, frequency, email' 
+        message: 'Missing required fields: nextRun, frequency, emails' 
+      });
+    }
+
+    const parsedEmails = parseEmails(finalEmails);
+    if (parsedEmails.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please provide at least one valid email address' 
       });
     }
 
@@ -734,7 +561,7 @@ export const updateSchedule = async (req, res) => {
       .input('id', sql.Int, scheduleId)
       .input('nextRun', sql.DateTime, nextRun)
       .input('frequency', sql.Int, frequency)
-      .input('email', sql.VarChar(4000), email)
+      .input('email', sql.VarChar(4000), finalEmails)
       .input('intervalDays', sql.Int, intervalDays || 1)
       .query(`
         UPDATE _Datos.dbo.m_reportes_automaticos
@@ -755,8 +582,15 @@ export const updateSchedule = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: 'Schedule updated successfully',
-      updatedFields: { nextRun, frequency, email, intervalDays }
+      message: `Schedule updated successfully for ${parsedEmails.length} email(s)`,
+      updatedFields: { 
+        nextRun, 
+        frequency, 
+        emails: finalEmails,
+        emailCount: parsedEmails.length,
+        intervalDays 
+      },
+      usingOptimizedModel: true
     });
   } catch (error) {
     console.error('❌ Error updating schedule:', error);
@@ -770,18 +604,26 @@ export const updateSchedule = async (req, res) => {
 
 export const createSchedule = async (req, res) => {
   try {
-    const { clientId, type, nextRun, frequency, email, intervalDays } = req.body;
+    const { clientId, type, nextRun, frequency, email, emails, intervalDays } = req.body;
+    const finalEmails = emails || email;
 
-    if (!clientId || !nextRun || !frequency || !email) {
+    if (!clientId || !nextRun || !frequency || !finalEmails) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields: clientId, nextRun, frequency, email' 
+        message: 'Missing required fields: clientId, nextRun, frequency, emails' 
+      });
+    }
+
+    const parsedEmails = parseEmails(finalEmails);
+    if (parsedEmails.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please provide at least one valid email address' 
       });
     }
 
     const pool = await poolPromise;
 
-    // Check if schedule already exists
     const existingResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .query('SELECT rep_idKey FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId');
@@ -794,13 +636,12 @@ export const createSchedule = async (req, res) => {
       });
     }
 
-    // Create new schedule
     const insertResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .input('type', sql.Int, type || 1)
       .input('nextRun', sql.DateTime, nextRun)
       .input('frequency', sql.Int, frequency)
-      .input('email', sql.VarChar(4000), email)
+      .input('email', sql.VarChar(4000), finalEmails)
       .input('intervalDays', sql.Int, intervalDays || 1)
       .query(`
         INSERT INTO _Datos.dbo.m_reportes_automaticos 
@@ -809,28 +650,33 @@ export const createSchedule = async (req, res) => {
         VALUES (@clientId, @type, @nextRun, @frequency, @email, @intervalDays)
       `);
 
-    // Get client name
     const clientResult = await pool.request()
       .input('clientId', sql.Int, clientId)
-      .query('SELECT cue_cnombre AS ClientName FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
+      .query('SELECT cue_cnombre AS ClientName, cue_ncuenta AS AccountNumber FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
 
     const newScheduleId = insertResult.recordset[0].rep_idKey;
 
     res.status(201).json({
       success: true,
-      message: 'Schedule created successfully',
+      message: `Schedule created successfully for ${parsedEmails.length} email(s)`,
       schedule: {
         id: newScheduleId,
         clientId: clientId,
         clientName: clientResult.recordset[0]?.ClientName || `Client ${clientId}`,
+        accountNumber: clientResult.recordset[0]?.AccountNumber,
         type: type || 1,
         nextRun: nextRun,
         frequency: frequency,
-        email: email,
+        email: finalEmails,
+        emails: finalEmails,
         intervalDays: intervalDays || 1,
         status: 1,
-        timezone: TZ
-      }
+        timezone: TZ,
+        emailCount: parsedEmails.length,
+        formattedEmails: formatEmailsForDisplay(finalEmails),
+        apiIntegration: 'Optimized Report Model'
+      },
+      usingOptimizedModel: true
     });
 
   } catch (error) {
@@ -882,390 +728,288 @@ export const deleteSchedule = async (req, res) => {
   }
 };
 
-/**
- * 🚀 MANUAL TRIGGERS
- */
+// =====================================================
+// 🚀 MANUAL TRIGGERS USING UPDATED SCHEDULER
+// =====================================================
+
 export const triggerDynamicReports = async (req, res) => {
   try {
     console.log('🔧 Manual trigger for dynamic reports...');
     
-    if (TEST_MODE) {
-      console.log('🚫 [TEST MODE] Dynamic reports would be triggered');
-      return res.status(200).json({
-        success: true,
-        message: 'TEST MODE - Dynamic reports would have been triggered',
-        testMode: true
-      });
-    }
-    
-    await triggerDynamicReportsNow();
+    // Use the scheduler's main function
+    await schedulerService.runDynamicReportScheduler();
     
     res.status(200).json({
       success: true,
       message: 'Dynamic reports triggered successfully',
-      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+      usingOptimizedModel: true
     });
   } catch (error) {
     console.error('❌ Error triggering dynamic reports:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to trigger reports', 
-      error: error.message 
+      error: error.message
     });
   }
 };
 
-export const triggerPatrolReports = async (req, res) => {
-  try {
-    console.log('🔧 Manual trigger for patrol reports...');
-    
-    if (TEST_MODE) {
-      console.log('🚫 [TEST MODE] Patrol reports would be triggered');
-      return res.status(200).json({
-        success: true,
-        message: 'TEST MODE - Patrol reports would have been triggered',
-        testMode: true
-      });
-    }
-    
-    await triggerPatrolReportsNow();
-    
-    res.status(200).json({
-      success: true,
-      message: 'Patrol reports triggered successfully',
-      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-    });
-  } catch (error) {
-    console.error('❌ Error triggering patrol reports:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to trigger reports', 
-      error: error.message 
-    });
-  }
-};
+// Replace this function in server/controllers/schedulerController.js
 
 /**
- * 📊 ENHANCED CLIENT REPORT - MAIN FIXED ENDPOINT
+ * ✅ FIXED: Manual trigger for patrol reports
+ * Handles BOTH:
+ * 1. Individual client report (when clientId + recipientEmail provided)
+ * 2. Bulk scheduler run (when no parameters provided)
  */
-export const sendEnhancedClientReport = async (req, res) => {
-  let pdfBuffer = null;
-  
+export const triggerPatrolReports = async (req, res) => {
+  console.log('\n╔════════════════════════════════════════════════════════════╗');
+  console.log('║     MANUAL PATROL REPORT TRIGGER RECEIVED                 ║');
+  console.log('╚════════════════════════════════════════════════════════════╝\n');
+
   try {
-    const { clientId } = req.params;
-    const { startDate, endDate, recipientEmail, reportPeriod = 'previousWeek' } = req.body;
+    const { 
+      clientId, 
+      recipientEmail, 
+      startDate, 
+      endDate, 
+      reportPeriod = 'custom' 
+    } = req.body;
 
-    console.log(`\n📤 Generating ${reportPeriod} report for client: ${clientId}`);
+    // ========== CHECK IF THIS IS AN INDIVIDUAL REPORT REQUEST ==========
+    const isIndividualReport = clientId && recipientEmail;
 
-    // Load services if not already loaded
-    if (!servicesLoaded) {
-      await loadServices();
-    }
+    if (isIndividualReport) {
+      console.log('📋 Individual client report requested');
+      console.log(`   Client ID: ${clientId}`);
+      console.log(`   Recipient: ${recipientEmail}`);
+      console.log(`   Period: ${startDate || 'default'} to ${endDate || 'default'}`);
 
-    // Service availability check
-    if (!pdfService) {
-      return res.status(500).json({ 
-        success: false, 
-        message: 'PDF service unavailable',
-        error: 'PDF service failed to load. Check pdfService.js file.'
-      });
-    }
+      // Validate required fields
+      if (!clientId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Client ID is required for individual reports'
+        });
+      }
 
-    if (!emailService) {
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Email service unavailable',
-        error: 'Email service failed to load. Check emailService.js file and Office365 SMTP configuration.'
-      });
-    }
+      if (!recipientEmail) {
+        return res.status(400).json({
+          success: false,
+          error: 'Recipient email is required for individual reports'
+        });
+      }
 
-    // Determine date range
-    let dateRange;
-    if (reportPeriod === 'previousWeek') {
-      dateRange = getPreviousWeekRange();
-    } else if (reportPeriod === 'historical') {
-      dateRange = getHistoricalDateRange({ monthsBack: 1 });
-    } else if (startDate && endDate) {
-      dateRange = {
-        startDate: startDate,
-        endDate: endDate,
-        sqlStartDate: dayjs(startDate).format('YYYY-MM-DD 00:00:00'),
-        sqlEndDate: dayjs(endDate).format('YYYY-MM-DD 23:59:59'),
-        rangeLabel: `Custom: ${startDate} to ${endDate}`,
-        daysInRange: dayjs(endDate).diff(dayjs(startDate), 'day') + 1
-      };
-    } else {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Either reportPeriod or both startDate and endDate are required' 
-      });
-    }
+      // ========== DETERMINE DATE RANGE ==========
+      let dateRange;
+      if (startDate && endDate) {
+        // Custom date range
+        const start = dayjs(startDate).tz(TZ);
+        const end = dayjs(endDate).tz(TZ);
+        const nights = end.diff(start, 'day') + 1;
+        
+        dateRange = {
+          startDate: start.format('YYYY-MM-DD'),
+          endDate: end.format('YYYY-MM-DD'),
+          sqlStartDate: start.format('YYYY-MM-DD 00:00:00'),
+          sqlEndDate: end.format('YYYY-MM-DD 23:59:59'),
+          rangeLabel: `${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
+          nightsCount: nights,
+          daysInRange: nights
+        };
 
-    console.log(`📅 Using date range: ${dateRange.startDate} to ${dateRange.endDate}`);
+        console.log(`✅ Custom date range: ${dateRange.startDate} to ${dateRange.endDate} (${nights} nights)`);
+      } else {
+        // Use previous week by default
+        dateRange = getPreviousWeekRange();
+        console.log(`✅ Using default: Previous week (${dateRange.nightsCount} nights)`);
+      }
 
-    // Get client info
-    const pool = await poolPromise;
-    const clientResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query('SELECT cue_iid AS ClientID, cue_cnombre AS ClientName, cue_cemail AS ClientEmail FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
-
-    if (clientResult.recordset.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Client not found' 
-      });
-    }
-
-    const client = clientResult.recordset[0];
-    console.log(`👤 Client: ${client.ClientName}`);
-
-    // Get recipient email
-    let finalRecipientEmail = recipientEmail;
-    if (!finalRecipientEmail) {
-      const emailResult = await pool.request()
+      // ========== GET CLIENT DATA ==========
+      console.log(`📊 Fetching client data for ID ${clientId}...`);
+      
+      const pool = await poolPromise;
+      const clientResult = await pool.request()
         .input('clientId', sql.Int, clientId)
-        .query('SELECT rep_cmail AS ReportEmail FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId');
-      finalRecipientEmail = emailResult.recordset[0]?.ReportEmail || client.ClientEmail || process.env.TEST_EMAIL || 'leavemanagement@bmsecurity.com';
-    }
+        .query(`
+          SELECT 
+            cue_iid AS ClientID,
+            cue_cnombre AS ClientName,
+            cue_cemail AS ClientEmail
+          FROM [_Datos].[dbo].[m_cuentas]
+          WHERE cue_iid = @clientId
+        `);
 
-    if (!finalRecipientEmail) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No email address found for client' 
-      });
-    }
+      if (!clientResult.recordset || clientResult.recordset.length === 0) {
+        console.log(`❌ Client ${clientId} not found`);
+        return res.status(404).json({
+          success: false,
+          error: 'Client not found'
+        });
+      }
 
-    console.log(`📧 Recipient: ${finalRecipientEmail}`);
-    console.log(`📧 From: ${process.env.EMAIL_USER}`);
+      const client = clientResult.recordset[0];
+      console.log(`✅ Client found: ${client.ClientName}`);
 
-    // Get patrol data
-    let patrolData;
-    if (reportPeriod === 'historical') {
-      patrolData = await getClientHistoricalPatrols(parseInt(clientId), dateRange.sqlStartDate, dateRange.sqlEndDate);
-    } else {
-      patrolData = await getClientPatrols(parseInt(clientId), dateRange.daysInRange || 30);
-    }
-
-    // Check for data
-    const hasData = (patrolData.pastPatrols && patrolData.pastPatrols.length > 0) || 
-                   (patrolData.patrols && patrolData.patrols.length > 0);
-    
-    if (!hasData) {
-      console.log('❌ No patrol data found for the specified period');
-      return res.status(404).json({
-        success: false,
-        message: `No patrol data found for period: ${dateRange.startDate} to ${dateRange.endDate}`,
-        dataReference: DATA_REFERENCE_DATE
-      });
-    }
-
-    console.log(`📊 Data loaded: ${patrolData.pastPatrols?.length || patrolData.patrols?.length} patrols`);
-
-    // Prepare data for PDF
-    const defaultSchedule = { patrols_per_day: 11, patrol_days: 'Mon,Tue,Wed,Thu,Fri,Sat,Sun' };
-    
-    const posts = transformPatrolsToPosts(patrolData, defaultSchedule, dateRange);
-    const events = transformPatrolsToEvents(patrolData);
-    const summary = calculateSummary(patrolData, defaultSchedule, dateRange);
-
-    console.log(`📋 PDF Data Summary:`);
-    console.log(`   - Posts: ${posts.length}`);
-    console.log(`   - Events: ${events.length}`);
-    console.log(`   - Compliance: ${summary.complianceRate}`);
-
-    // Generate PDF
-    console.log('🎨 Generating PDF...');
-    pdfBuffer = await generatePDF(
-      {
+      // ========== GENERATE PDF ==========
+      console.log(`🎨 Generating PDF for ${client.ClientName}...`);
+      
+      const pdfData = {
         clientId: client.ClientID,
         clientName: client.ClientName,
         startDate: dateRange.startDate,
-        endDate: dateRange.endDate,
-        shiftType: 'Day/Night',
-        events: events,
-        posts: posts,
-        patrols: patrolData.pastPatrols || patrolData.patrols,
-        summary: summary
-      }, 
-      client.ClientName, 
-      dateRange,
-      reportPeriod
-    );
-
-    if (!pdfBuffer) {
-      console.error('❌ PDF generation returned null buffer');
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to generate PDF' 
-      });
-    }
-
-    console.log(`✅ PDF generated successfully: ${Math.round(pdfBuffer.length / 1024)} KB`);
-
-    if (TEST_MODE) {
-      console.log(`🚫 [TEST MODE] Would send report to ${finalRecipientEmail}`);
-      console.log(`📧 From: ${process.env.EMAIL_USER}`);
-      return res.status(200).json({
-        success: true,
-        message: 'TEST MODE - Report would have been sent',
-        testMode: true,
-        details: { 
-          client: client.ClientName, 
-          email: finalRecipientEmail, 
-          from: process.env.EMAIL_USER,
-          period: `${dateRange.startDate} to ${dateRange.endDate}`,
-          patrols: summary.totalPatrols,
-          posts: posts.length,
-          events: events.length,
-          compliance: summary.complianceRate,
-          pdfSize: `${Math.round(pdfBuffer.length / 1024)} KB`,
-          smtp: 'Office365'
-        }
-      });
-    }
-
-    // Send email via Office365 SMTP
-    console.log(`📤 Sending email via Office365 SMTP...`);
-    console.log(`📧 From: ${process.env.EMAIL_USER}`);
-    console.log(`📧 To: ${finalRecipientEmail}`);
-    
-    await sendPatrolEmail({
-      to: finalRecipientEmail,
-      client: {
-        ClientID: client.ClientID,
-        ClientName: client.ClientName
-      },
-      dateRange: dateRange,
-      pdfBuffer: pdfBuffer,
-      pdfFilename: `BM_Security_Report_${client.ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}_to_${dateRange.endDate}.pdf`,
-      subject: `BM Security Patrol Report - ${client.ClientName} - ${dateRange.startDate} to ${dateRange.endDate}`
-    });
-
-    console.log(`✅ Report successfully sent to ${finalRecipientEmail} via Office365 SMTP`);
-    console.log(`📧 From: ${process.env.EMAIL_USER}`);
-
-    return res.status(200).json({
-      success: true,
-      message: `Report sent successfully to ${finalRecipientEmail}`,
-      details: {
-        clientName: client.ClientName,
-        email: finalRecipientEmail,
-        fromEmail: process.env.EMAIL_USER,
-        reportPeriod: `${dateRange.startDate} to ${dateRange.endDate}`,
-        patrols: summary.totalPatrols,
-        posts: posts.length,
-        events: events.length,
-        compliance: summary.complianceRate,
-        performance: summary.performanceLevel,
-        pdfSize: `${Math.round(pdfBuffer.length / 1024)} KB`,
-        smtpProvider: 'Office365',
-        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error sending client report:', error);
-    
-    let userMessage = 'Failed to send report';
-    let errorDetails = {};
-    
-    if (error.message.includes('PDF service')) {
-      userMessage = 'PDF generation service unavailable';
-      errorDetails.suggestion = 'Check pdfService.js file exists and exports functions correctly';
-    } else if (error.message.includes('Email service')) {
-      userMessage = 'Email service unavailable';
-      errorDetails.suggestion = 'Check emailService.js file and Office365 SMTP configuration';
-    } else if (error.code === 'EAUTH' || error.message.includes('Authentication failed')) {
-      userMessage = 'Office365 email authentication failed';
-      errorDetails.suggestion = 'Check EMAIL_USER and EMAIL_PASS in .env file. For Office365, you may need an app password.';
-      errorDetails.office365Config = {
-        host: process.env.EMAIL_HOST,
-        port: process.env.EMAIL_PORT,
-        user: process.env.EMAIL_USER
+        endDate: dateRange.endDate
       };
-    } else if (error.message.includes('connection timeout')) {
-      userMessage = 'Office365 SMTP connection timeout';
-      errorDetails.suggestion = 'Check firewall settings and network connectivity to Office365 SMTP';
-    }
-    
-    return res.status(500).json({ 
-      success: false, 
-      message: userMessage, 
-      error: error.message,
-      details: errorDetails,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-};
 
-/**
- * 📈 ANALYTICS & STATUS ENDPOINTS
- */
-export const getPatrolReportPreview = async (req, res) => {
-  try {
-    const { clientId } = req.params;
-    const daysRange = parseInt(req.query.days) || 30;
+      // Import PDF service
+      const pdfService = await import('../service/pdfService.js');
+      
+      let pdfBuffer;
+      try {
+        pdfBuffer = await pdfService.generateDashboardPDF(pdfData);
+        console.log(`✅ PDF generated: ${(pdfBuffer.length / 1024).toFixed(2)} KB`);
+      } catch (pdfError) {
+        console.error(`❌ PDF generation failed:`, pdfError.message);
+        return res.status(500).json({
+          success: false,
+          error: 'PDF generation failed',
+          details: pdfError.message
+        });
+      }
 
-    const pool = await poolPromise;
-    const clientResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query('SELECT cue_cnombre AS ClientName FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
+      // ========== SEND EMAIL ==========
+      console.log(`📧 Sending email to ${recipientEmail}...`);
 
-    if (clientResult.recordset.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Client not found' 
-      });
-    }
+      // Import email service
+      const emailService = await import('../service/emailService.js');
 
-    const client = clientResult.recordset[0];
-    const patrolData = await getClientPatrols(parseInt(clientId), daysRange);
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        clientId: parseInt(clientId),
-        clientName: client.ClientName,
-        dateRange: {
-          days: daysRange,
-          startDate: dayjs(DATA_REFERENCE_DATE).subtract(daysRange, 'day').format('YYYY-MM-DD'),
-          endDate: DATA_REFERENCE_DATE
+      const emailData = {
+        to: recipientEmail,
+        client: {
+          ClientID: client.ClientID,
+          ClientName: client.ClientName
         },
-        summary: patrolData.summary,
-        patrols: {
-          past: { 
-            count: patrolData.pastPatrols?.length || 0, 
-            sample: patrolData.pastPatrols?.slice(0, 5) || [] 
+        dateRange: dateRange,
+        pdfBuffer: pdfBuffer,
+        pdfFilename: `Security_Report_${client.ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}_to_${dateRange.endDate}.pdf`
+      };
+
+      let emailResult;
+      try {
+        emailResult = await emailService.sendPatrolReport(emailData);
+        
+        if (emailResult.skipped) {
+          console.log(`⚠️ Email skipped: ${emailResult.reason}`);
+        } else {
+          console.log(`✅ Email sent successfully: ${emailResult.messageId}`);
+        }
+      } catch (emailError) {
+        console.error(`❌ Email send failed:`, emailError.message);
+        return res.status(500).json({
+          success: false,
+          error: 'Email sending failed',
+          details: emailError.message,
+          pdfGenerated: true
+        });
+      }
+
+      // ========== SUCCESS RESPONSE ==========
+      console.log('\n╔════════════════════════════════════════════════════════════╗');
+      console.log('║     INDIVIDUAL REPORT COMPLETED SUCCESSFULLY ✅           ║');
+      console.log('╚════════════════════════════════════════════════════════════╝\n');
+
+      return res.json({
+        success: true,
+        message: emailResult.skipped 
+          ? 'Report generated successfully (email sending disabled)'
+          : 'Report generated and email sent successfully',
+        data: {
+          client: {
+            id: client.ClientID,
+            name: client.ClientName
+          },
+          dateRange: {
+            start: dateRange.startDate,
+            end: dateRange.endDate,
+            nights: dateRange.nightsCount,
+            label: dateRange.rangeLabel
+          },
+          pdf: {
+            generated: true,
+            sizeKB: Math.round(pdfBuffer.length / 1024)
+          },
+          email: {
+            sent: !emailResult.skipped,
+            recipient: recipientEmail,
+            messageId: emailResult.messageId || null,
+            skipped: emailResult.skipped || false,
+            skipReason: emailResult.reason || null
           }
         },
-        dataReference: DATA_REFERENCE_DATE
-      }
-    });
+        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+        usingOptimizedModel: true
+      });
+
+    } else {
+      // ========== BULK SCHEDULER RUN ==========
+      console.log('🔧 Bulk scheduler run (all due schedules)...');
+      
+      await schedulerService.triggerPatrolReportsNow();
+      
+      console.log('✅ Bulk scheduler completed');
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Patrol reports triggered successfully (bulk)',
+        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+        usingOptimizedModel: true,
+        mode: 'bulk'
+      });
+    }
 
   } catch (error) {
-    console.error('❌ Error getting patrol preview:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Failed to get preview', 
-      error: error.message 
+    console.error('❌ Error in triggerPatrolReports:', error);
+    console.error('Stack:', error.stack);
+
+    console.log('\n');
+    console.log('  PATROL REPORT TRIGGER FAILED');
+    console.log('\n');
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to trigger patrol reports',
+      error: error.message,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
   }
 };
+
+// =====================================================
+// 📊 ANALYTICS & STATUS ENDPOINTS
+// =====================================================
 
 export const getSchedulerStatus = async (req, res) => {
   try {
-    // Load services if not already loaded
-    if (!servicesLoaded) {
-      await loadServices();
-    }
-
     const pool = await poolPromise;
     
-    const [dueResult, totalResult, clientsResult] = await Promise.all([
+    const [dueResult, totalResult, clientsResult, emailStatsResult] = await Promise.all([
       pool.request().query('SELECT COUNT(*) AS DueCount FROM _Datos.dbo.m_reportes_automaticos WHERE rep_tproximoenvio <= GETDATE() AND rep_cmail IS NOT NULL'),
       pool.request().query('SELECT COUNT(*) AS TotalCount FROM _Datos.dbo.m_reportes_automaticos WHERE rep_cmail IS NOT NULL'),
-      pool.request().query('SELECT COUNT(*) AS ClientsCount FROM _Datos.dbo.m_cuentas WHERE cue_iid IN (28, 39, 41, 48)')
+      pool.request().query('SELECT COUNT(*) AS ClientsCount FROM _Datos.dbo.m_cuentas WHERE cue_iid IN (28, 39, 41, 48)'),
+      pool.request().query(`
+        SELECT 
+          COUNT(*) AS TotalSchedules,
+          SUM(LEN(rep_cmail) - LEN(REPLACE(rep_cmail, ',', '')) + 1) AS TotalEmailRecipients
+        FROM _Datos.dbo.m_reportes_automaticos 
+        WHERE rep_cmail IS NOT NULL AND rep_cmail != ''
+      `)
     ]);
+
+    const emailStats = emailStatsResult.recordset[0];
+    const avgEmailsPerSchedule = emailStats.TotalSchedules > 0 
+      ? Math.round(emailStats.TotalEmailRecipients / emailStats.TotalSchedules) 
+      : 0;
 
     const status = {
       schedules: {
@@ -1273,27 +1017,41 @@ export const getSchedulerStatus = async (req, res) => {
         due: dueResult.recordset[0].DueCount,
         active: totalResult.recordset[0].TotalCount - dueResult.recordset[0].DueCount
       },
+      emailRecipients: {
+        total: emailStats.TotalEmailRecipients || 0,
+        averagePerSchedule: avgEmailsPerSchedule,
+        configuration: 'Multiple emails supported (comma, semicolon, or newline separated)',
+        emailSendingEnabled: global.EMAIL_SENDING_ENABLED || false
+      },
       clients: {
         total: clientsResult.recordset[0].ClientsCount,
         monitored: [28, 39, 41, 48]
       },
       system: {
-        dataTimeframe: `Using ${DATA_REFERENCE_DATE} as reference`,
         serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
         timezone: TZ,
-        testMode: TEST_MODE,
-        services: {
-          pdf: pdfService ? 'Available' : 'Unavailable',
-          email: emailService ? 'Available' : 'Unavailable',
-          database: 'Connected',
-          smtp: {
-            provider: 'Office365',
-            host: process.env.EMAIL_HOST,
-            port: process.env.EMAIL_PORT,
-            user: process.env.EMAIL_USER,
-            fromEmail: process.env.FROM_EMAIL || process.env.EMAIL_USER,
-            fromName: process.env.FROM_NAME || 'BM Security'
-          }
+        nightShiftConfiguration: '18:00-06:00 timing for all reports',
+        dataSource: 'Optimized Report Model',
+        features: {
+          apiFirst: true,
+          cachingEnabled: true,
+          automaticFallback: true,
+          multiTableSupport: true,
+          performanceOptimized: true
+        },
+        emailConfiguration: {
+          enabled: global.EMAIL_SENDING_ENABLED || false,
+          smtpProvider: 'Office365',
+          host: process.env.EMAIL_HOST,
+          port: process.env.EMAIL_PORT,
+          user: process.env.EMAIL_USER,
+          fromEmail: process.env.FROM_EMAIL || process.env.EMAIL_USER,
+          fromName: process.env.FROM_NAME || 'BM Security',
+          multiRecipient: 'Supported'
+        },
+        schedulerConfiguration: {
+          interval: process.env.DYNAMIC_REPORT_INTERVAL || '*/2 * * * *',
+          delayBetweenClients: process.env.DELAY_BETWEEN_CLIENTS || '3000ms'
         }
       }
     };
@@ -1320,7 +1078,8 @@ export const getAllClientsPerformance = async (req, res) => {
       SELECT 
         cue_iid AS ClientID,
         cue_cnombre AS ClientName,
-        cue_cemail AS ClientEmail
+        cue_cemail AS ClientEmail,
+        cue_ncuenta AS AccountNumber
       FROM _Datos.dbo.m_cuentas
       WHERE cue_iid IN (28, 39, 41, 48)
       ORDER BY cue_cnombre
@@ -1328,12 +1087,32 @@ export const getAllClientsPerformance = async (req, res) => {
 
     const clients = await Promise.all(
       result.recordset.map(async (client) => {
-        const patrolData = await getClientPatrols(client.ClientID, 7);
-        const summary = calculateSummary(patrolData, { patrols_per_day: 11 }, { daysInRange: 7 });
+        const reportData = await getClientPatrols(client.ClientID, 7);
+        
+        const emailResult = await pool.request()
+          .input('clientId', sql.Int, client.ClientID)
+          .query('SELECT rep_cmail AS ReportEmail FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId');
+        
+        const reportEmail = emailResult.recordset[0]?.ReportEmail || '';
+        const emailCount = parseEmails(reportEmail).length;
         
         return {
           ...client,
-          performance: summary,
+          emailConfig: {
+            emails: reportEmail,
+            emailCount: emailCount,
+            formattedEmails: formatEmailsForDisplay(reportEmail)
+          },
+          performance: {
+            overallPerformance: reportData.metadata.overallPerformance || 0,
+            totalCompleted: reportData.metadata.totalCompleted || 0,
+            totalExpected: reportData.metadata.totalExpectedPatrols || 0,
+            postsCount: reportData.posts.length || 0,
+            eventsCount: reportData.events.length || 0,
+            guardReportsCount: reportData.guardReports.length || 0,
+            dataSource: reportData.metadata.dataSource || 'Unknown',
+            success: reportData.metadata.success || false
+          },
           lastUpdated: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
         };
       })
@@ -1344,8 +1123,8 @@ export const getAllClientsPerformance = async (req, res) => {
       data: { 
         clients, 
         total: clients.length,
-        timeframe: 'Last 7 days',
-        dataReference: DATA_REFERENCE_DATE
+        timeframe: 'Last 7 nights',
+        usingOptimizedModel: true
       }
     });
   } catch (error) {
@@ -1358,144 +1137,98 @@ export const getAllClientsPerformance = async (req, res) => {
   }
 };
 
-export const getClientAnalyticsData = async (req, res) => {
+// =====================================================
+// 🧪 TESTING & DIAGNOSTICS
+// =====================================================
+
+export const toggleEmailSending = async (req, res) => {
   try {
-    const { clientId } = req.params;
-    const daysRange = parseInt(req.query.days) || 30;
+    const { enabled } = req.body;
     
-    const patrolData = await getClientPatrols(clientId, daysRange);
-    const summary = calculateSummary(patrolData, { patrols_per_day: 11 }, { daysInRange: daysRange });
-    
-    if (!patrolData) {
-      return res.status(404).json({ 
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ 
         success: false, 
-        message: 'Client not found' 
+        message: 'Please provide enabled: true/false' 
       });
     }
     
-    res.status(200).json({ 
-      success: true, 
-      data: {
-        clientId: parseInt(clientId),
-        daysAnalyzed: daysRange,
-        dateRange: {
-          start: dayjs(DATA_REFERENCE_DATE).subtract(daysRange, 'day').format('YYYY-MM-DD'),
-          end: DATA_REFERENCE_DATE
-        },
-        summary: summary,
-        recentPatrols: patrolData.pastPatrols?.slice(0, 10) || [],
-        dataReference: DATA_REFERENCE_DATE
-      }
+    global.EMAIL_SENDING_ENABLED = enabled;
+    
+    console.log(`🛑 Email sending ${enabled ? 'ENABLED' : 'DISABLED'} globally`);
+    
+    res.status(200).json({
+      success: true,
+      message: `Email sending ${enabled ? 'enabled' : 'disabled'} globally`,
+      emailSendingEnabled: global.EMAIL_SENDING_ENABLED,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
   } catch (error) {
-    console.error('❌ Error getting client analytics:', error);
+    console.error('❌ Error toggling email sending:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Failed to get analytics', 
+      message: 'Failed to toggle email sending', 
       error: error.message 
     });
   }
 };
 
-export const testEmailConfiguration = async (req, res) => {
+export const testReportModel = async (req, res) => {
   try {
-    const testEmail = process.env.TEST_EMAIL || process.env.EMAIL_USER;
+    const { clientId, startDate, endDate } = req.body;
     
-    if (!testEmail) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No test email configured in environment variables' 
-      });
-    }
-
-    if (!emailService) {
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Email service unavailable',
-        error: 'Email service failed to load'
-      });
-    }
-
-    console.log('🧪 Testing Office365 email configuration...');
-    console.log(`📧 From: ${process.env.EMAIL_USER}`);
-    console.log(`📧 To: ${testEmail}`);
+    const testClientId = clientId || 28;
+    const testStartDate = startDate || dayjs().tz(TZ).subtract(7, 'day').format('YYYY-MM-DD');
+    const testEndDate = endDate || dayjs().tz(TZ).format('YYYY-MM-DD');
     
-    if (TEST_MODE) {
-      console.log('🚫 [TEST MODE] Email would be sent via Office365 SMTP');
-      return res.status(200).json({
-        success: true,
-        message: 'TEST MODE - Email would have been sent via Office365 SMTP',
-        testMode: true,
-        details: {
-          testEmail: testEmail,
-          fromEmail: process.env.EMAIL_USER,
-          smtpConfig: {
-            host: process.env.EMAIL_HOST,
-            port: process.env.EMAIL_PORT,
-            user: process.env.EMAIL_USER
-          },
-          timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-        }
-      });
-    }
+    console.log(`🧪 Testing optimized report model for client ${testClientId}`);
+    console.log(`📅 Period: ${testStartDate} to ${testEndDate}`);
     
-    await emailService.sendSimpleEmail({
-      to: testEmail,
-      subject: '📧 Office365 Email Configuration Test - BM SECURITY',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2c5aa0;">✅ Office365 Email Configuration Test Successful</h2>
-          <p>Your Office365 email configuration is working correctly.</p>
-          <p><strong>Test Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
-          <p><strong>SMTP Provider:</strong> Office365</p>
-          <p><strong>SMTP Server:</strong> ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}</p>
-          <p><strong>From Address:</strong> ${process.env.EMAIL_USER}</p>
-          <p><strong>To Address:</strong> ${testEmail}</p>
-          <p><strong>Service Status:</strong> Enhanced BM Security Email Service</p>
-          <p><strong>BobMorgan alerts@bmsecurity.com:</strong> ${process.env.EMAIL_USER}</p>
-        </div>
-      `
-    });
-
+    const reportData = await fetchWeeklyReport(
+      testClientId,
+      testStartDate,
+      testEndDate,
+      true
+    );
+    
+    const clientResult = await poolPromise.then(pool => 
+      pool.request()
+        .input('clientId', sql.Int, testClientId)
+        .query('SELECT cue_cnombre AS ClientName FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId')
+    );
+    
+    const clientName = clientResult.recordset[0]?.ClientName || `Client ${testClientId}`;
+    
     res.status(200).json({
-      success: true,
-      message: 'Office365 email test completed successfully',
-      details: {
-        testEmail: testEmail,
-        fromEmail: process.env.EMAIL_USER,
-        smtpConfig: {
-          host: process.env.EMAIL_HOST,
-          port: process.env.EMAIL_PORT,
-          user: process.env.EMAIL_USER,
-          secure: process.env.EMAIL_SECURE
-        },
-        bobMorganEmail: process.env.EMAIL_USER,
-        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-      }
+      success: reportData.metadata.success || false,
+      client: {
+        id: testClientId,
+        name: clientName
+      },
+      period: {
+        startDate: testStartDate,
+        endDate: testEndDate,
+        days: reportData.metadata.daysInRange || 0
+      },
+      reportData: {
+        postsCount: reportData.posts.length,
+        eventsCount: reportData.events.length,
+        guardReportsCount: reportData.guardReports.length,
+        overallPerformance: reportData.metadata.overallPerformance || 0,
+        dataSource: reportData.metadata.dataSource || 'Unknown',
+        processingTime: reportData.metadata.processingTime || 0,
+        usingAPI: reportData.metadata.usingAPI || false,
+        success: reportData.metadata.success || false
+      },
+      metadata: reportData.metadata,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
     });
-
+    
   } catch (error) {
-    console.error('❌ Office365 email test failed:', error);
-    
-    let errorDetails = {
-      suggestion: 'Check your Office365 credentials and SMTP configuration',
-      bobMorganEmail: process.env.EMAIL_USER
-    };
-    
-    if (error.code === 'EAUTH') {
-      errorDetails.office365Help = 'For Office365, you may need to use an app password instead of your regular password';
-      errorDetails.configCheck = {
-        EMAIL_USER: process.env.EMAIL_USER,
-        EMAIL_HOST: process.env.EMAIL_HOST,
-        EMAIL_PORT: process.env.EMAIL_PORT
-      };
-    }
-    
+    console.error('❌ Report model test error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Office365 email test failed', 
-      error: error.message,
-      details: errorDetails
+      message: 'Report model test failed', 
+      error: error.message
     });
   }
 };
@@ -1504,57 +1237,69 @@ export const diagnosticServices = async (req, res) => {
   try {
     console.log('🔍 Running service diagnostics...');
     
-    // Load services if not already loaded
-    if (!servicesLoaded) {
-      await loadServices();
-    }
-    
     const diagnostics = {
-      pdfService: {
-        available: !!pdfService,
-        functions: pdfService ? Object.keys(pdfService).filter(key => typeof pdfService[key] === 'function') : []
+      reportModel: {
+        available: !!fetchWeeklyReport,
+        description: 'Optimized Report Model with API-first approach'
       },
-      emailService: {
-        available: !!emailService,
-        functions: emailService ? Object.keys(emailService).filter(key => typeof emailService[key] === 'function') : []
+      schedulerService: {
+        available: !!schedulerService,
+        functions: schedulerService ? Object.keys(schedulerService).filter(key => typeof schedulerService[key] === 'function') : [],
+        features: {
+          multiRecipient: true,
+          dateRangeTesting: true,
+          emailKillSwitch: true,
+          pdfSaving: process.env.SAVE_PDF_TO_DISK === 'true',
+          errorLogging: process.env.LOG_ERRORS_TO_FILE === 'true'
+        }
+      },
+      emailFeatures: {
+        multiRecipient: true,
+        parsing: {
+          delimiters: ['comma', 'semicolon', 'newline'],
+          validation: 'basic format validation'
+        },
+        globalEnabled: global.EMAIL_SENDING_ENABLED || false
       },
       system: {
         nodeVersion: process.version,
         timezone: TZ,
-        testMode: TEST_MODE,
-        dataReference: DATA_REFERENCE_DATE,
-        serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+        serverTime: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+        usingOptimizedModel: true
       },
-      office365Config: {
-        EMAIL_HOST: process.env.EMAIL_HOST,
-        EMAIL_PORT: process.env.EMAIL_PORT,
-        EMAIL_USER: process.env.EMAIL_USER ? '*** configured ***' : '❌ missing',
-        EMAIL_PASS: process.env.EMAIL_PASS ? '*** configured ***' : '❌ missing',
-        FROM_EMAIL: process.env.FROM_EMAIL,
-        FROM_NAME: process.env.FROM_NAME,
-        BOB_MORGAN_EMAIL: process.env.EMAIL_USER || 'alerts@bmsecurity.com'
+      configuration: {
+        TIMEZONE: TZ,
+        EMAIL_SENDING_ENABLED: global.EMAIL_SENDING_ENABLED || false,
+        SAVE_PDF_TO_DISK: process.env.SAVE_PDF_TO_DISK === 'true',
+        LOG_ERRORS_TO_FILE: process.env.LOG_ERRORS_TO_FILE === 'true',
+        DYNAMIC_REPORT_INTERVAL: process.env.DYNAMIC_REPORT_INTERVAL || '*/2 * * * *'
       }
     };
     
     console.log('📊 Diagnostics completed');
-    console.log(`📧 BobMorgan alerts@bmsecurity.com Email: ${process.env.EMAIL_USER}`);
+    console.log(`✅ Using Optimized Report Model`);
+    console.log(`📧 Email sending globally: ${global.EMAIL_SENDING_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
+    console.log(`🔄 Scheduler Service: ${schedulerService ? '✅ AVAILABLE' : '❌ UNAVAILABLE'}`);
     
     res.status(200).json({
       success: true,
       diagnostics,
       recommendations: {
-        pdfService: diagnostics.pdfService.available 
-          ? `✅ ${diagnostics.pdfService.functions.length} PDF functions available`
-          : '❌ PDF service unavailable - check pdfService.js',
-        emailService: diagnostics.emailService.available 
-          ? `✅ ${diagnostics.emailService.functions.length} email functions available`
-          : '❌ Email service unavailable - check emailService.js and Office365 configuration',
-        office365: diagnostics.office365Config.EMAIL_USER && diagnostics.office365Config.EMAIL_PASS
-          ? '✅ Office365 credentials configured'
-          : '❌ Office365 credentials incomplete',
-        bobMorganEmail: diagnostics.office365Config.EMAIL_USER 
-          ? `✅ BobMorgan alerts@bmsecurity.com: ${process.env.EMAIL_USER}`
-          : '❌ BobMorgan email not configured'
+        reportModel: diagnostics.reportModel.available 
+          ? '✅ Optimized Report Model available'
+          : '❌ Report model unavailable - check reportModelOptimized.js',
+        schedulerService: diagnostics.schedulerService.available
+          ? `✅ ${diagnostics.schedulerService.functions.length} scheduler functions available`
+          : '❌ Scheduler service unavailable - check scheduler.js',
+        multiRecipient: diagnostics.emailFeatures.multiRecipient
+          ? '✅ Multiple recipient support enabled'
+          : '❌ Multiple recipient support disabled',
+        emailSending: diagnostics.emailFeatures.globalEnabled
+          ? '✅ Email sending enabled globally'
+          : '🛑 Email sending disabled globally - use /api/scheduler/toggle-email endpoint to enable',
+        schedulerFeatures: diagnostics.schedulerService.available
+          ? `✅ Scheduler features: Email kill switch, PDF saving, Error logging`
+          : '❌ Scheduler service not loaded'
       }
     });
     
@@ -1568,142 +1313,51 @@ export const diagnosticServices = async (req, res) => {
   }
 };
 
-export const testCompleteFlow = async (req, res) => {
-  try {
-    const { clientId = 28, email, testEmail = true } = req.body;
-    
-    console.log('🧪 Testing complete flow with Office365 SMTP...');
-    console.log(`📧 BobMorgan alerts@bmsecurity.com: ${process.env.EMAIL_USER}`);
-    
-    const patrolData = await getClientPatrols(clientId, 7);
-    const dateRange = getPreviousWeekRange();
-    const defaultSchedule = { patrols_per_day: 11, patrol_days: 'Mon,Tue,Wed,Thu,Fri,Sat,Sun' };
-    
-    const events = transformPatrolsToEvents(patrolData);
-    const posts = transformPatrolsToPosts(patrolData, defaultSchedule, dateRange);
-    const summary = calculateSummary(patrolData, defaultSchedule, dateRange);
-    
-    console.log(`📊 Test Results:`);
-    console.log(`   - Patrols found: ${patrolData.pastPatrols?.length || 0}`);
-    console.log(`   - Events transformed: ${events.length}`);
-    console.log(`   - Posts transformed: ${posts.length}`);
-    console.log(`   - Valid events: ${events.filter(e => e.formattedDate !== 'N/A').length}`);
-    console.log(`   - Compliance rate: ${summary.complianceRate}`);
-    console.log(`📧 From Email: ${process.env.EMAIL_USER}`);
-    
-    let emailResult = null;
-    let pdfBuffer = null;
-    
-    // Test PDF generation
-    try {
-      pdfBuffer = await generatePDF(
-        {
-          clientId: clientId,
-          clientName: `Test Client ${clientId}`,
-          startDate: dateRange.startDate,
-          endDate: dateRange.endDate,
-          events: events,
-          posts: posts,
-          patrols: patrolData.pastPatrols,
-          summary: summary
-        },
-        `Test Client ${clientId}`,
-        dateRange
-      );
-    } catch (pdfError) {
-      console.error('❌ PDF generation test failed:', pdfError.message);
-    }
-    
-    // Test email sending if requested
-    if (testEmail && email) {
-      try {
-        if (emailService && !TEST_MODE) {
-          emailResult = await emailService.sendSimpleEmail({
-            to: email,
-            subject: '🧪 Complete Flow Test - BM SECURITY (Office365)',
-            html: `
-              <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #2c5aa0;">🧪 Complete Flow Test - Office365 SMTP</h2>
-                <p><strong>Data Transformation:</strong> ✅ Successful</p>
-                <p><strong>Patrols Processed:</strong> ${patrolData.pastPatrols?.length || 0}</p>
-                <p><strong>Events Created:</strong> ${events.length}</p>
-                <p><strong>Posts Created:</strong> ${posts.length}</p>
-                <p><strong>Compliance Rate:</strong> ${summary.complianceRate}</p>
-                <p><strong>Performance Level:</strong> ${summary.performanceLevel}</p>
-                <p><strong>PDF Generated:</strong> ${pdfBuffer ? `✅ ${Math.round(pdfBuffer.length / 1024)} KB` : '❌ Failed'}</p>
-                <p><strong>SMTP Provider:</strong> Office365</p>
-                <p><strong>From Email:</strong> ${process.env.EMAIL_USER}</p>
-                <p><strong>BobMorgan alerts@bmsecurity.com :</strong> ${process.env.EMAIL_USER}</p>
-                <p><strong>Time:</strong> ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}</p>
-                <p><strong>Test Mode:</strong> ${TEST_MODE ? 'Enabled' : 'Disabled'}</p>
-              </div>
-            `
-          });
-        } else if (TEST_MODE) {
-          emailResult = { testMode: true, message: 'Email would have been sent via Office365 SMTP' };
-        }
-      } catch (emailError) {
-        console.error('❌ Email test failed:', emailError.message);
-        emailResult = { error: emailError.message };
-      }
-    }
-    
-    res.status(200).json({
-      success: true,
-      message: 'Complete flow test completed',
-      data: {
-        patrols: patrolData.pastPatrols?.length || 0,
-        events: events.length,
-        posts: posts.length,
-        summary: summary,
-        pdfTest: pdfBuffer ? `✅ ${Math.round(pdfBuffer.length / 1024)} KB` : '❌ Failed',
-        emailTest: email ? (TEST_MODE ? 'test_mode' : (emailResult && !emailResult.error ? 'sent' : 'failed')) : 'skipped',
-        testMode: TEST_MODE,
-        smtpProvider: 'Office365',
-        fromEmail: process.env.EMAIL_USER,
-        bobMorganEmail: process.env.EMAIL_USER,
-        timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-      },
-      emailResult: emailResult
-    });
-    
-  } catch (error) {
-    console.error('❌ Complete flow test failed:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Test failed',
-      error: error.message,
-      testMode: TEST_MODE,
-      smtpProvider: 'Office365',
-      fromEmail: process.env.EMAIL_USER,
-      bobMorganEmail: process.env.EMAIL_USER,
-      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')
-    });
-  }
-};
+// =====================================================
+// 📋 EXPORT ALL FUNCTIONS
+// =====================================================
 
-// Export ALL functions that your routes need
 export default {
+  // Schedule management
   getAllSchedules,
   getScheduleById,
   updateSchedule,
   createSchedule,
   deleteSchedule,
+  
+  // Manual triggers
   triggerDynamicReports,
   triggerPatrolReports,
-  sendEnhancedClientReport,
-  getPatrolReportPreview,
+  
+  // Analytics & status
   getSchedulerStatus,
   getAllClientsPerformance,
-  getClientAnalyticsData,
-  testEmailConfiguration,
+  
+  // Testing & diagnostics
   diagnosticServices,
-  testCompleteFlow,
+  toggleEmailSending,
+  testReportModel,
+  
+  // Date range functions
+  getDateRangeForPeriod,
+  getTodayRange,
+  getYesterdayRange,
+  getLast7DaysRange,
+  getPreviousWeekRange,
+  getCurrentWeekRange,
+  getLast30DaysRange,
+  getPreviousMonthRange,
+  getCurrentMonthRange,
+  getCustomDateRange,
   getHistoricalDateRange,
+  
+  // Data fetching functions (using optimized report model)
   getClientHistoricalPatrols,
   getClientPatrols,
-  getPreviousWeekRange,
-  transformPatrolsToPosts,
-  transformPatrolsToEvents,
-  calculateSummary
+  
+  // Helper functions
+  parseEmails,
+  formatEmailsForDisplay,
+  calculateNightsInRange,
+  getDatabaseQueryDates
 };

@@ -1,9 +1,17 @@
-// server/controllers/reportController.js - FIXED TO USE reportService.js
+// server/controllers/reportController.js - FULLY UPDATED & SYNCHRONIZED
 import { generateWeeklyReportPDF } from "../service/reportService.js";
+import { fetchWeeklyReport } from "../models/reportModel.js";
 import { getClientSchedule } from "../scripts/managePatrolSchedules.js";
 import { sql, poolPromise } from "../config/database.js";
 import nodemailer from "nodemailer";
 import dayjs from "dayjs";
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
 // 🔧 Available shifts configuration
 const AVAILABLE_SHIFTS = [
@@ -27,60 +35,20 @@ const AVAILABLE_SHIFTS = [
   }
 ];
 
-// 🧮 CORRECT CALCULATION FUNCTIONS
+// 🔄 Helper Functions
 
 /**
- * Calculate expected patrols for a date range using client schedule
- * FIXED: Each zone should get the FULL expected patrols, not divided
- */
-function calculateExpectedPatrols(schedule, startDate, endDate) {
-  const patrolDays = schedule.patrol_days.split(',').map(day => day.trim().toLowerCase());
-  const weekdayPatrols = schedule.patrols_per_day;
-  const weekendPatrols = schedule.weekend_patrols_per_day;
-  
-  let expected = 0;
-  let currentDate = dayjs(startDate);
-  const end = dayjs(endDate);
-  
-  while (currentDate.isBefore(end) || currentDate.isSame(end, 'day')) {
-    const dayOfWeek = currentDate.format('ddd').toLowerCase();
-    
-    // Check if this day is in the patrol schedule
-    if (patrolDays.includes(dayOfWeek)) {
-      if (dayOfWeek === 'sat' || dayOfWeek === 'sun') {
-        expected += weekendPatrols;
-      } else {
-        expected += weekdayPatrols;
-      }
-    }
-    
-    currentDate = currentDate.add(1, 'day');
-  }
-  
-  return expected;
-}
-
-/**
- * Calculate expected patrols PER ZONE - CORRECTED
- * Each zone gets the FULL expected patrol count, NOT divided
- */
-function calculateExpectedPatrolsPerZone(schedule, startDate, endDate) {
-  // FIXED: Each zone should get the same expected patrols as the total schedule
-  return calculateExpectedPatrols(schedule, startDate, endDate);
-}
-
-/**
- * Calculate weekly total
+ * Calculate weekly total patrols
  */
 function calculateWeeklyTotal(weekdayPatrols, weekendPatrols, patrolDays) {
-  const days = patrolDays.split(',').map(day => day.trim().toLowerCase());
+  const days = patrolDays?.split(',').map(day => day.trim().toLowerCase()) || [];
   let weeklyTotal = 0;
   
   days.forEach(day => {
     if (day === 'sat' || day === 'sun') {
-      weeklyTotal += weekendPatrols;
+      weeklyTotal += weekendPatrols || weekdayPatrols || 11;
     } else {
-      weeklyTotal += weekdayPatrols;
+      weeklyTotal += weekdayPatrols || 11;
     }
   });
   
@@ -91,7 +59,7 @@ function calculateWeeklyTotal(weekdayPatrols, weekendPatrols, patrolDays) {
  * Get performance rating
  */
 function getPerformanceRating(complianceRate) {
-  const rate = parseFloat(complianceRate) || 0;
+  const rate = typeof complianceRate === 'number' ? complianceRate : parseFloat(complianceRate) || 0;
   if (rate >= 90) return 'Excellent';
   if (rate >= 80) return 'Good';
   if (rate >= 70) return 'Fair';
@@ -102,77 +70,16 @@ function getPerformanceRating(complianceRate) {
  * Get performance status
  */
 function getPerformanceStatus(performanceRate) {
-  const rate = parseFloat(performanceRate) || 0;
+  const rate = typeof performanceRate === 'number' ? performanceRate : parseFloat(performanceRate) || 0;
   if (rate >= 100) return 'Exceeded Target';
   if (rate >= 90) return 'On Target';
   if (rate >= 70) return 'Needs Improvement';
   return 'Needs Attention';
 }
 
-// 🔧 Helper functions
-async function getClientInfo(clientParam) {
-  const pool = await poolPromise;
-  try {
-    const result = await pool.request()
-      .input("clientName", sql.NVarChar, clientParam)
-      .query(`
-        SELECT cue_iid AS id, cue_cnombre AS name
-        FROM [_Datos].[dbo].[m_cuentas] 
-        WHERE cue_cnombre = @clientName
-      `);
-    return result.recordset.length > 0 ? result.recordset[0] : null;
-  } catch (error) {
-    console.error("❌ Error getting client info:", error);
-    return null;
-  }
-}
-
-async function getAllClients() {
-  const pool = await poolPromise;
-  try {
-    const result = await pool.request().query(`
-      SELECT cue_iid AS id, cue_cnombre AS name
-      FROM [_Datos].[dbo].[m_cuentas] 
-      ORDER BY cue_cnombre
-    `);
-    return result.recordset;
-  } catch (error) {
-    console.error("❌ Error getting all clients:", error);
-    return [];
-  }
-}
-
-async function checkTableExists(tableName) {
-  const pool = await poolPromise;
-  try {
-    const tableNameOnly = tableName.split('.').pop();
-    const result = await pool.request()
-      .input("tableName", sql.NVarChar, tableNameOnly)
-      .query(`
-        SELECT 1 AS existsFlag
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_NAME = @tableName
-      `);
-    return result.recordset.length > 0;
-  } catch (error) {
-    console.warn(`⚠️ Error checking table ${tableName}:`, error.message);
-    return false;
-  }
-}
-
-function getTableNames(startDate, endDate) {
-  const start = dayjs(startDate);
-  const end = dayjs(endDate);
-  const tables = new Set();
-  let current = start;
-  while (current.isBefore(end) || current.isSame(end, 'month')) {
-    const monthSuffix = current.format("YYYYMM");
-    tables.add(`_Datos.dbo.p_recepcion${monthSuffix}`);
-    current = current.add(1, 'month').startOf('month');
-  }
-  return Array.from(tables);
-}
-
+/**
+ * Get shift description
+ */
 function getShiftDescription(shiftType) {
   switch (shiftType?.toLowerCase()) {
     case 'day': return 'Day Shift (6:00-17:59)';
@@ -182,214 +89,99 @@ function getShiftDescription(shiftType) {
   }
 }
 
-// 📊 Fetch weekly report data - CORRECTED CALCULATIONS
-async function fetchWeeklyReport(clientName, startDate, endDate) {
+/**
+ * Get client info from database
+ */
+/**
+ * Get client info from database - FIXED VERSION
+ */
+async function getClientInfo(clientParam) {
+  const pool = await poolPromise;
   try {
-    const pool = await poolPromise;
-    console.log(`📊 [fetchWeeklyReport] Client: ${clientName}, Period: ${startDate} to ${endDate}`);
-
-    const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      throw new Error(`Client not found: ${clientName}`);
-    }
-
-    // ✅ Get schedule using imported function
-    const schedule = await getClientSchedule(clientInfo.id);
-    console.log(`📋 Schedule loaded:`, {
-      weekday: schedule.patrols_per_day,
-      weekend: schedule.weekend_patrols_per_day,
-      days: schedule.patrol_days,
-      shift: schedule.shift_type,
-      hasCustom: schedule.has_custom_schedule,
-      source: schedule.config_source
-    });
+    // Check if clientParam is numeric (ID) or string (Name)
+    const isNumeric = !isNaN(clientParam) && !isNaN(parseFloat(clientParam));
     
-    const tableNames = getTableNames(startDate, endDate);
-    const tableExistsChecks = await Promise.all(
-      tableNames.map(table => checkTableExists(table))
-    );
-    const validTables = tableNames.filter((_, index) => tableExistsChecks[index]);
-    
-    if (validTables.length === 0) {
-      const mainTableExists = await checkTableExists('_Datos.dbo.p_recepcion');
-      if (mainTableExists) {
-        validTables.push('_Datos.dbo.p_recepcion');
-      } else {
-        throw new Error("No valid tables found for date range");
+    if (isNumeric) {
+      // Query by ID
+      const result = await pool.request()
+        .input("clientId", sql.Int, parseInt(clientParam))
+        .query(`
+          SELECT cue_iid AS id, cue_cnombre AS name
+          FROM [_Datos].[dbo].[m_cuentas] 
+          WHERE cue_iid = @clientId
+        `);
+      
+      if (result.recordset.length > 0) {
+        return result.recordset[0];
       }
-    }
-
-    const buildUnionQuery = (tables) => {
-      return tables.map(table => `SELECT * FROM ${table} r`).join('\n          UNION ALL\n          ');
-    };
-
-    // ✅ CORRECT: Calculate expected patrols PER ZONE (FULL VALUE, not divided)
-    const daysInPeriod = Math.max(1, dayjs(endDate).diff(dayjs(startDate), 'day') + 1);
-    const expectedPerZone = calculateExpectedPatrolsPerZone(schedule, startDate, endDate);
-    
-    console.log(`🎯 CORRECTED Expected calculation:`, {
-      daysInPeriod,
-      schedulePatrolsPerDay: schedule.patrols_per_day,
-      scheduleWeekendPatrols: schedule.weekend_patrols_per_day,
-      expectedPerZone: expectedPerZone,
-      calculationMethod: 'FULL expected patrols per zone (NOT divided)'
-    });
-
-    // ✅ Get actual completed patrols per zone (with zone names)
-    const summaryResult = await pool.request()
-      .input("clientId", sql.Int, clientInfo.id)
-      .input("startDate", sql.DateTime, dayjs(startDate).startOf("day").toDate())
-      .input("endDate", sql.DateTime, dayjs(endDate).endOf("day").toDate())
-      .query(`
-        SELECT 
-          COALESCE(
-            zon.zon_cdescripcion,
-            r.rec_czona, 
-            'Unknown Zone'
-          ) AS SecurityPost,
-          COUNT(*) AS Completed
-        FROM (${buildUnionQuery(validTables)}) AS r
-        LEFT JOIN [_Datos].[dbo].[m_zonas] AS zon
-          ON r.rec_iidcuenta = zon.zon_iidcuenta
-          AND r.rec_czona = zon.zon_ccodigo
-        WHERE r.rec_iidcuenta = @clientId
-          AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-        GROUP BY COALESCE(zon.zon_cdescripcion, r.rec_czona, 'Unknown Zone')
-        ORDER BY COUNT(*) DESC
-      `);
-
-    const posts = summaryResult.recordset || [];
-    console.log(`📊 Found ${posts.length} security posts with data`);
-
-    // ✅ CORRECT Performance Calculation - EACH ZONE GETS FULL EXPECTED VALUE
-    const totalCompleted = posts.reduce((sum, p) => sum + (parseInt(p.Completed) || 0), 0);
-    const validZoneCount = posts.length;
-
-    console.log(`📐 CORRECT: Expected Per Zone: ${expectedPerZone} (FULL VALUE, NOT divided)`);
-
-    // ✅ CORRECT: Assign expected values and calculate performance
-    const processedPosts = posts.map(post => {
-      const completed = parseInt(post.Completed) || 0;
-      const expected = expectedPerZone; // Each zone gets the FULL expected value
+    } else {
+      // Query by name - try exact match first
+      const result = await pool.request()
+        .input("clientName", sql.NVarChar, clientParam)
+        .query(`
+          SELECT cue_iid AS id, cue_cnombre AS name
+          FROM [_Datos].[dbo].[m_cuentas] 
+          WHERE cue_cnombre = @clientName
+        `);
       
-      // Performance calculation: (Completed / Expected) × 100
-      const performance = expected > 0 
-        ? ((completed / expected) * 100).toFixed(1)
-        : '0.0';
-      
-      const status = getPerformanceStatus(performance);
-      
-      console.log(`  ${post.SecurityPost}: ${completed}/${expected} = ${performance}% [${status}]`);
-      
-      return {
-        SecurityPost: post.SecurityPost,
-        Completed: completed,
-        Expected: expected,
-        Performance: performance,
-        Status: status
-      };
-    });
-
-    // ✅ Calculate overall performance
-    const totalZonesExpected = validZoneCount * expectedPerZone;
-    const overallCompletionRate = totalZonesExpected > 0 
-      ? ((totalCompleted / totalZonesExpected) * 100).toFixed(1)
-      : '0.0';
-    const performanceRating = getPerformanceRating(parseFloat(overallCompletionRate));
-
-    console.log('📊 CORRECT Performance calculations completed');
-    console.log(`📈 Overall: ${totalCompleted}/${totalZonesExpected} (${overallCompletionRate}%) - ${performanceRating}`);
-
-    // ✅ Get human-readable events with zone names
-    const eventsResult = await pool.request()
-      .input("clientId", sql.Int, clientInfo.id)
-      .input("startDate", sql.DateTime, dayjs(startDate).startOf("day").toDate())
-      .input("endDate", sql.DateTime, dayjs(endDate).endOf("day").toDate())
-      .query(`
-        SELECT 
-          CONVERT(VARCHAR(10), r.rec_tfechahora, 120) AS Date,
-          CONVERT(VARCHAR(8), r.rec_tfechahora, 108) AS Time,
-          COALESCE(
-            zon.zon_cdescripcion,
-            r.rec_czona,
-            'No Zone'
-          ) AS Zone,
-          COALESCE(
-            NULLIF(r.rec_cContenido, ''),
-            NULLIF(r.rec_calarma, ''),
-            'Patrol Completed'
-          ) AS Event,
-          r.rec_calarma AS Code,
-          ISNULL(r.rec_cObservaciones, '') AS Observations
-        FROM (${buildUnionQuery(validTables)}) AS r
-        LEFT JOIN [_Datos].[dbo].[m_zonas] AS zon
-          ON r.rec_iidcuenta = zon.zon_iidcuenta
-          AND r.rec_czona = zon.zon_ccodigo
-        WHERE r.rec_iidcuenta = @clientId
-          AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-        ORDER BY r.rec_tfechahora DESC
-      `);
-
-    const events = eventsResult.recordset || [];
-    console.log(`📋 Found ${events.length} events`);
-
-    // Incident count
-    const incidentResult = await pool.request()
-      .input("clientId", sql.Int, clientInfo.id)
-      .input("startDate", sql.DateTime, dayjs(startDate).startOf("day").toDate())
-      .input("endDate", sql.DateTime, dayjs(endDate).endOf("day").toDate())
-      .query(`
-        SELECT COUNT(*) as IncidentCount
-        FROM (${buildUnionQuery(validTables)}) AS r
-        WHERE r.rec_iidcuenta = @clientId
-          AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-          AND (r.rec_cContenido LIKE '%incident%' OR r.rec_cContenido LIKE '%alarm%' OR r.rec_calarma IS NOT NULL)
-      `);
-
-    const incidentCount = incidentResult.recordset[0]?.IncidentCount || 0;
-    console.log(`🚨 Found ${incidentCount} incidents`);
-
-    // ✅ Calculate weekly total
-    const weeklyTotal = calculateWeeklyTotal(
-      schedule.patrols_per_day,
-      schedule.weekend_patrols_per_day,
-      schedule.patrol_days
-    );
-
-    return {
-      clientInfo,
-      posts: processedPosts,
-      events,
-      incident: [{ count: incidentCount }],
-      metadata: {
-        totalExpectedPatrols: totalZonesExpected,
-        totalCompleted: totalCompleted,
-        completionRate: overallCompletionRate,
-        performanceRating: performanceRating,
-        daysInRange: daysInPeriod,
-        weeklyTotal: weeklyTotal,
-        expectedPerZone: expectedPerZone,
-        validZoneCount: validZoneCount,
-        hasSchedule: !!schedule,
-        hasCustomSchedule: schedule.has_custom_schedule,
-        configSource: schedule.config_source,
-        tablesUsed: validTables,
-        calculationMethod: 'FULL expected patrols per zone (NOT divided)'
+      if (result.recordset.length > 0) {
+        return result.recordset[0];
       }
-    };
-
+      
+      // Try partial match if exact match fails
+      const partialResult = await pool.request()
+        .input("clientName", sql.NVarChar, `%${clientParam}%`)
+        .query(`
+          SELECT cue_iid AS id, cue_cnombre AS name
+          FROM [_Datos].[dbo].[m_cuentas] 
+          WHERE cue_cnombre LIKE @clientName
+          ORDER BY cue_cnombre
+        `);
+      
+      return partialResult.recordset.length > 0 ? partialResult.recordset[0] : null;
+    }
+    
+    return null;
+    
   } catch (error) {
-    console.error("❌ Error in fetchWeeklyReport:", error);
-    throw error;
+    console.error("❌ Error getting client info:", error);
+    return null;
   }
 }
 
-// 📄 Generate and download PDF report - FIXED TO USE reportService.js
+/**
+ * Get all clients
+ */
+async function getAllClients() {
+  const pool = await poolPromise;
+  try {
+    const result = await pool.request().query(`
+      SELECT cue_iid AS id, cue_cnombre AS name
+      FROM [_Datos].[dbo].[m_cuentas] 
+      WHERE cue_cnombre IS NOT NULL 
+        AND cue_cnombre != ''
+      ORDER BY cue_cnombre
+    `);
+    return result.recordset;
+  } catch (error) {
+    console.error("❌ Error getting all clients:", error);
+    return [];
+  }
+}
+
+// =====================================================
+// 📊 MAIN CONTROLLER FUNCTIONS - FULLY SYNCHRONIZED
+// =====================================================
+
+/**
+ * 📄 Generate and download PDF report
+ * Uses: generateWeeklyReportPDF from reportService.js
+ */
 export const getWeeklyReportPDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate, shiftType = "Day/Night" } = req.query;
     
-    console.log("📄 PDF Request Parameters:", { clientName, startDate, endDate, shiftType });
+    console.log("📄 [CONTROLLER] PDF Request:", { clientName, startDate, endDate, shiftType });
 
     if (!clientName) {
       return res.status(400).json({
@@ -415,15 +207,13 @@ export const getWeeklyReportPDF = async (req, res) => {
       });
     }
 
-    console.log("✅ Client found:", { id: clientInfo.id, name: clientInfo.name });
+    console.log(`✅ Client found: ${clientInfo.name} (ID: ${clientInfo.id})`);
 
-    // ✅ Use the reportService.js for PDF generation
+    // ✅ Use the synchronized reportService.js for PDF generation
     const pdfBuffer = await generateWeeklyReportPDF(
       clientInfo.id,
-      clientInfo.name,
       startDate,
-      endDate,
-      shiftType
+      endDate
     );
     
     if (!pdfBuffer) {
@@ -435,16 +225,16 @@ export const getWeeklyReportPDF = async (req, res) => {
     }
 
     const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
-    const filename = `Security_Report_${safeClientName}_${startDate}_to_${endDate}.pdf`;
+    const filename = `Security_Patrol_Report_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', pdfBuffer.length);
     
-    console.log("✅ PDF generated successfully using reportService.js:", {
+    console.log("✅ PDF generated successfully:", {
       filename,
       size: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      service: 'reportService.js'
+      service: 'reportService.js (synchronized)'
     });
 
     res.send(pdfBuffer);
@@ -454,27 +244,45 @@ export const getWeeklyReportPDF = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error generating PDF report",
-      error: error.message
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 };
 
-// 📊 Get patrol report data - CORRECTED
+/**
+ * 📊 Get patrol report data
+ * Uses: fetchWeeklyReport from reportModel.js
+ */
 export const getPatrolReport = async (req, res) => {
   try {
-    const client = req.query.client || req.body.client;
-    const startDateTime = req.query.startDateTime || req.body.startDateTime;
-    const endDateTime = req.query.endDateTime || req.body.endDateTime;
-    const shiftType = req.query.shiftType || req.body.shiftType || "Day/Night";
+    const { 
+      client, 
+      startDate, 
+      endDate,
+      startDateTime,
+      endDateTime,
+      shiftType = "Day/Night" 
+    } = req.query;
 
-    if (!client || !startDateTime || !endDateTime) {
+    // Support both naming conventions
+    const effectiveStartDate = startDate || startDateTime;
+    const effectiveEndDate = endDate || endDateTime;
+
+    if (!client || !effectiveStartDate || !effectiveEndDate) {
       return res.status(400).json({
         success: false,
-        message: "Missing required parameters: client, startDateTime, and endDateTime.",
+        message: "Missing required parameters: client, startDate, and endDate.",
+        example: "/api/reports/patrol?client=ClientName&startDate=2024-01-01&endDate=2024-01-08"
       });
     }
 
-    console.log(`\n📊 [Patrol Report Request] Client: ${client}, Period: ${startDateTime} → ${endDateTime}`);
+    console.log(`\n📊 [CONTROLLER] Patrol Report Request:`, {
+      client,
+      startDate: effectiveStartDate,
+      endDate: effectiveEndDate,
+      shiftType
+    });
 
     const clientInfo = await getClientInfo(client);
     if (!clientInfo) {
@@ -487,42 +295,68 @@ export const getPatrolReport = async (req, res) => {
     const schedule = await getClientSchedule(clientInfo.id);
     const effectiveShiftType = schedule?.shift_type || shiftType;
 
+    // ✅ Use the synchronized reportModel.js for data fetching
     const reportData = await fetchWeeklyReport(
-      clientInfo.name,
-      startDateTime.split('T')[0],
-      endDateTime.split('T')[0]
+      clientInfo.id,
+      effectiveStartDate.split('T')[0],
+      effectiveEndDate.split('T')[0]
     );
 
-    if (!reportData.posts || !reportData.events) {
+    if (!reportData.metadata.success) {
+      const errorMsg = reportData.metadata.error?.message || "Unknown error";
+      console.error("❌ Data fetch failed:", errorMsg);
       return res.status(500).json({
         success: false,
-        message: "Data fetch failed - invalid structure returned"
+        message: "Data fetch failed",
+        error: errorMsg,
+        metadata: reportData.metadata
       });
     }
 
+    // Transform data for response
     const transformedSummary = reportData.posts.map(post => ({
-      SitePosts: post.SecurityPost,
+      SitePost: post.SecurityPost,
       ChecksCompleted: post.Completed,
       ExpectedChecks: post.Expected,
       PerformanceRate: `${post.Performance}%`,
-      Status: post.Status
+      Percentage: post.Percentage,
+      Status: getPerformanceStatus(post.Performance)
     }));
 
-    console.log(`✅ CORRECTED Report data retrieved successfully`);
-    console.log(`   Summary rows: ${transformedSummary.length}`);
-    console.log(`   Event rows: ${reportData.events.length}`);
-    console.log(`   Overall: ${reportData.metadata.completionRate}% - ${reportData.metadata.performanceRating}`);
-    console.log(`   Expected per zone: ${reportData.metadata.expectedPerZone} (FULL VALUE)`);
-    console.log(`   Valid zones: ${reportData.metadata.validZoneCount}`);
+    const transformedEvents = reportData.events.map(event => ({
+      Date: event.Date,
+      Time: event.Time,
+      Zone: event.Zone,
+      Event: event.Event,
+      Code: event.Code || '',
+      Observations: event.Observations || ''
+    }));
+
+    const weeklyTotal = schedule ? calculateWeeklyTotal(
+      schedule.patrols_per_day,
+      schedule.weekend_patrols_per_day,
+      schedule.patrol_days
+    ) : 0;
+
+    console.log(`✅ Report data retrieved:`, {
+      posts: transformedSummary.length,
+      events: transformedEvents.length,
+      guardReports: reportData.guardReports.length,
+      overallPerformance: `${reportData.metadata.overallPerformance}%`,
+      dataSource: reportData.metadata.dataSource || 'Database'
+    });
 
     return res.status(200).json({
       success: true,
-      client: clientInfo.name,
-      clientId: clientInfo.id,
+      client: {
+        id: clientInfo.id,
+        name: reportData.metadata.clientName || clientInfo.name
+      },
       period: { 
-        startDateTime, 
-        endDateTime,
-        daysInRange: reportData.metadata?.daysInRange
+        startDate: effectiveStartDate,
+        endDate: effectiveEndDate,
+        daysInRange: reportData.metadata.daysInRange || 
+                    dayjs(effectiveEndDate).diff(dayjs(effectiveStartDate), 'day') + 1
       },
       shift: {
         requested: shiftType,
@@ -534,24 +368,37 @@ export const getPatrolReport = async (req, res) => {
         patrolDays: schedule.patrol_days,
         shiftType: schedule.shift_type,
         weekendPatrols: schedule.weekend_patrols_per_day,
-        weeklyTotal: reportData.metadata.weeklyTotal,
+        weeklyTotal: weeklyTotal,
         hasCustomSchedule: schedule.has_custom_schedule,
         configSource: schedule.config_source
       } : null,
       calculations: {
-        totalExpectedPatrols: reportData.metadata?.totalExpectedPatrols,
-        totalCompleted: reportData.metadata?.totalCompleted,
-        completionRate: reportData.metadata?.completionRate,
-        performanceRating: reportData.metadata?.performanceRating,
-        expectedPerZone: reportData.metadata?.expectedPerZone,
-        validZoneCount: reportData.metadata?.validZoneCount,
-        hasSchedule: !!schedule,
-        method: reportData.metadata?.calculationMethod,
-        note: "✅ CORRECTED: Each zone gets full expected patrol count"
+        totalExpectedPatrols: reportData.metadata.totalExpectedPatrols,
+        totalCompleted: reportData.metadata.totalCompleted,
+        completionRate: `${reportData.metadata.overallPerformance}%`,
+        performanceRating: getPerformanceRating(reportData.metadata.overallPerformance),
+        expectedPerZone: reportData.posts.length > 0 ? reportData.posts[0].Expected : 0,
+        validZoneCount: reportData.posts.length,
+        dataSource: reportData.metadata.dataSource || 'Database'
       },
-      incident: reportData.incident || [],
+      incidents: {
+        count: reportData.guardReports.length,
+        reports: reportData.guardReports.map(report => ({
+          id: report.id,
+          date: report.date,
+          zone: report.zone,
+          details: report.report
+        }))
+      },
       summary: transformedSummary,
-      events: reportData.events,
+      events: transformedEvents,
+      guardReports: reportData.guardReports,
+      dataQuality: reportData.metadata.dataQuality,
+      metadata: {
+        generatedAt: reportData.metadata.generatedAt || new Date(),
+        success: true,
+        notes: "Data synchronized with reportModel.js and reportService.js"
+      }
     });
 
   } catch (error) {
@@ -560,14 +407,17 @@ export const getPatrolReport = async (req, res) => {
       success: false,
       message: "Internal server error while fetching report data",
       error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 };
 
-// 🔄 Get available shifts and schedule configuration
+/**
+ * 🔄 Get available shifts and schedule configuration
+ */
 export const getClientShifts = async (req, res) => {
   try {
-    const client = req.query.client || req.params.client;
+    const { client } = req.query;
 
     if (!client) {
       return res.status(400).json({
@@ -587,26 +437,26 @@ export const getClientShifts = async (req, res) => {
     const schedule = await getClientSchedule(clientInfo.id);
     const availableShifts = JSON.parse(JSON.stringify(AVAILABLE_SHIFTS));
 
+    // Set default shift based on schedule
     if (schedule?.shift_type) {
-      const normalizedScheduleShift = schedule.shift_type.toLowerCase().replace(/\s+/g, "_");
+      const normalizedShift = schedule.shift_type.toLowerCase().replace(/\s+/g, "_");
       let defaultShift = "Day/Night";
-      if (normalizedScheduleShift.includes("day") && normalizedScheduleShift.includes("night")) {
+      
+      if (normalizedShift.includes("day") && normalizedShift.includes("night")) {
         defaultShift = "Day/Night";
-      } else if (normalizedScheduleShift.includes("night")) {
+      } else if (normalizedShift.includes("night")) {
         defaultShift = "Night";
-      } else if (normalizedScheduleShift.includes("day")) {
+      } else if (normalizedShift.includes("day")) {
         defaultShift = "Day";
       }
       
-      const defaultOption = availableShifts.find(s => s.value === defaultShift);
-      if (defaultOption) {
-        defaultOption.default = true;
-      }
+      availableShifts.forEach(shift => {
+        shift.default = (shift.value === defaultShift);
+      });
     } else {
       availableShifts[0].default = true;
     }
 
-    // ✅ Calculate weekly total using imported function
     const weeklyTotal = schedule ? calculateWeeklyTotal(
       schedule.patrols_per_day,
       schedule.weekend_patrols_per_day,
@@ -644,12 +494,14 @@ export const getClientShifts = async (req, res) => {
   }
 };
 
-// 🧪 Test report data - NOW WITH EVEN DISTRIBUTION DEBUG
+/**
+ * 🧪 Test report data
+ */
 export const testReportData = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
 
-    console.log("🧪 Test Request:", { clientName, startDate, endDate });
+    console.log("🧪 [CONTROLLER] Test Report Request:", { clientName, startDate, endDate });
 
     if (!clientName) {
       return res.status(400).json({
@@ -666,10 +518,14 @@ export const testReportData = async (req, res) => {
       });
     }
 
+    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+
+    // ✅ Use synchronized reportModel.js
     const reportData = await fetchWeeklyReport(
-      clientInfo.name,
-      startDate || '2024-01-01',
-      endDate || '2024-01-08'
+      clientInfo.id,
+      testStartDate,
+      testEndDate
     );
 
     const schedule = await getClientSchedule(clientInfo.id);
@@ -683,42 +539,36 @@ export const testReportData = async (req, res) => {
       dataStructure: {
         hasPosts: Array.isArray(reportData.posts),
         hasEvents: Array.isArray(reportData.events),
+        hasGuardReports: Array.isArray(reportData.guardReports),
         hasMetadata: !!reportData.metadata,
-        allKeys: Object.keys(reportData)
+        success: reportData.metadata?.success !== false
       },
       dataContent: {
         postsCount: reportData.posts?.length || 0,
         eventsCount: reportData.events?.length || 0,
-        postsSample: reportData.posts?.slice(0, 3) || [],
-        eventsSample: reportData.events?.slice(0, 3) || []
+        guardReportsCount: reportData.guardReports?.length || 0,
+        postsSample: reportData.posts?.slice(0, 2).map(p => ({
+          zone: p.SecurityPost,
+          completed: p.Completed,
+          expected: p.Expected,
+          performance: p.Percentage
+        })) || [],
+        eventsSample: reportData.events?.slice(0, 2) || [],
+        guardReportsSample: reportData.guardReports?.slice(0, 1) || []
       },
-      performanceCheck: reportData.posts?.map(p => ({
-        zone: p.SecurityPost,
-        completed: p.Completed,
-        expected: p.Expected,
-        performance: `${p.Performance}%`,
-        calculation: `${p.Completed} / ${p.Expected} × 100 = ${p.Performance}%`,
-        meetsExpectation: parseFloat(p.Performance) >= 100
-      })) || [],
       schedule: schedule ? {
         configured: true,
         patrolsPerDay: schedule.patrols_per_day,
         weekendPatrols: schedule.weekend_patrols_per_day,
         patrolDays: schedule.patrol_days,
         shiftType: schedule.shift_type,
-        hasCustomSchedule: schedule.has_custom_schedule,
-        configSource: schedule.config_source
+        hasCustomSchedule: schedule.has_custom_schedule
       } : { configured: false },
-      metadata: reportData.metadata || {},
-      calculationVerification: {
-        totalExpected: reportData.metadata?.totalExpectedPatrols,
-        totalCompleted: reportData.metadata?.totalCompleted,
-        completionRate: reportData.metadata?.completionRate,
-        performanceRating: reportData.metadata?.performanceRating,
-        calculationMethod: reportData.metadata?.calculationMethod,
-        weeklyTotal: reportData.metadata?.weeklyTotal,
-        expectedPerZone: reportData.metadata?.expectedPerZone,
-        validZoneCount: reportData.metadata?.validZoneCount
+      metadata: {
+        clientName: reportData.metadata?.clientName,
+        overallPerformance: reportData.metadata?.overallPerformance,
+        dataSource: reportData.metadata?.dataSource || 'Database',
+        dataQuality: reportData.metadata?.dataQuality || {}
       }
     };
 
@@ -727,24 +577,16 @@ export const testReportData = async (req, res) => {
       recommendations.push("⚠️ No data found - check client name and date range");
     }
     
-    // Check if calculation method is correct
-    if (analysis.calculationVerification.calculationMethod === 'FULL expected patrols per zone (NOT divided)') {
-      recommendations.push("✅ Using correct FULL expected patrols method");
+    if (analysis.dataStructure.success) {
+      recommendations.push("✅ Data fetch successful using synchronized reportModel.js");
     } else {
-      recommendations.push("⚠️ Using old proportional distribution method");
+      recommendations.push("❌ Data fetch failed");
     }
     
-    // Check if expected per zone makes sense
-    if (analysis.calculationVerification.expectedPerZone > 0) {
-      recommendations.push(`✅ Expected per zone: ${analysis.calculationVerification.expectedPerZone}`);
-    }
-    
-    if (analysis.performanceCheck.some(p => p.meetsExpectation)) {
-      recommendations.push("✅ Some zones are meeting or exceeding expectations");
-    }
-    
-    if (analysis.dataContent.postsCount > 0) {
-      recommendations.push("✅ Data fetch successful");
+    if (analysis.metadata.dataQuality?.isValid) {
+      recommendations.push("✅ Data quality validation passed");
+    } else if (analysis.metadata.dataQuality?.issues) {
+      recommendations.push("⚠️ Data quality issues detected");
     }
     
     if (schedule?.has_custom_schedule) {
@@ -757,8 +599,10 @@ export const testReportData = async (req, res) => {
       success: true,
       testTimestamp: new Date().toISOString(),
       client: analysis.client,
-      dataAnalysis: analysis,
-      recommendations
+      period: { startDate: testStartDate, endDate: testEndDate },
+      analysis,
+      recommendations,
+      notes: "Using synchronized data model with API/Database integration"
     });
 
   } catch (error) {
@@ -766,16 +610,19 @@ export const testReportData = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Test failed",
-      error: error.message
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 };
 
-// 🧪 Test PDF generation with reportService.js
+/**
+ * 🧪 Test PDF generation
+ */
 export const testReportGeneration = async (req, res) => {
   try {
     const { clientName } = req.params;
-    const { startDate, endDate, shiftType } = req.body;
+    const { startDate, endDate } = req.body;
 
     if (!clientName) {
       return res.status(400).json({
@@ -784,7 +631,7 @@ export const testReportGeneration = async (req, res) => {
       });
     }
 
-    console.log(`\n🧪 [Test Report Generation] Client Name: ${clientName}`);
+    console.log(`\n🧪 [CONTROLLER] Test PDF Generation:`, { clientName, startDate, endDate });
 
     const clientInfo = await getClientInfo(clientName);
     if (!clientInfo) {
@@ -794,47 +641,41 @@ export const testReportGeneration = async (req, res) => {
       });
     }
 
-    const schedule = await getClientSchedule(clientInfo.id);
-    const endDateValue = endDate || new Date().toISOString().split('T')[0];
-    const startDateValue = startDate || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const testShiftType = shiftType || "Day/Night";
+    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
 
-    console.log(`   Period: ${startDateValue} → ${endDateValue}`);
+    console.log(`   Period: ${testStartDate} → ${testEndDate}`);
 
+    // Test data fetch
     const reportData = await fetchWeeklyReport(
-      clientInfo.name,
-      startDateValue,
-      endDateValue
+      clientInfo.id,
+      testStartDate,
+      testEndDate
     );
 
+    // Test PDF generation
     let pdfTest = { success: false, message: "Not attempted" };
     try {
-      // ✅ Use reportService.js for PDF generation
       const pdfBuffer = await generateWeeklyReportPDF(
         clientInfo.id,
-        clientInfo.name,
-        startDateValue,
-        endDateValue,
-        testShiftType
+        testStartDate,
+        testEndDate
       );
       pdfTest = {
         success: !!pdfBuffer,
-        message: pdfBuffer ? "PDF generated successfully using reportService.js" : "No data for PDF generation",
+        message: pdfBuffer ? "PDF generated successfully" : "No data for PDF generation",
         size: pdfBuffer ? pdfBuffer.length : 0,
-        service: 'reportService.js'
+        service: 'reportService.js (synchronized)'
       };
     } catch (pdfError) {
       pdfTest = {
         success: false,
         message: pdfError.message,
-        service: 'reportService.js'
+        service: 'reportService.js (synchronized)'
       };
     }
 
     const recommendations = [];
-    if (!schedule) {
-      recommendations.push("⚠️ No patrol schedule configured");
-    }
     if (reportData.posts?.length === 0) {
       recommendations.push("⚠️ No data found for the specified period");
     }
@@ -842,9 +683,8 @@ export const testReportGeneration = async (req, res) => {
       recommendations.push("❌ PDF generation failed");
     }
     
-    // Check calculation method
-    if (reportData.metadata?.calculationMethod === 'FULL expected patrols per zone (NOT divided)') {
-      recommendations.push("✅ Using correct FULL expected patrols calculation");
+    if (reportData.metadata.success !== false) {
+      recommendations.push("✅ Data model working correctly");
     }
     
     if (recommendations.length === 0) {
@@ -859,15 +699,16 @@ export const testReportGeneration = async (req, res) => {
           name: clientInfo.name
         },
         period: {
-          startDate: startDateValue,
-          endDate: endDateValue
+          startDate: testStartDate,
+          endDate: testEndDate
         },
         dataFetch: {
-          success: !!reportData.posts && !!reportData.events,
+          success: reportData.metadata.success !== false,
           postsCount: reportData.posts?.length || 0,
           eventsCount: reportData.events?.length || 0,
-          calculationMethod: reportData.metadata?.calculationMethod,
-          expectedPerZone: reportData.metadata?.expectedPerZone
+          guardReportsCount: reportData.guardReports?.length || 0,
+          dataQuality: reportData.metadata.dataQuality,
+          dataSource: reportData.metadata.dataSource || 'Database'
         },
         pdfGeneration: pdfTest,
         recommendations
@@ -884,116 +725,9 @@ export const testReportGeneration = async (req, res) => {
   }
 };
 
-// 📧 Send single client report using reportService.js
-export const sendSingleClientReport = async (req, res) => {
-  const { clientName } = req.params;
-
-  try {
-    const pool = await poolPromise;
-
-    const result = await pool.request()
-      .input("ClientName", sql.NVarChar, clientName)
-      .query(`
-        SELECT 
-          R.rep_iidcuenta AS ClientID,
-          C.cue_cnombre AS ClientName,
-          R.rep_cmail AS Email
-        FROM [_Datos].[dbo].[m_reportes_automaticos] R
-        INNER JOIN [_Datos].[dbo].[m_cuentas] C
-          ON R.rep_iidcuenta = C.cue_iid
-        WHERE C.cue_cnombre = @ClientName
-      `);
-
-    if (!result.recordset.length) {
-      return res.status(404).json({ 
-        success: false,
-        message: "Client not found or email not set" 
-      });
-    }
-
-    const { ClientName, Email } = result.recordset[0];
-    console.log(`📤 Manually generating report for ${ClientName} (${Email})...`);
-
-    const endDate = new Date().toISOString().split('T')[0];
-    const startDate = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    const schedule = await getClientSchedule(parseInt(result.recordset[0].ClientID));
-    const shiftType = schedule?.shift_type || "Day/Night";
-
-    // ✅ Use reportService.js for PDF generation
-    const pdfBuffer = await generateWeeklyReportPDF(
-      parseInt(result.recordset[0].ClientID),
-      ClientName,
-      startDate,
-      endDate,
-      shiftType
-    );
-
-    if (!pdfBuffer) {
-      return res.status(400).json({ 
-        success: false,
-        message: `No patrol data available for ${ClientName}` 
-      });
-    }
-
-    const transporter = nodemailer.createTransporter({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: Email,
-      subject: `Manual Patrol Report - ${ClientName}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #2c3e50;">Manual Patrol Report</h2>
-          <h3 style="color: #34495e;">${ClientName}</h3>
-          <p>Attached is the manually generated patrol report for your security operations.</p>
-          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <p style="margin: 0; font-size: 14px; color: #6c757d;">
-              <strong>Report Period:</strong> ${startDate} to ${endDate}<br>
-              <strong>Generated:</strong> ${new Date().toLocaleDateString()}<br>
-              <strong>PDF Service:</strong> reportService.js
-            </p>
-          </div>
-          <p style="color: #7f8c8d; font-size: 12px; margin-top: 30px;">
-            Best regards,<br>
-            Security Operations Team
-          </p>
-        </div>
-      `,
-      attachments: [
-        {
-          filename: `${ClientName.replace(/\s+/g, "_")}_Manual_Report_${endDate}.pdf`,
-          content: pdfBuffer,
-        },
-      ],
-    });
-
-    console.log(`✅ Report manually sent to ${Email} using reportService.js`);
-
-    return res.json({
-      success: true,
-      message: `Report successfully sent to ${Email}`,
-      client: ClientName,
-      email: Email,
-      period: `${startDate} to ${endDate}`,
-      pdfService: 'reportService.js'
-    });
-  } catch (error) {
-    console.error("❌ Manual send error:", error.message);
-    res.status(500).json({ 
-      success: false,
-      message: "Failed to send report", 
-      error: error.message 
-    });
-  }
-};
-
-// 📊 Get comprehensive client report
+/**
+ * 📊 Get comprehensive client report
+ */
 export const getComprehensiveClientReport = async (req, res) => {
   try {
     const { clientName } = req.params;
@@ -1053,26 +787,27 @@ export const getComprehensiveClientReport = async (req, res) => {
     }
 
     const schedule = await getClientSchedule(clientInfo.id);
+    
+    // ✅ Use synchronized reportModel.js
     const reportData = await fetchWeeklyReport(
-      clientInfo.name,
+      clientInfo.id,
       startDateStr,
       endDateStr
     );
 
-    if (!reportData.posts || !reportData.events) {
+    if (!reportData.metadata.success) {
       return res.status(500).json({
         success: false,
         message: "Failed to fetch report data",
+        error: reportData.metadata.error?.message || "Unknown error"
       });
     }
 
-    // ✅ Use reportService.js for PDF generation
+    // Test PDF generation
     const pdfBuffer = await generateWeeklyReportPDF(
       clientInfo.id,
-      clientInfo.name,
       startDateStr,
-      endDateStr,
-      schedule?.shift_type || "Day/Night"
+      endDateStr
     );
 
     res.json({
@@ -1092,17 +827,24 @@ export const getComprehensiveClientReport = async (req, res) => {
         shiftType: schedule.shift_type,
         patrolDays: schedule.patrol_days,
         weekendPatrols: schedule.weekend_patrols_per_day,
-        weeklyTotal: reportData.metadata.weeklyTotal
+        weeklyTotal: calculateWeeklyTotal(
+          schedule.patrols_per_day,
+          schedule.weekend_patrols_per_day,
+          schedule.patrol_days
+        )
       } : null,
       data: {
         postsCount: reportData.posts?.length || 0,
         eventsCount: reportData.events?.length || 0,
+        guardReportsCount: reportData.guardReports?.length || 0,
         hasData: (reportData.posts?.length > 0) || (reportData.events?.length > 0),
-        metadata: reportData.metadata
+        overallPerformance: reportData.metadata.overallPerformance,
+        dataQuality: reportData.metadata.dataQuality,
+        dataSource: reportData.metadata.dataSource || 'Database'
       },
       pdfAvailable: !!pdfBuffer,
       pdfSize: pdfBuffer ? pdfBuffer.length : 0,
-      pdfService: 'reportService.js',
+      pdfService: 'reportService.js (synchronized)',
       timestamp: new Date().toISOString()
     });
 
@@ -1116,7 +858,9 @@ export const getComprehensiveClientReport = async (req, res) => {
   }
 };
 
-// 📈 Get client performance trends
+/**
+ * 📈 Get client performance trends
+ */
 export const getClientPerformanceTrends = async (req, res) => {
   try {
     const { clientName } = req.params;
@@ -1140,22 +884,24 @@ export const getClientPerformanceTrends = async (req, res) => {
     const schedule = await getClientSchedule(clientInfo.id);
     const trends = [];
     const today = new Date();
+    const monthsInt = parseInt(months);
     
-    for (let i = 0; i < parseInt(months); i++) {
+    for (let i = 0; i < monthsInt; i++) {
       const monthDate = new Date(today.getFullYear(), today.getMonth() - i, 1);
       const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
       const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
       
+      // ✅ Use synchronized reportModel.js
       const monthData = await fetchWeeklyReport(
-        clientInfo.name,
+        clientInfo.id,
         monthStart.toISOString().split('T')[0],
         monthEnd.toISOString().split('T')[0]
       );
 
       const totalExpected = monthData.metadata?.totalExpectedPatrols || 0;
       const totalCompleted = monthData.metadata?.totalCompleted || 0;
-      const performanceRate = monthData.metadata?.completionRate || '0.0';
-      const rating = monthData.metadata?.performanceRating || 'N/A';
+      const performanceRate = monthData.metadata?.overallPerformance || 0;
+      const rating = getPerformanceRating(performanceRate);
 
       trends.push({
         month: monthDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
@@ -1165,7 +911,9 @@ export const getClientPerformanceTrends = async (req, res) => {
         performanceRate: performanceRate,
         rating: rating,
         postsCount: monthData.posts?.length || 0,
-        expectedPerZone: monthData.metadata?.expectedPerZone || 0
+        expectedPerZone: monthData.posts.length > 0 ? monthData.posts[0].Expected : 0,
+        dataQuality: monthData.metadata.dataQuality,
+        dataSource: monthData.metadata.dataSource || 'Database'
       });
     }
 
@@ -1178,7 +926,7 @@ export const getClientPerformanceTrends = async (req, res) => {
         name: clientInfo.name
       },
       period: {
-        months: parseInt(months),
+        months: monthsInt,
         start: trends[0]?.period.split(' to ')[0],
         end: trends[trends.length - 1]?.period.split(' to ')[1]
       },
@@ -1211,7 +959,9 @@ export const getClientPerformanceTrends = async (req, res) => {
   }
 };
 
-// 👥 Get all clients list
+/**
+ * 👥 Get all clients list
+ */
 export const getAllClientsList = async (req, res) => {
   try {
     const clients = await getAllClients();
@@ -1235,7 +985,9 @@ export const getAllClientsList = async (req, res) => {
   }
 };
 
-// 🔍 Search clients by name
+/**
+ * 🔍 Search clients by name
+ */
 export const searchClients = async (req, res) => {
   try {
     const { query } = req.query;
@@ -1254,6 +1006,8 @@ export const searchClients = async (req, res) => {
         SELECT cue_iid AS id, cue_cnombre AS name
         FROM [_Datos].[dbo].[m_cuentas] 
         WHERE cue_cnombre LIKE @searchQuery
+          AND cue_cnombre IS NOT NULL
+          AND cue_cnombre != ''
         ORDER BY cue_cnombre
       `);
 
@@ -1273,7 +1027,9 @@ export const searchClients = async (req, res) => {
   }
 };
 
-// 🧪 Debug performance calculations endpoint
+/**
+ * 🧪 Debug performance calculations
+ */
 export const debugPerformanceCalc = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
@@ -1293,85 +1049,114 @@ export const debugPerformanceCalc = async (req, res) => {
       });
     }
 
+    // ✅ Use synchronized reportModel.js
     const reportData = await fetchWeeklyReport(
-      clientName,
-      startDate || '2024-01-01',
-      endDate || '2024-01-08'
+      clientInfo.id,
+      startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD'),
+      endDate || dayjs().format('YYYY-MM-DD')
     );
     
     const debug = {
-      client: clientInfo.name,
-      calculationMethod: reportData.metadata.calculationMethod,
+      client: reportData.metadata.clientName,
+      calculationMethod: "Synchronized with reportModel.js",
       totalExpected: reportData.metadata.totalExpectedPatrols,
       totalCompleted: reportData.metadata.totalCompleted,
-      completionRate: reportData.metadata.completionRate,
-      performanceRating: reportData.metadata.performanceRating,
-      weeklyTotal: reportData.metadata.weeklyTotal,
-      expectedPerZone: reportData.metadata.expectedPerZone,
-      validZoneCount: reportData.metadata.validZoneCount,
-      zones: reportData.posts.map(post => ({
+      completionRate: `${reportData.metadata.overallPerformance}%`,
+      performanceRating: getPerformanceRating(reportData.metadata.overallPerformance),
+      expectedPerZone: reportData.posts.length > 0 ? reportData.posts[0].Expected : 0,
+      validZoneCount: reportData.posts.length,
+      zones: reportData.posts.slice(0, 3).map(post => ({
         name: post.SecurityPost,
         completed: post.Completed,
         expected: post.Expected,
         performance: `${post.Performance}%`,
-        calculation: `${post.Completed} / ${post.Expected} × 100 = ${post.Performance}%`,
-        meetsExpectation: parseFloat(post.Performance) >= 100
+        calculation: `${post.Completed} / ${post.Expected} × 100 = ${post.Performance}%`
       })),
-      events: reportData.events.slice(0, 5).map(e => ({
+      events: reportData.events.slice(0, 3).map(e => ({
         date: e.Date,
         zone: e.Zone,
         event: e.Event
-      }))
+      })),
+      guardReports: reportData.guardReports.slice(0, 2).map(r => ({
+        date: r.date,
+        zone: r.zone,
+        report: r.report.substring(0, 100) + '...'
+      })),
+      dataQuality: reportData.metadata.dataQuality,
+      dataSource: reportData.metadata.dataSource || 'Database'
     };
     
-    res.json({ success: true, debug });
+    res.json({ 
+      success: true, 
+      debug,
+      notes: "Using synchronized data model with unified calculations"
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
   }
 };
 
-// 🏠 Health check endpoint
+/**
+ * 🏠 Health check endpoint
+ */
 export const healthCheck = async (req, res) => {
   try {
     const pool = await poolPromise;
     await pool.request().query('SELECT 1 as test');
     
+    // Test data model
+    const testData = await fetchWeeklyReport(1001, 
+      dayjs().subtract(1, 'day').format('YYYY-MM-DD'),
+      dayjs().format('YYYY-MM-DD')
+    );
+    
     res.json({
       success: true,
-      message: "Report controller is healthy - USING reportService.js FOR PDF GENERATION ✅",
+      message: "Report controller is healthy - FULLY SYNCHRONIZED ✅",
       timestamp: new Date().toISOString(),
       database: "Connected",
-      pdfService: "reportService.js",
-      fixes: {
-        zoneNames: "✅ Zone names from m_zonas table",
-        performanceCalc: "✅ FULL expected patrols per zone (NOT divided)",
-        eventDescriptions: "✅ COALESCE with fallback values",
-        importedCalculations: "✅ Using calculations from managePatrolSchedules.js",
-        pdfGeneration: "✅ Using reportService.js for PDF generation"
+      services: {
+        pdfService: "reportService.js (synchronized)",
+        dataModel: "reportModel.js (synchronized)",
+        dataFetch: testData.metadata.success ? "Working" : "Failed"
+      },
+      synchronization: {
+        dataFlow: "Controller → reportModel.js → API/Database → reportService.js → PDF",
+        consistency: "All modules use same data source and calculations",
+        apiIntegration: process.env.USE_BMSECURITY_API === 'true' ? "Enabled" : "Disabled",
+        fallback: "Automatic database fallback if API fails"
       },
       endpoints: {
         pdf: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
+        patrol: "/api/reports/patrol?client=X&startDate=Y&endDate=Z",
         test: "/api/reports/test?clientName=X&startDate=Y&endDate=Z",
         debug: "/api/reports/debug?clientName=X&startDate=Y&endDate=Z",
         health: "/api/reports/health",
-        patrol: "/api/reports/patrol?client=X&startDateTime=Y&endDateTime=Z",
         clients: "/api/reports/clients",
-        search: "/api/reports/clients/search?query=X"
+        search: "/api/reports/clients/search?query=X",
+        trends: "/api/reports/trends/:clientName?months=6"
       }
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: "Health check failed",
-      error: error.message
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 };
 
-// 📋 Get Weekly Report - Alias for getPatrolReport
+/**
+ * 📋 Get Weekly Report - Alias for getPatrolReport
+ */
 export const getWeeklyReport = async (req, res) => {
   try {
-    console.log("📋 [Weekly Report Alias] Using getPatrolReport...");
+    console.log("📋 [CONTROLLER] Weekly Report Alias - Using getPatrolReport...");
     return await getPatrolReport(req, res);
   } catch (error) {
     console.error("❌ Error in weekly report alias:", error);
@@ -1383,26 +1168,45 @@ export const getWeeklyReport = async (req, res) => {
   }
 };
 
-// Export helper calculation functions for use in other modules
+// =====================================================
+// 🎯 EXPORT HELPER FUNCTIONS
+// =====================================================
+
 export {
-  calculateExpectedPatrols,
   calculateWeeklyTotal,
-  getPerformanceRating
+  getPerformanceRating,
+  getPerformanceStatus,
+  getShiftDescription
 };
 
-// Default export
+// =====================================================
+// 📦 DEFAULT EXPORT
+// =====================================================
+
 export default {
+  // Main endpoints
   getWeeklyReportPDF,
   getPatrolReport,
   getWeeklyReport,
   getClientShifts,
+  
+  // Testing endpoints
   testReportData,
   testReportGeneration,
-  sendSingleClientReport,
+  
+  // Client endpoints
   getComprehensiveClientReport,
   getClientPerformanceTrends,
   getAllClientsList,
   searchClients,
+  
+  // Debug endpoints
   debugPerformanceCalc,
-  healthCheck
+  healthCheck,
+  
+  // Helper functions
+  calculateWeeklyTotal,
+  getPerformanceRating,
+  getPerformanceStatus,
+  getShiftDescription
 };

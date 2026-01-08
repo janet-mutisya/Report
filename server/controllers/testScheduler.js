@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
-import { runDynamicReportScheduler } from "../service/scheduler.js";
+//import { runDynamicReportScheduler } from "../service/scheduler.js";
 
 dotenv.config();
 

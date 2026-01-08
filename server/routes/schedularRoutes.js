@@ -1,370 +1,253 @@
-// routes/schedularRoutes.js - COMPLETE FIXED VERSION
+// routes/schedulerRoutes.js - FIXED & ALIGNED WITH OPTIMIZED CONTROLLER
 import express from "express";
-import sql from 'mssql';
 import { poolPromise } from '../config/database.js';
+import sql from 'mssql';
 import {
+  // Schedule CRUD
   getAllSchedules,
   getScheduleById,
   updateSchedule,
   createSchedule,
   deleteSchedule,
+  
+  // Manual Triggers
   triggerDynamicReports,
   triggerPatrolReports,
-  sendEnhancedClientReport,
-  getPatrolReportPreview,
+  
+  // Analytics & Status
   getSchedulerStatus,
   getAllClientsPerformance,
-  getClientAnalyticsData,
+  
+  // Testing & Diagnostics
+  diagnosticServices,
+  toggleEmailSending,
+  testReportModel,
+  
+  // Date Range Functions
+  getDateRangeForPeriod,
+  getCustomDateRange,
   getHistoricalDateRange,
-  getClientHistoricalPatrols,
   getPreviousWeekRange,
-  transformPatrolsToPosts,
-  transformPatrolsToEvents,
-  calculateSummary,
-  diagnosticServices
+  
+  // Data Fetching (using optimized report model)
+  getClientHistoricalPatrols,
+  getClientPatrols,
+  
+  // Helper Functions
+  parseEmails,
+  formatEmailsForDisplay,
+  calculateNightsInRange
 } from "../controllers/schedulerController.js";
 
 const router = express.Router();
 
 // =============================================
-// 🏥 HEALTH & STATUS ROUTES (First)
+// HEALTH & STATUS ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler/health
- * @desc    Health check endpoint
+ * @desc    Health check endpoint with optimized model info
  */
 router.get('/health', async (req, res) => {
   try {
-    let dbConnected = false;
-    let dbError = null;
-
-    try {
-      const pool = await poolPromise;
-      if (pool) {
-        await pool.request().query('SELECT 1 AS test');
-        dbConnected = true;
-      } else {
-        dbError = 'Database pool not available';
-      }
-    } catch (error) {
-      dbError = error.message;
-    }
-
     res.status(200).json({
       success: true,
       message: 'Scheduler API is running',
       timestamp: new Date().toISOString(),
-      database: {
-        connected: dbConnected,
-        status: dbConnected ? 'healthy' : 'disconnected',
-        error: dbError
+      version: 'V05 - Optimized Report Model Integration',
+      features: [
+        'Optimized Report Model (API-First)',
+        'Multi-Table Support (p_recepcion + partitioned tables)',
+        'Automatic Fallback (API → Database)',
+        'Performance Caching',
+        'Office365 SMTP Integration',
+        'Historical Data Analysis',
+        'Guard Reports Integration',
+        'Filtered Events (VIGICONTROL only)',
+        'PDF Generation Service',
+        'Multiple Email Recipients',
+        'Email Kill Switch (Global Toggle)'
+      ],
+      dataModel: {
+        primary: 'Optimized Report Model',
+        apiFirst: true,
+        cachingEnabled: true,
+        multiTableSupport: true
       },
-      system: {
-        nodeVersion: process.version,
-        platform: process.platform,
-        uptime: process.uptime(),
-        memory: process.memoryUsage()
+      emailFeatures: {
+        multipleRecipients: true,
+        parsing: {
+          delimiters: ['comma', 'semicolon', 'newline'],
+          validation: 'basic format validation'
+        },
+        storage: 'VARCHAR(4000) - supports unlimited emails',
+        globalEnabled: global.EMAIL_SENDING_ENABLED || false
       },
       endpoints: {
         diagnostic: '/api/scheduler/diagnostic/services',
         clients: '/api/scheduler/clients',
         schedules: '/api/scheduler',
         historical: '/api/scheduler/historical/:clientId',
-        analytics: '/api/scheduler/analytics/summary',
+        analytics: '/api/scheduler/analytics/client/:clientId',
         triggers: '/api/scheduler/trigger/*',
-        debug: '/api/scheduler/debug/data/:clientId',
-        testPdf: '/api/scheduler/test/pdf/:clientId'
+        test: '/api/scheduler/test/*',
+        emailTools: '/api/scheduler/utils/parse-emails',
+        emailToggle: '/api/scheduler/toggle-email'
       }
     });
   } catch (error) {
     console.error('❌ Health check failed:', error);
-    res.status(200).json({
-      success: true,
-      message: 'Scheduler API is running',
-      timestamp: new Date().toISOString(),
-      database: {
-        connected: false,
-        status: 'disconnected',
-        error: error.message
-      },
-      system: {
-        nodeVersion: process.version,
-        platform: process.platform,
-        uptime: process.uptime()
-      }
+    res.status(500).json({
+      success: false,
+      message: 'Health check failed',
+      error: error.message
     });
   }
 });
 
 /**
  * @route   GET /api/scheduler/status
- * @desc    Get scheduler system status
+ * @desc    Get scheduler system status with email statistics
  */
 router.get("/status", getSchedulerStatus);
 
 // =============================================
-// 🔍 DIAGNOSTIC ROUTES (Critical - Must be early!)
+// DIAGNOSTIC & TESTING ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler/diagnostic/services
- * @desc    🔍 CRITICAL - Check PDF and Email service exports
+ * @desc    Check services and integrations
  */
 router.get('/diagnostic/services', diagnosticServices);
 
+/**
+ * @route   POST /api/scheduler/test/report-model
+ * @desc    Test optimized report model
+ */
+router.post('/test/report-model', testReportModel);
+
 // =============================================
-// 🧪 DEBUG & TEST ROUTES
+// EMAIL KILL SWITCH ROUTE
 // =============================================
 
 /**
- * @route   GET /api/scheduler/debug/data/:clientId
- * @desc    Debug endpoint to see what data would be sent to PDF
+ * @route   POST /api/scheduler/toggle-email
+ * @desc    Enable/disable email sending globally
+ * @body    {boolean} enabled - true to enable, false to disable
  */
-router.get('/debug/data/:clientId', async (req, res) => {
-  try {
-    const { clientId } = req.params;
-    const { days = 30 } = req.query;
-    
-    console.log(`🔍 Debugging data structure for client ${clientId}`);
-    
-    const pool = await poolPromise;
-    const clientResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query(`
-        SELECT 
-          cue_iid AS ClientID,
-          cue_cnombre AS ClientName,
-          cue_cemail AS ClientEmail
-        FROM _Datos.dbo.m_cuentas
-        WHERE cue_iid = @clientId
-      `);
+router.post('/toggle-email', toggleEmailSending);
 
-    if (clientResult.recordset.length === 0) {
-      return res.status(404).json({
+// =============================================
+// EMAIL UTILITY ROUTES
+// =============================================
+
+/**
+ * @route   POST /api/scheduler/utils/parse-emails
+ * @desc    Parse and validate email strings
+ */
+router.post('/utils/parse-emails', async (req, res) => {
+  try {
+    const { emailString } = req.body;
+
+    if (!emailString) {
+      return res.status(400).json({
         success: false,
-        message: 'Client not found'
+        message: 'emailString is required'
       });
     }
 
-    const client = clientResult.recordset[0];
-    
-    const dateRange = {
-      startDate: new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      endDate: new Date().toISOString().split('T')[0]
-    };
-    
-    const patrolData = await getClientHistoricalPatrols(
-      parseInt(clientId),
-      dateRange.startDate + ' 00:00:00',
-      dateRange.endDate + ' 23:59:59'
-    );
-    
-    const posts = transformPatrolsToPosts(patrolData, {}, dateRange);
-    const events = transformPatrolsToEvents(patrolData);
-    const summary = calculateSummary(patrolData, {}, dateRange);
-    
-    const pdfData = {
-      clientId: client.ClientID,
-      clientName: client.ClientName,
-      startDate: dateRange.startDate,
-      endDate: dateRange.endDate,
-      shiftType: 'Day/Night',
-      posts: posts,
-      events: events,
-      summary: summary,
-      patrolData: patrolData
-    };
-    
+    const parsedEmails = parseEmails(emailString);
+    const formattedDisplay = formatEmailsForDisplay(emailString);
+
     res.status(200).json({
       success: true,
-      debug: {
-        message: 'This is the data structure that would be sent to PDF generation',
-        clientInfo: {
-          id: pdfData.clientId,
-          name: pdfData.clientName,
-          dateRange: `${pdfData.startDate} to ${pdfData.endDate}`,
-          shiftType: pdfData.shiftType
-        },
-        dataStructure: {
-          posts: {
-            count: pdfData.posts.length,
-            sample: pdfData.posts[0] || null,
-            structure: pdfData.posts.length > 0 ? Object.keys(pdfData.posts[0]) : []
-          },
-          events: {
-            count: pdfData.events.length,
-            sample: pdfData.events[0] || null,
-            structure: pdfData.events.length > 0 ? Object.keys(pdfData.events[0]) : []
-          },
-          summary: pdfData.summary,
-          rawPatrolData: {
-            pastPatrolsCount: patrolData.pastPatrols?.length || 0,
-            upcomingPatrolsCount: patrolData.upcomingPatrols?.length || 0,
-            patrols: patrolData.patrols?.length || 0
-          }
-        },
+      data: {
+        original: emailString,
+        parsed: parsedEmails,
+        count: parsedEmails.length,
+        formatted: formattedDisplay,
         validation: {
-          hasClientId: !!pdfData.clientId,
-          hasClientName: !!pdfData.clientName,
-          hasDateRange: !!pdfData.startDate && !!pdfData.endDate,
-          hasPosts: pdfData.posts.length > 0,
-          hasEvents: pdfData.events.length > 0,
-          hasSummary: !!pdfData.summary
-        },
-        warnings: [
-          ...(pdfData.posts.length === 0 ? ['⚠️ No posts data - PDF will show empty performance table'] : []),
-          ...(pdfData.events.length === 0 ? ['⚠️ No events data - PDF will show empty events log'] : []),
-          ...(!pdfData.clientId ? ['❌ CRITICAL: No clientId - PDF generation will fail'] : [])
-        ]
+          valid: parsedEmails.length > 0,
+          invalidCount: emailString.split(/[,;\n]/).length - parsedEmails.length
+        }
       },
-      fullData: pdfData
+      emailStatus: {
+        globalEnabled: global.EMAIL_SENDING_ENABLED || false
+      }
     });
-    
   } catch (error) {
-    console.error('❌ Debug endpoint error:', error);
+    console.error('❌ Error parsing emails:', error);
     res.status(500).json({
       success: false,
-      message: 'Debug failed',
-      error: error.message,
-      stack: error.stack
+      message: 'Failed to parse emails',
+      error: error.message
     });
   }
 });
 
 /**
- * @route   POST /api/scheduler/test/pdf/:clientId
- * @desc    Test PDF generation with mock data
+ * @route   GET /api/scheduler/utils/email-stats
+ * @desc    Get email statistics across all schedules
  */
-router.post('/test/pdf/:clientId', async (req, res) => {
+router.get('/utils/email-stats', async (req, res) => {
   try {
-    const { clientId } = req.params;
-    
-    console.log(`🧪 Testing PDF generation for client ${clientId}`);
-    
     const pool = await poolPromise;
-    const clientResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query(`
-        SELECT 
-          cue_iid AS ClientID,
-          cue_cnombre AS ClientName,
-          cue_cemail AS ClientEmail
-        FROM _Datos.dbo.m_cuentas
-        WHERE cue_iid = @clientId
-      `);
-
-    if (clientResult.recordset.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Client not found'
-      });
-    }
-
-    const client = clientResult.recordset[0];
     
-    const testData = {
-      clientId: client.ClientID,
-      clientName: client.ClientName,
-      startDate: '2025-01-01',
-      endDate: '2025-01-31',
-      shiftType: 'Day/Night',
-      
-      posts: [
-        {
-          SitePost: 'Main Entrance Gate',
-          ChecksCompleted: 85,
-          ExpectedChecks: 100,
-          PerformanceRate: '85.0%'
-        },
-        {
-          SitePost: 'Parking Lot A',
-          ChecksCompleted: 75,
-          ExpectedChecks: 100,
-          PerformanceRate: '75.0%'
-        }
-      ],
-      
-      events: [
-        {
-          rec_tfechahora: '2025-01-15 08:30:00',
-          rec_czona: 'NW-01',
-          rec_calarma: 'V04',
-          rec_cContenido: 'VIGICONTROL: Arrival'
-        },
-        {
-          rec_tfechahora: '2025-01-15 09:15:00',
-          rec_czona: 'SW-01',
-          rec_calarma: 'V04',
-          rec_cContenido: 'Patrol Check'
-        }
-      ],
-      
-      summary: {
-        totalPatrols: 320,
-        completedPatrols: 320,
-        totalExpected: 400,
-        complianceRate: '80.0%',
-        postsCount: 2,
-        eventsCount: 2
-      }
+    const result = await pool.request().query(`
+      SELECT 
+        rep_iidcuenta AS ClientID,
+        rep_cmail AS EmailString,
+        LEN(rep_cmail) - LEN(REPLACE(rep_cmail, ',', '')) + 1 AS EmailCount
+      FROM _Datos.dbo.m_reportes_automaticos 
+      WHERE rep_cmail IS NOT NULL AND rep_cmail != ''
+      ORDER BY EmailCount DESC
+    `);
+
+    const stats = {
+      totalSchedules: result.recordset.length,
+      totalEmailRecipients: result.recordset.reduce((sum, row) => sum + (row.EmailCount || 1), 0),
+      averageEmailsPerSchedule: result.recordset.length > 0 
+        ? Math.round(result.recordset.reduce((sum, row) => sum + (row.EmailCount || 1), 0) / result.recordset.length)
+        : 0,
+      distribution: {
+        singleEmail: result.recordset.filter(row => (row.EmailCount || 1) === 1).length,
+        multipleEmails: result.recordset.filter(row => (row.EmailCount || 1) > 1).length,
+        maxEmails: Math.max(...result.recordset.map(row => row.EmailCount || 1))
+      },
+      schedules: result.recordset.map(row => ({
+        clientId: row.ClientID,
+        emailCount: row.EmailCount || 1,
+        emailString: row.EmailString
+      }))
     };
-    
-    console.log(`📊 Test data prepared for ${client.ClientName}`);
-    
-    // Try to dynamically import and use PDF service
-    try {
-      const pdfModule = await import('../service/pdfService.js');
-      console.log('📦 PDF Module loaded:', Object.keys(pdfModule));
-      
-      let pdfBuffer = null;
-      
-      // Try different function names
-      if (typeof pdfModule.generateDashboardPDF === 'function') {
-        pdfBuffer = await pdfModule.generateDashboardPDF(testData);
-      } else if (typeof pdfModule.generatePatrolReportPDF === 'function') {
-        pdfBuffer = await pdfModule.generatePatrolReportPDF(testData);
-      } else if (typeof pdfModule.default?.generateDashboardPDF === 'function') {
-        pdfBuffer = await pdfModule.default.generateDashboardPDF(testData);
-      } else if (typeof pdfModule.default === 'function') {
-        pdfBuffer = await pdfModule.default(testData);
-      } else {
-        throw new Error(`No compatible PDF function found. Available: ${Object.keys(pdfModule).join(', ')}`);
-      }
-      
-      if (!pdfBuffer) {
-        throw new Error('PDF generation returned null or undefined');
-      }
-      
-      console.log(`✅ Test PDF generated successfully, size: ${pdfBuffer.length} bytes`);
-      
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename="TEST_${client.ClientName.replace(/\s+/g, '_')}_Report.pdf"`);
-      res.send(pdfBuffer);
-      
-    } catch (pdfError) {
-      console.error('❌ PDF generation error:', pdfError);
-      throw pdfError;
-    }
-    
+
+    res.status(200).json({
+      success: true,
+      stats,
+      emailStatus: {
+        globalEnabled: global.EMAIL_SENDING_ENABLED || false
+      },
+      timestamp: new Date().toISOString()
+    });
   } catch (error) {
-    console.error('❌ PDF test error:', error);
+    console.error('❌ Error fetching email stats:', error);
     res.status(500).json({
       success: false,
-      message: 'PDF test failed',
-      error: error.message,
-      stack: error.stack
+      message: 'Failed to fetch email statistics',
+      error: error.message
     });
   }
 });
 
 // =============================================
-// 📋 CLIENT ROUTES
+// CLIENT DATA ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler/clients
- * @desc    Get all clients with performance metrics
+ * @desc    Get all clients with performance metrics and email configuration
  */
 router.get('/clients', getAllClientsPerformance);
 
@@ -391,7 +274,8 @@ router.get('/clients/basic', async (req, res) => {
     res.status(200).json({
       success: true,
       total: result.recordset.length,
-      clients: result.recordset
+      clients: result.recordset,
+      usingOptimizedModel: true
     });
   } catch (error) {
     console.error('❌ Error fetching clients:', error);
@@ -403,24 +287,111 @@ router.get('/clients/basic', async (req, res) => {
   }
 });
 
-// =============================================
-// 📊 REPORT ROUTES (Must be before /:id routes!)
-// =============================================
+/**
+ * @route   GET /api/scheduler/clients/:clientId/patrols
+ * @desc    Get comprehensive patrol data for a client using optimized model
+ */
+router.get('/clients/:clientId/patrols', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { days = 7 } = req.query;
+
+    console.log(`📊 Fetching patrol data for client ${clientId} (${days} days)`);
+
+    const patrolData = await getClientPatrols(parseInt(clientId), parseInt(days));
+
+    res.status(200).json({
+      success: patrolData.metadata.success || false,
+      data: patrolData,
+      metadata: {
+        clientId: parseInt(clientId),
+        daysAnalyzed: parseInt(days),
+        generatedAt: new Date().toISOString(),
+        dataSource: patrolData.metadata.dataSource || 'Unknown',
+        processingTime: patrolData.metadata.processingTime || 0,
+        usingOptimizedModel: true
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error fetching client patrols:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch client patrol data',
+      error: error.message
+    });
+  }
+});
 
 /**
- * @route   POST /api/scheduler/send-enhanced/:clientId
- * @desc    Send enhanced client report
+ * @route   GET /api/scheduler/clients/:clientId/email-config
+ * @desc    Get email configuration for a specific client
  */
-router.post("/send-enhanced/:clientId", sendEnhancedClientReport);
+router.get('/clients/:clientId/email-config', async (req, res) => {
+  try {
+    const { clientId } = req.params;
 
-/**
- * @route   GET /api/scheduler/preview/:clientId
- * @desc    Get patrol report preview
- */
-router.get("/preview/:clientId", getPatrolReportPreview);
+    const pool = await poolPromise;
+    
+    const [scheduleResult, clientResult] = await Promise.all([
+      pool.request()
+        .input('clientId', sql.Int, clientId)
+        .query('SELECT rep_cmail AS ReportEmail FROM _Datos.dbo.m_reportes_automaticos WHERE rep_iidcuenta = @clientId'),
+      pool.request()
+        .input('clientId', sql.Int, clientId)
+        .query('SELECT cue_cemail AS ClientEmail, cue_ncuenta AS AccountNumber FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId')
+    ]);
+
+    const scheduleEmail = scheduleResult.recordset[0]?.ReportEmail || '';
+    const clientEmail = clientResult.recordset[0]?.ClientEmail || '';
+    const accountNumber = clientResult.recordset[0]?.AccountNumber || '';
+
+    const parsedScheduleEmails = parseEmails(scheduleEmail);
+    const parsedClientEmails = parseEmails(clientEmail);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        clientId: parseInt(clientId),
+        accountNumber: accountNumber,
+        scheduleEmails: {
+          raw: scheduleEmail,
+          parsed: parsedScheduleEmails,
+          count: parsedScheduleEmails.length,
+          formatted: formatEmailsForDisplay(scheduleEmail)
+        },
+        clientEmails: {
+          raw: clientEmail,
+          parsed: parsedClientEmails,
+          count: parsedClientEmails.length,
+          formatted: formatEmailsForDisplay(clientEmail)
+        },
+        defaultEmails: {
+          env: process.env.TEST_EMAIL || '',
+          parsed: parseEmails(process.env.TEST_EMAIL || ''),
+          count: parseEmails(process.env.TEST_EMAIL || '').length
+        },
+        recommendations: {
+          primary: parsedScheduleEmails.length > 0 ? 'schedule' : 
+                   parsedClientEmails.length > 0 ? 'client' : 'default',
+          totalAvailable: parsedScheduleEmails.length + parsedClientEmails.length
+        },
+        emailSendingStatus: {
+          globalEnabled: global.EMAIL_SENDING_ENABLED || false
+        }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error fetching client email config:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch client email configuration',
+      error: error.message
+    });
+  }
+});
 
 // =============================================
-// 🚀 TRIGGER ROUTES
+// MANUAL TRIGGER ROUTES
 // =============================================
 
 /**
@@ -436,18 +407,24 @@ router.post("/trigger/dynamic-reports", triggerDynamicReports);
 router.post("/trigger/patrol-reports", triggerPatrolReports);
 
 // =============================================
-// 📈 ANALYTICS ROUTES
+// ANALYTICS ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler/analytics/summary
- * @desc    Get analytics summary
+ * @desc    Get analytics summary dashboard
  */
 router.get('/analytics/summary', async (req, res) => {
   try {
     const pool = await poolPromise;
     
-    const [clientsResult, dueResult, upcomingResult, totalResult, patrolResult] = await Promise.all([
+    const [
+      clientsResult, 
+      dueResult, 
+      upcomingResult, 
+      totalResult, 
+      emailStatsResult
+    ] = await Promise.all([
       pool.request().query(`
         SELECT COUNT(DISTINCT rep_iidcuenta) as activeClients
         FROM _Datos.dbo.m_reportes_automaticos
@@ -472,11 +449,16 @@ router.get('/analytics/summary', async (req, res) => {
         WHERE rep_cmail IS NOT NULL
       `),
       pool.request().query(`
-        SELECT COUNT(*) as recentPatrols
-        FROM [_Datos].[dbo].[p_recepcion]
-        WHERE rec_tfechahora >= DATEADD(day, -1, GETDATE())
+        SELECT 
+          COUNT(*) AS TotalSchedules,
+          SUM(LEN(rep_cmail) - LEN(REPLACE(rep_cmail, ',', '')) + 1) AS TotalEmailRecipients,
+          AVG(LEN(rep_cmail) - LEN(REPLACE(rep_cmail, ',', '')) + 1) AS AvgEmailsPerSchedule
+        FROM _Datos.dbo.m_reportes_automaticos 
+        WHERE rep_cmail IS NOT NULL AND rep_cmail != ''
       `)
     ]);
+
+    const emailStats = emailStatsResult.recordset[0];
 
     res.status(200).json({
       success: true,
@@ -486,12 +468,20 @@ router.get('/analytics/summary', async (req, res) => {
           activeClients: clientsResult.recordset[0]?.activeClients || 0,
           dueReports: dueResult.recordset[0]?.dueReports || 0,
           upcomingReports: upcomingResult.recordset[0]?.upcomingReports || 0,
-          totalSchedules: totalResult.recordset[0]?.totalSchedules || 0,
-          recentPatrols: patrolResult.recordset[0]?.recentPatrols || 0
+          totalSchedules: totalResult.recordset[0]?.totalSchedules || 0
+        },
+        emailAnalytics: {
+          totalRecipients: emailStats.TotalEmailRecipients || 0,
+          averagePerSchedule: Math.round(emailStats.AvgEmailsPerSchedule || 1),
+          totalSchedules: emailStats.TotalSchedules || 0,
+          feature: 'Multiple email recipients supported',
+          emailSendingEnabled: global.EMAIL_SENDING_ENABLED || false
         },
         performance: {
           schedulerHealth: dueResult.recordset[0]?.dueReports > 0 ? 'needs_attention' : 'healthy',
-          databaseHealth: 'connected'
+          databaseHealth: 'connected',
+          emailService: 'Office365 SMTP with multi-recipient support',
+          dataModel: 'Optimized Report Model (V05)'
         }
       }
     });
@@ -510,46 +500,94 @@ router.get('/analytics/summary', async (req, res) => {
  * @route   GET /api/scheduler/analytics/client/:clientId
  * @desc    Get analytics for specific client
  */
-router.get('/analytics/client/:clientId', getClientAnalyticsData);
+router.get('/analytics/client/:clientId', async (req, res) => {
+  try {
+    const { clientId } = req.params;
+    const { days = 7 } = req.query;
+
+    const patrolData = await getClientPatrols(parseInt(clientId), parseInt(days));
+    
+    const pool = await poolPromise;
+    const clientResult = await pool.request()
+      .input('clientId', sql.Int, clientId)
+      .query('SELECT cue_cnombre AS ClientName, cue_ncuenta AS AccountNumber FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
+
+    const client = clientResult.recordset[0] || {};
+
+    res.status(200).json({
+      success: true,
+      client: {
+        id: parseInt(clientId),
+        name: client.ClientName,
+        accountNumber: client.AccountNumber
+      },
+      timeframe: `Last ${days} days`,
+      analytics: {
+        overallPerformance: patrolData.metadata.overallPerformance || 0,
+        totalCompleted: patrolData.metadata.totalCompleted || 0,
+        totalExpected: patrolData.metadata.totalExpectedPatrols || 0,
+        postsCount: patrolData.posts?.length || 0,
+        eventsCount: patrolData.events?.length || 0,
+        guardReportsCount: patrolData.guardReports?.length || 0,
+        dataSource: patrolData.metadata.dataSource || 'Unknown',
+        processingTime: patrolData.metadata.processingTime || 0
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error in client analytics route:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get client analytics',
+      error: error.message
+    });
+  }
+});
 
 // =============================================
-// 📅 HISTORICAL DATA ROUTES
+// HISTORICAL DATA ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler/historical/:clientId
- * @desc    Get historical patrol data
+ * @desc    Get historical patrol data using optimized model
  */
 router.get('/historical/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
-    const { startDate, endDate, monthsBack } = req.query;
+    const { startDate, endDate, monthsBack, specificMonth } = req.query;
 
     console.log(`📅 Fetching historical data for client ${clientId}`);
 
     const dateRange = getHistoricalDateRange({
       startDate,
       endDate,
-      monthsBack: monthsBack ? parseInt(monthsBack) : null
+      monthsBack: monthsBack ? parseInt(monthsBack) : null,
+      specificMonth
     });
 
     const historicalData = await getClientHistoricalPatrols(
       parseInt(clientId),
-      dateRange.sqlStartDate,
-      dateRange.sqlEndDate
+      dateRange.startDate,
+      dateRange.endDate
     );
 
     res.status(200).json({
-      success: true,
+      success: historicalData.metadata.success || false,
       data: historicalData,
       dateRange: {
         display: dateRange.rangeLabel,
-        start: dateRange.displayStartDate,
-        end: dateRange.displayEndDate
+        start: dateRange.startDate,
+        end: dateRange.endDate,
+        daysInRange: dateRange.daysInRange || dateRange.nightsInRange,
+        nights: dateRange.nightsInRange
       },
       metadata: {
         clientId: parseInt(clientId),
-        generatedAt: new Date().toISOString()
+        generatedAt: new Date().toISOString(),
+        dataSource: historicalData.metadata.dataSource || 'Unknown',
+        processingTime: historicalData.metadata.processingTime || 0,
+        usingOptimizedModel: true
       }
     });
 
@@ -563,48 +601,176 @@ router.get('/historical/:clientId', async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/scheduler/historical/date-ranges
+ * @desc    Get available historical date ranges
+ */
+router.get('/historical/date-ranges', async (req, res) => {
+  try {
+    const ranges = {
+      previousWeek: getPreviousWeekRange(),
+      lastMonth: getHistoricalDateRange({ monthsBack: 1 }),
+      last3Months: getHistoricalDateRange({ monthsBack: 3 }),
+      last6Months: getHistoricalDateRange({ monthsBack: 6 }),
+      custom: {
+        description: 'Use startDate and endDate parameters',
+        example: '/api/scheduler/historical/28?startDate=2025-01-01&endDate=2025-01-31'
+      }
+    };
+
+    res.status(200).json({
+      success: true,
+      ranges,
+      timezone: process.env.TIMEZONE || 'Africa/Nairobi',
+      emailSendingEnabled: global.EMAIL_SENDING_ENABLED || false,
+      usingOptimizedModel: true
+    });
+  } catch (error) {
+    console.error('❌ Error fetching date ranges:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch date ranges',
+      error: error.message
+    });
+  }
+});
+
 // =============================================
-// 📅 SCHEDULE CRUD ROUTES
-// =============================================
-
-/**
- * @route   POST /api/scheduler/schedule/:id
- * @desc    Create schedule
- */
-router.post("/schedule/:id", createSchedule);
-
-/**
- * @route   PUT /api/scheduler/schedule/:id
- * @desc    Update schedule
- */
-router.put("/schedule/:id", updateSchedule);
-
-/**
- * @route   DELETE /api/scheduler/schedule/:id
- * @desc    Delete schedule
- */
-router.delete("/schedule/:id", deleteSchedule);
-
-/**
- * @route   GET /api/scheduler/schedule/:id
- * @desc    Get schedule by ID
- */
-router.get("/schedule/:id", getScheduleById);
-
-// =============================================
-// 📅 GENERIC ROUTES (MUST BE LAST!)
+// SCHEDULE CRUD ROUTES
 // =============================================
 
 /**
  * @route   GET /api/scheduler
- * @desc    Get all schedules
+ * @desc    Get all schedules with email counts
  */
 router.get("/", getAllSchedules);
 
 /**
+ * @route   POST /api/scheduler
+ * @desc    Create a new schedule with multiple email support
+ */
+router.post("/", createSchedule);
+
+/**
  * @route   GET /api/scheduler/:id
- * @desc    Get schedule by ID (fallback)
+ * @desc    Get schedule by ID with email configuration
  */
 router.get("/:id", getScheduleById);
+
+/**
+ * @route   PUT /api/scheduler/:id
+ * @desc    Update schedule with multiple email support
+ */
+router.put("/:id", updateSchedule);
+
+/**
+ * @route   DELETE /api/scheduler/:id
+ * @desc    Delete schedule
+ */
+router.delete("/:id", deleteSchedule);
+
+// =============================================
+// BULK OPERATIONS
+// =============================================
+
+/**
+ * @route   POST /api/scheduler/bulk/update-emails
+ * @desc    Bulk update email configurations for multiple schedules
+ */
+router.post('/bulk/update-emails', async (req, res) => {
+  try {
+    const { updates } = req.body;
+
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Updates array is required'
+      });
+    }
+
+    const pool = await poolPromise;
+    const results = [];
+
+    for (const update of updates) {
+      const { scheduleId, emails } = update;
+
+      if (!scheduleId || !emails) {
+        results.push({
+          scheduleId,
+          success: false,
+          error: 'Missing scheduleId or emails'
+        });
+        continue;
+      }
+
+      const parsedEmails = parseEmails(emails);
+      if (parsedEmails.length === 0) {
+        results.push({
+          scheduleId,
+          success: false,
+          error: 'No valid emails provided'
+        });
+        continue;
+      }
+
+      try {
+        const result = await pool.request()
+          .input('id', sql.Int, scheduleId)
+          .input('email', sql.VarChar(4000), emails)
+          .query(`
+            UPDATE _Datos.dbo.m_reportes_automaticos
+            SET rep_cmail = @email
+            WHERE rep_idKey = @id
+          `);
+
+        if (result.rowsAffected[0] === 0) {
+          results.push({
+            scheduleId,
+            success: false,
+            error: 'Schedule not found'
+          });
+        } else {
+          results.push({
+            scheduleId,
+            success: true,
+            emailCount: parsedEmails.length,
+            message: `Updated with ${parsedEmails.length} email(s)`
+          });
+        }
+      } catch (error) {
+        results.push({
+          scheduleId,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.filter(r => !r.success).length;
+
+    res.status(200).json({
+      success: true,
+      summary: {
+        total: updates.length,
+        success: successCount,
+        failure: failureCount
+      },
+      emailStatus: {
+        globalEnabled: global.EMAIL_SENDING_ENABLED || false
+      },
+      results,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in bulk email update:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Bulk update failed',
+      error: error.message
+    });
+  }
+});
 
 export default router;

@@ -18,7 +18,8 @@ import {
   Users,
   Info,
   Target,
-  BarChart3
+  BarChart3,
+  Search
 } from "lucide-react";
 import {
   BarChart,
@@ -51,8 +52,27 @@ export default function SecurityDashboard() {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState("");
   const [clientScheduleInfo, setClientScheduleInfo] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+
+  // ✅ MOVED UP: getShiftLabel function - defined before it's used
+  const getShiftLabel = useCallback((shiftValue) => {
+    const shift = availableShifts.find(shiftItem => shiftItem.value === shiftValue);
+    return shift?.label || shiftValue;
+  }, [availableShifts]);
+
+  // ✅ MOVED UP: getShiftIcon function
+  const getShiftIcon = (shiftTypeValue) => {
+    if (!shiftTypeValue) return <Shield className="w-4 h-4" />;
+    const normalized = shiftTypeValue.toLowerCase();
+    if (normalized.includes("day") && !normalized.includes("night")) {
+      return <Sun className="w-4 h-4 text-yellow-500" />;
+    } else if (normalized.includes("night")) {
+      return <Moon className="w-4 h-4 text-blue-500" />;
+    }
+    return <Shield className="w-4 h-4 text-green-500" />;
+  };
 
   // Enhanced helper function to check if a zone name is valid
   const isValidZoneName = useCallback((zoneName) => {
@@ -89,11 +109,11 @@ export default function SecurityDashboard() {
     return zoneName.trim().length >= 2;
   }, []);
 
-  // Performance rating function
+  // Performance rating function - SYNCED WITH BACKEND
   const getPerformanceRating = (rate) => {
     const numericRate = typeof rate === 'string' ? parseFloat(rate) : rate;
-    if (numericRate >= 95) return 'Excellent';
-    if (numericRate >= 85) return 'Good';
+    if (numericRate >= 90) return 'Excellent';
+    if (numericRate >= 80) return 'Good';
     if (numericRate >= 70) return 'Fair';
     return 'Poor';
   };
@@ -106,10 +126,11 @@ export default function SecurityDashboard() {
       rawSummary: data.summary.length,
       calculations: data.calculations,
       schedule: data.schedule,
-      incidents: data.incidents,
+      guardReports: data.guardReports,
       events: data.events?.length,
       expectedPerZone: data.calculations.expectedPerZone,
-      validZoneCount: data.calculations.validZoneCount
+      validZoneCount: data.calculations.validZoneCount,
+      calculationMethod: data.calculations.method
     });
 
     // Filter out invalid zones first
@@ -128,8 +149,8 @@ export default function SecurityDashboard() {
       const completed = parseInt(zone.ChecksCompleted) || 0;
       const expected = parseInt(zone.ExpectedChecks) || 0;
       
-      // Use the backend-calculated performance rate and convert to whole number
-      const performanceRate = Math.round(parseFloat(zone.PerformanceRate) || 0);
+      // Use the backend-calculated performance rate
+      const performanceRate = parseFloat(zone.PerformanceRate) || 0;
       
       // Calculate if exceeded expectations
       const exceeded = completed > expected;
@@ -138,7 +159,7 @@ export default function SecurityDashboard() {
         ...zone,
         ChecksCompleted: completed,
         ExpectedChecks: expected,
-        PerformanceRate: `${performanceRate}%`, // Whole number percentage
+        PerformanceRate: `${Math.round(performanceRate)}%`, // Whole number percentage
         actualPerformance: performanceRate,
         exceeded: exceeded
       };
@@ -155,7 +176,7 @@ export default function SecurityDashboard() {
       completionRate: data.calculations.completionRate,
       performanceRating: data.calculations.performanceRating,
       validZones: processedSummary.length,
-      incidents: data.incidents,
+      guardReports: data.guardReports,
       calculationMethod: data.calculations.method
     });
 
@@ -171,10 +192,15 @@ export default function SecurityDashboard() {
     };
   }, [isValidZoneName]);
 
-  const fetchClients = useCallback(async () => {
+  // Fetch clients with search capability
+  const fetchClients = useCallback(async (search = "") => {
     try {
       setErrorMessage("");
-      const response = await fetch(`${API_BASE}/reports/clients`);
+      const url = search && search.length >= 2 
+        ? `${API_BASE}/reports/clients/search?query=${encodeURIComponent(search)}`
+        : `${API_BASE}/reports/clients`;
+      
+      const response = await fetch(url);
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -185,7 +211,7 @@ export default function SecurityDashboard() {
       if (data.success && Array.isArray(data.clients)) {
         setClients(data.clients);
         if (data.clients.length === 0) {
-          setErrorMessage("No clients available. Please add clients first.");
+          setErrorMessage("No clients found. Please try a different search term.");
         }
       } else {
         throw new Error("Invalid response format from server");
@@ -196,6 +222,7 @@ export default function SecurityDashboard() {
     }
   }, [API_BASE]);
 
+  // Fetch client schedule info
   const fetchClientScheduleInfo = useCallback(async (clientName) => {
     if (!clientName) {
       setAvailableShifts([]);
@@ -253,6 +280,7 @@ export default function SecurityDashboard() {
     }
   }, [client, fetchClientScheduleInfo]);
 
+  // Generate time options for time selection
   const generateTimeOptions = (intervalMinutes = 30) => {
     const times = [];
     for (let hour = 0; hour < 24; hour++) {
@@ -267,6 +295,7 @@ export default function SecurityDashboard() {
 
   const timeOptions = generateTimeOptions(30);
 
+  // Combine date and time for API calls
   const combineDateTime = (dateStr, timeStr) => {
     if (!dateStr) return "";
     const time = timeStr || "00:00";
@@ -274,6 +303,7 @@ export default function SecurityDashboard() {
     return `${dateStr}T${normalized}`;
   };
 
+  // Format event descriptions
   const formatEventDescription = useCallback((event) => {
     if (!event) return "Unknown Event";
     
@@ -347,6 +377,7 @@ export default function SecurityDashboard() {
       .trim();
   }, []);
 
+  // Main report fetch function - SYNCED WITH BACKEND PARAMETERS
   const handleFetchReport = useCallback(async () => {
     setErrorMessage("");
 
@@ -355,6 +386,7 @@ export default function SecurityDashboard() {
       return;
     }
 
+    // ✅ SYNCED: Use correct parameter names for patrol endpoint
     const startDateTime = combineDateTime(startDate, startTime || "00:00");
     const endDateTime = combineDateTime(endDate, endTime || "23:59");
 
@@ -375,6 +407,7 @@ export default function SecurityDashboard() {
     setReport(null);
 
     try {
+      // ✅ SYNCED: Correct parameter names for patrol endpoint
       const url = `${API_BASE}/reports/patrol?client=${encodeURIComponent(
         client
       )}&startDateTime=${encodeURIComponent(startDateTime)}&endDateTime=${encodeURIComponent(
@@ -394,7 +427,7 @@ export default function SecurityDashboard() {
         console.log('✅ Raw report data received:', {
           summaryLength: data.summary?.length,
           calculations: data.calculations,
-          incidents: data.incidents,
+          guardReports: data.guardReports,
           events: data.events?.length,
           expectedPerZone: data.calculations?.expectedPerZone,
           calculationMethod: data.calculations?.method
@@ -406,7 +439,7 @@ export default function SecurityDashboard() {
         console.log('🔄 Processed report data:', {
           validZones: processedData.calculations?.validZonesCount,
           completionRate: processedData.calculations?.completionRate,
-          incidents: processedData.incidents,
+          guardReports: processedData.guardReports,
           calculationMethod: processedData.calculations?.method
         });
 
@@ -423,6 +456,7 @@ export default function SecurityDashboard() {
     }
   }, [API_BASE, client, startDate, startTime, endDate, endTime, shiftType, processReportData]);
 
+  // ✅ MOVED UP: Calculate dashboard metrics - defined before PDF export
   const calculateDashboardMetrics = useCallback(() => {
     if (!report?.summary || !report?.calculations) return null;
 
@@ -465,18 +499,18 @@ export default function SecurityDashboard() {
       target: 90
     }));
 
-    // Properly handle incidents data
-    const incidentsData = report.incidents || [];
-    const totalIncidents = incidentsData.length;
+    // Properly handle guard reports data
+    const guardReportsData = report.guardReports || [];
+    const totalIncidents = guardReportsData.length;
 
     return {
       totalIncidents,
-      incidentsData,
+      guardReportsData,
       totalMissedPatrols,
       performanceData,
       totalCompleted,
       totalExpected,
-      overallRate: Math.round(overallRate), // Whole number
+      overallRate: Math.round(overallRate),
       performanceRating,
       efficiencyData,
       weeklyTrendData,
@@ -486,22 +520,6 @@ export default function SecurityDashboard() {
       calculationMethod: report.calculations.method
     };
   }, [report]);
-
-  const getShiftLabel = useCallback((shiftValue) => {
-    const shift = availableShifts.find(shiftItem => shiftItem.value === shiftValue);
-    return shift?.label || shiftValue;
-  }, [availableShifts]);
-
-  const getShiftIcon = (shiftTypeValue) => {
-    if (!shiftTypeValue) return <Shield className="w-4 h-4" />;
-    const normalized = shiftTypeValue.toLowerCase();
-    if (normalized.includes("day") && !normalized.includes("night")) {
-      return <Sun className="w-4 h-4 text-yellow-500" />;
-    } else if (normalized.includes("night")) {
-      return <Moon className="w-4 h-4 text-blue-500" />;
-    }
-    return <Shield className="w-4 h-4 text-green-500" />;
-  };
 
   // Enhanced text wrapping for PDF with proper width calculation
   const wrapText = (pdf, text, maxWidth, fontSize = 9) => {
@@ -616,7 +634,7 @@ export default function SecurityDashboard() {
     return canvas.toDataURL('image/png');
   };
 
-  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS
+  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS - CLIENT-SIDE GENERATION
   const exportToPDF = useCallback(async () => {
     if (!report) return;
 
@@ -897,7 +915,7 @@ export default function SecurityDashboard() {
       // INCIDENT REPORT SECTION - SEPARATE FROM EVENTS
       addSectionTitle('SECURITY INCIDENTS', 'Critical Events');
       
-      if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.incidents && report.incidents.length > 0) {
+      if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.guardReports && report.guardReports.length > 0) {
         pdf.setFillColor(254, 226, 226);
         pdf.setDrawColor(220, 38, 38);
         pdf.rect(margin, yPos, pageWidth - 2 * margin, 15, 'FD');
@@ -915,8 +933,8 @@ export default function SecurityDashboard() {
         const incidentColumnWidths = [25, 175];
         addMultiLineTableRow(['#', 'INCIDENT DESCRIPTION'], true, incidentColumnWidths);
 
-        report.incidents.forEach((incident, index) => {
-          const incidentDesc = formatIncidentDescription(incident);
+        report.guardReports.forEach((incident, index) => {
+          const incidentDesc = formatIncidentDescription(incident.report);
           addMultiLineTableRow([
             String(index + 1),
             incidentDesc
@@ -1125,7 +1143,7 @@ export default function SecurityDashboard() {
   }, [report, client, startDate, endDate]);
 
   const metrics = report ? calculateDashboardMetrics() : null;
-  const hasData = report && (report.summary?.length > 0 || report.events?.length > 0 || report.incidents?.length > 0);
+  const hasData = report && (report.summary?.length > 0 || report.events?.length > 0 || report.guardReports?.length > 0);
 
   useEffect(() => {
     const today = new Date().toISOString().split('T')[0];
@@ -1146,11 +1164,11 @@ export default function SecurityDashboard() {
                 <Activity className="w-10 h-10" />
                 Security Performance Dashboard
               </h1>
-              <p className="text-blue-100 text-lg">Real-time security operations analytics with accurate calculations</p>
+              <p className="text-blue-100 text-lg">Real-time security operations analytics</p>
             </div>
             <div className="flex items-center gap-4">
               <button
-                onClick={fetchClients}
+                onClick={() => fetchClients(searchQuery)}
                 className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded-lg transition-all"
                 title="Refresh clients"
               >
@@ -1165,17 +1183,42 @@ export default function SecurityDashboard() {
           </div>
         </div>
 
-        {/* Filters */}
+        {/* Client Search and Selection */}
         <div className="bg-white rounded-2xl shadow-xl p-6 mb-8 border border-gray-100">
           <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
             <Building2 className="w-5 h-5 text-blue-600" />
-            Report Filters
+            Report Configuration
           </h2>
+          
+          {/* Search Box */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              <Search className="inline w-4 h-4 mr-1" />
+              Search Clients
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Type client name (min 2 characters)..."
+                className="flex-1 border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <button
+                onClick={() => fetchClients(searchQuery)}
+                disabled={searchQuery.length < 2}
+                className="bg-blue-600 text-white rounded-lg px-4 py-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all"
+              >
+                Search
+              </button>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Building2 className="inline w-4 h-4 mr-1" />
-                Client ({clients.length})
+                Select Client ({clients.length} found)
               </label>
               <select
                 value={client}
@@ -1183,7 +1226,7 @@ export default function SecurityDashboard() {
                 className="w-full border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 disabled={loading || clients.length === 0}
               >
-                <option value="">{clients.length === 0 ? "Loading..." : "Select Client"}</option>
+                <option value="">{clients.length === 0 ? "No clients found" : "Select Client"}</option>
                 {clients.map((clientItem) => (
                   <option key={clientItem.id} value={clientItem.name}>
                     {clientItem.name}
@@ -1397,11 +1440,11 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* INCIDENTS SECTION - SEPARATE FROM EVENTS */}
+            {/* GUARD REPORTS SECTION - SEPARATE FROM EVENTS */}
             <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
               <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 text-red-600" />
-                Security Incidents
+                Security Incidents & Guard Reports
                 {metrics.totalIncidents > 0 && (
                   <span className="ml-2 px-2 py-1 bg-red-100 text-red-800 rounded-md text-xs font-medium">
                     {metrics.totalIncidents} incident{metrics.totalIncidents !== 1 ? 's' : ''}
@@ -1409,7 +1452,7 @@ export default function SecurityDashboard() {
                 )}
               </h3>
               
-              {metrics.totalIncidents > 0 && metrics.incidentsData ? (
+              {metrics.totalIncidents > 0 && metrics.guardReportsData ? (
                 <div className="space-y-4">
                   <div className="bg-red-50 border border-red-200 rounded-lg p-4">
                     <p className="text-lg font-semibold text-red-800">
@@ -1422,15 +1465,19 @@ export default function SecurityDashboard() {
                       <thead className="bg-red-50">
                         <tr>
                           <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">#</th>
+                          <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Date</th>
+                          <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Zone</th>
                           <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Incident Description</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {metrics.incidentsData.map((incident, index) => (
+                        {metrics.guardReportsData.map((incident, index) => (
                           <tr key={index} className="hover:bg-gray-50 transition-colors">
                             <td className="px-4 py-3 font-semibold text-gray-900">{index + 1}</td>
+                            <td className="px-4 py-3 text-gray-700">{incident.date || 'N/A'}</td>
+                            <td className="px-4 py-3 text-gray-700">{incident.zone || 'N/A'}</td>
                             <td className="px-4 py-3 text-gray-700">
-                              {formatIncidentDescription(incident)}
+                              {formatIncidentDescription(incident.report)}
                             </td>
                           </tr>
                         ))}
@@ -1504,18 +1551,18 @@ export default function SecurityDashboard() {
                     <Pie
                       data={[
                         { 
-                          name: 'Excellent (≥95%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 95 && !p.exceeded).length,
+                          name: 'Excellent (≥90%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 90 && !p.exceeded).length,
                           fill: '#10b981'
                         },
                         { 
-                          name: 'Good (85-94%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 85 && p.rate < 95 && !p.exceeded).length,
+                          name: 'Good (80-89%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 80 && p.rate < 90 && !p.exceeded).length,
                           fill: '#84cc16'
                         },
                         { 
-                          name: 'Fair (70-84%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 85 && !p.exceeded).length,
+                          name: 'Fair (70-79%)', 
+                          value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 80 && !p.exceeded).length,
                           fill: '#eab308'
                         },
                         { 
@@ -1598,9 +1645,9 @@ export default function SecurityDashboard() {
                       const expected = parseInt(row.ExpectedChecks) || 0;
                       const rate = parseFloat(row.PerformanceRate);
                       const exceeded = row.exceeded || false;
-                      const isExcellent = rate >= 95;
-                      const isGood = rate >= 85 && rate < 95;
-                      const isFair = rate >= 70 && rate < 85;
+                      const isExcellent = rate >= 90;
+                      const isGood = rate >= 80 && rate < 90;
+                      const isFair = rate >= 70 && rate < 80;
                       const isPoor = rate < 70;
                       
                       return (
@@ -1631,13 +1678,11 @@ export default function SecurityDashboard() {
               </div>
               {report.schedule && (
                 <div className="mt-4 p-3 bg-gray-50 rounded-lg text-sm text-gray-600">
-                  <strong>Calculation Method:</strong> {metrics.calculationMethod || 'Even distribution across zones'}
+                  <strong>Calculation Method:</strong> {metrics.calculationMethod || 'FULL expected patrols per zone (NOT divided)'}
                   <br />
                   <strong>Schedule:</strong> {report.schedule.patrolsPerDay} weekday / {report.schedule.weekendPatrols} weekend patrols per day.
                   <br />
                   <strong>Total Expected:</strong> {metrics.totalExpected} patrols for period across {metrics.validZonesCount} zones.
-                  <br />
-                  <strong>Expected Per Zone:</strong> ~{Math.round(metrics.totalExpected / metrics.validZonesCount)} patrols per zone.
                   <br />
                   <strong>Performance:</strong> Based on actual patrols completed vs expected requirements.
                 </div>

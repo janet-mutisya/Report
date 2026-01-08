@@ -1,526 +1,669 @@
-// server/services/generatePatrolReport.js - REWRITTEN TO USE IMPORTED CALCULATIONS
+// server/services/reportService.js - FULLY SYNCHRONIZED WITH API & MODEL
 import PDFDocument from "pdfkit";
-import { sql, poolPromise } from "../config/database.js";
+import { fetchWeeklyReport } from "../models/reportModel.js";
 import dayjs from "dayjs";
-import isSameOrAfter from "dayjs/plugin/isSameOrAfter.js";
-import isSameOrBefore from "dayjs/plugin/isSameOrBefore.js";
-import { getClientSchedule } from "../scripts/managePatrolSchedules.js";
+import utc from 'dayjs/plugin/utc.js';
+import timezone from 'dayjs/plugin/timezone.js';
 
-dayjs.extend(isSameOrAfter);
-dayjs.extend(isSameOrBefore);
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
 /**
- * 🧮 Calculate expected patrols for a date range using client schedule
- * This imports the logic from managePatrolSchedules.js
+ * 🎨 Format percentage for display (no decimals)
  */
-function calculateExpectedPatrols(schedule, startDate, endDate) {
-  const patrolDays = schedule.patrol_days.split(',').map(day => day.trim().toLowerCase());
-  const weekdayPatrols = schedule.patrols_per_day;
-  const weekendPatrols = schedule.weekend_patrols_per_day;
-  
-  let expected = 0;
-  let currentDate = dayjs(startDate);
-  const end = dayjs(endDate);
-  
-  while (currentDate.isSameOrBefore(end, 'day')) {
-    const dayOfWeek = currentDate.format('ddd').toLowerCase();
-    
-    // Check if this day is in the patrol schedule
-    if (patrolDays.includes(dayOfWeek)) {
-      if (dayOfWeek === 'sat' || dayOfWeek === 'sun') {
-        expected += weekendPatrols;
-      } else {
-        expected += weekdayPatrols;
-      }
-    }
-    
-    currentDate = currentDate.add(1, 'day');
-  }
-  
-  return expected;
+function formatPercentage(value) {
+  return Math.round(value) + '%';
 }
 
 /**
- * 🧮 Get expected patrols for a specific date
- * This matches the calculation method from managePatrolSchedules.js
+ * 🎯 Get performance rating based on percentage
  */
-function getExpectedForDate(schedule, date) {
-  const patrolDays = schedule.patrol_days.split(',').map(day => day.trim().toLowerCase());
-  const dayOfWeek = dayjs(date).format('ddd').toLowerCase();
+function getPerformanceRating(percentage) {
+  const numericValue = typeof percentage === 'number' ? percentage : parseInt(percentage) || 0;
   
-  if (!patrolDays.includes(dayOfWeek)) {
-    return 0; // Not a scheduled patrol day
-  }
-  
-  if (dayOfWeek === 'sat' || dayOfWeek === 'sun') {
-    return schedule.weekend_patrols_per_day;
-  }
-  
-  return schedule.patrols_per_day;
+  if (numericValue >= 90) return { rating: 'Excellent', color: 'green' };
+  if (numericValue >= 80) return { rating: 'Good', color: 'blue' };
+  if (numericValue >= 70) return { rating: 'Fair', color: 'orange' };
+  return { rating: 'Poor', color: 'red' };
 }
 
 /**
- * 🧮 Calculate weekly total (imported from managePatrolSchedules.js logic)
+ * 📊 Generate performance summary section
  */
-function calculateWeeklyTotal(weekdayPatrols, weekendPatrols, patrolDays) {
-  const days = patrolDays.split(',').map(day => day.trim().toLowerCase());
-  let weeklyTotal = 0;
+function generatePerformanceSummary(doc, metadata, posts) {
+  // Overall Performance Box
+  const overallRating = getPerformanceRating(metadata.overallPerformance);
   
-  days.forEach(day => {
-    if (day === 'sat' || day === 'sun' || day.includes('weekend')) {
-      weeklyTotal += weekendPatrols;
-    } else {
-      weeklyTotal += weekdayPatrols;
+  doc.fontSize(14).fillColor('black').text('📊 Overall Performance', { underline: true });
+  doc.moveDown(0.3);
+  
+  doc.fontSize(11)
+    .text(`Total Expected Patrols: ${metadata.totalExpectedPatrols}`)
+    .text(`Total Completed: ${metadata.totalCompleted}`)
+    .text(`Overall Rate: ${formatPercentage(metadata.overallPerformance)}`)
+    .fillColor(overallRating.color).text(`Performance Rating: ${overallRating.rating}`)
+    .fillColor('black');
+  
+  doc.moveDown(0.5);
+  
+  // Performance Metrics
+  doc.text(`Zones Monitored: ${posts.length}`)
+    .fillColor('green').text(`Excellent Zones (≥90%): ${metadata.dataQuality.excellentZones || 0}`)
+    .fillColor('red').text(`Underperforming Zones (<70%): ${metadata.dataQuality.underperformingZones || 0}`)
+    .fillColor('black');
+  
+  // Data Source Indicator
+  if (metadata.dataSource) {
+    doc.moveDown(0.3);
+    doc.fontSize(9).fillColor('gray')
+      .text(`Data Source: ${metadata.dataSource}`, { align: 'left' });
+    doc.fillColor('black');
+  }
+  
+  doc.moveDown(1);
+}
+
+/**
+ * 📋 Generate zone performance table
+ */
+function generateZonePerformanceTable(doc, posts) {
+  doc.fontSize(14).fillColor('black').text('📍 Zone Performance Details', { underline: true });
+  doc.moveDown(0.5);
+  
+  if (posts.length === 0) {
+    doc.fontSize(11).fillColor('orange').text('⚠️ No zone performance data available.');
+    doc.fontSize(9).fillColor('gray').text('This may indicate:');
+    doc.text('  • No patrol data found for this period');
+    doc.text('  • API connection issues (check fallback to database)');
+    doc.text('  • Incorrect account number mapping');
+    doc.fillColor('black');
+    doc.moveDown(1);
+    return;
+  }
+  
+  // Table Header
+  doc.fontSize(10).fillColor('black');
+  doc.text('Security Post', 50, doc.y, { width: 150, continued: true });
+  doc.text('Completed', 200, doc.y, { width: 60, continued: true, align: 'right' });
+  doc.text('Expected', 260, doc.y, { width: 60, continued: true, align: 'right' });
+  doc.text('Performance', 320, doc.y, { width: 80, align: 'right' });
+  doc.moveDown(0.3);
+  
+  // Separator line
+  doc.moveTo(50, doc.y).lineTo(400, doc.y).strokeColor('#cccccc').stroke();
+  doc.moveDown(0.3);
+  
+  // Table Rows
+  posts.forEach((post, index) => {
+    // Add new page if needed
+    if (doc.y > 680) {
+      doc.addPage();
+      doc.fontSize(14).text('Zone Performance (continued)', { underline: true });
+      doc.moveDown(0.5);
     }
+    
+    const yPos = doc.y;
+    const rating = getPerformanceRating(post.Performance);
+    
+    // Alternate row background
+    if (index % 2 === 0) {
+      doc.rect(45, yPos - 2, 360, 15).fillColor('#f8f9fa').fill();
+    }
+    
+    doc.fillColor('black').fontSize(9);
+    
+    // Security Post (truncate if too long)
+    const postName = post.SecurityPost.length > 20 
+      ? post.SecurityPost.substring(0, 20) + '...' 
+      : post.SecurityPost;
+    
+    doc.text(postName, 50, yPos, { width: 150 });
+    doc.text(post.Completed.toString(), 200, yPos, { width: 60, align: 'right' });
+    doc.text(post.Expected.toString(), 260, yPos, { width: 60, align: 'right' });
+    doc.fillColor(rating.color).text(post.Percentage, 320, yPos, { width: 80, align: 'right' });
+    
+    doc.moveDown(1);
   });
   
-  return weeklyTotal;
+  doc.moveDown(0.5);
 }
 
 /**
- * 🧮 Get performance rating (imported from managePatrolSchedules.js)
+ * 🕒 Generate event log section
  */
-function getPerformanceRating(complianceRate) {
-  const rate = parseFloat(complianceRate) || 0;
-  if (rate >= 90) return 'Excellent';
-  if (rate >= 80) return 'Good';
-  if (rate >= 70) return 'Fair';
-  return 'Poor';
-}
-
-/**
- * 🧮 Calculate proportional expected patrols per zone
- * This matches the controller's proportional distribution logic
- */
-function calculateProportionalExpected(zones, totalExpected) {
-  const totalCompleted = zones.reduce((sum, z) => sum + (parseInt(z.ChecksCompleted) || 0), 0);
+function generateEventLog(doc, events, metadata) {
+  doc.addPage();
+  doc.fontSize(14).fillColor('black').text('🕒 Event Log', { underline: true });
+  doc.moveDown(0.5);
   
-  if (totalCompleted === 0) {
-    // Distribute equally if no data
-    const equalExpected = zones.length > 0 
-      ? Math.ceil(totalExpected / zones.length)
-      : totalExpected;
+  if (events.length === 0) {
+    doc.fontSize(11).fillColor('orange').text('⚠️ No events recorded in the selected period.');
+    doc.fontSize(9).fillColor('gray');
+    doc.text('Possible reasons:');
+    doc.text('  • No patrol activity during this time range');
+    doc.text('  • API/Database connection issues');
+    doc.text('  • Events filtered out (check alarm codes)');
     
-    return zones.map(zone => ({
-      ...zone,
-      ExpectedChecks: equalExpected,
-      PerformanceRate: '0.0'
-    }));
+    if (metadata.dataSource) {
+      doc.moveDown(0.3);
+      doc.text(`Last checked source: ${metadata.dataSource}`);
+    }
+    
+    doc.fillColor('black');
+    doc.moveDown(1);
+    return;
   }
   
-  // Proportional distribution based on actual activity
-  return zones.map(zone => {
-    const completed = parseInt(zone.ChecksCompleted) || 0;
-    const proportion = completed / totalCompleted;
-    const expectedForZone = Math.max(1, Math.round(totalExpected * proportion));
-    const performance = expectedForZone > 0 
-      ? ((completed / expectedForZone) * 100).toFixed(1)
-      : '0.0';
+  // Header
+  doc.fontSize(9).fillColor('gray');
+  doc.text('Date', 50, doc.y, { width: 80 });
+  doc.text('Time', 130, doc.y, { width: 50 });
+  doc.text('Zone', 180, doc.y, { width: 100 });
+  doc.text('Event', 280, doc.y, { width: 150 });
+  doc.moveDown(0.3);
+  doc.moveTo(50, doc.y).lineTo(430, doc.y).strokeColor('#cccccc').stroke();
+  doc.moveDown(0.3);
+  
+  // Display only recent events to avoid PDF size issues
+  const displayEvents = events.slice(0, 150);
+  
+  displayEvents.forEach((event, index) => {
+    if (doc.y > 720) { // Add new page if near bottom
+      doc.addPage();
+      doc.fontSize(12).fillColor('black').text('Event Log (continued)', { underline: true });
+      doc.moveDown(0.5);
+    }
+    
+    const yPos = doc.y;
+    
+    // Alternate row background
+    if (index % 2 === 0) {
+      doc.rect(45, yPos - 2, 400, 12).fillColor('#fafafa').fill();
+    }
+    
+    doc.fontSize(8).fillColor('black');
+    doc.text(event.Date, 50, yPos, { width: 80 });
+    doc.text(event.Time, 130, yPos, { width: 50 });
+    
+    // Zone name
+    const zoneName = event.Zone.length > 15 
+      ? event.Zone.substring(0, 15) + '...' 
+      : event.Zone;
+    doc.text(zoneName, 180, yPos, { width: 100 });
+    
+    // Event description with wrapping
+    const eventText = event.Event.length > 30 
+      ? event.Event.substring(0, 30) + '...' 
+      : event.Event;
+    doc.text(eventText, 280, yPos, { width: 150 });
+    
+    doc.moveDown(0.6);
+  });
+  
+  if (events.length > 150) {
+    doc.moveDown(0.5);
+    doc.fontSize(8).fillColor('gray').text(
+      `... and ${events.length - 150} more events (truncated for PDF size)`,
+      { align: 'center' }
+    );
+  }
+  
+  doc.fillColor('black');
+  doc.moveDown(0.5);
+}
+
+/**
+ * 🛡️ Generate guard reports section
+ */
+function generateGuardReports(doc, guardReports) {
+  if (guardReports.length === 0) {
+    doc.addPage();
+    doc.fontSize(14).fillColor('black').text('🛡️ Guard Incident Reports', { underline: true });
+    doc.moveDown(0.5);
+    doc.fontSize(11).fillColor('gray').text('No guard reports filed during this period.');
+    doc.moveDown(1);
+    return;
+  }
+  
+  doc.addPage();
+  doc.fontSize(14).fillColor('black').text('🛡️ Guard Incident Reports', { underline: true });
+  doc.moveDown(0.5);
+  
+  doc.fontSize(9).fillColor('gray')
+    .text(`Total Reports: ${guardReports.length}`)
+    .fillColor('black');
+  doc.moveDown(0.5);
+  
+  guardReports.forEach((report, index) => {
+    if (doc.y > 650) { // Add new page if near bottom
+      doc.addPage();
+      doc.fontSize(12).text('Guard Reports (continued)', { underline: true });
+      doc.moveDown(0.5);
+    }
+    
+    doc.fontSize(10).fillColor('blue').text(`Report #${index + 1} - ${report.date}`);
+    doc.fontSize(9).fillColor('gray').text(`Zone: ${report.zone}`);
+    doc.moveDown(0.2);
+    
+    doc.fontSize(9).fillColor('black');
+    
+    // Format report text with proper wrapping
+    doc.text(report.report, { 
+      width: 450, 
+      align: 'left' 
+    });
+    
+    doc.moveDown(0.5);
+    
+    // Separator
+    if (index < guardReports.length - 1) {
+      doc.moveTo(50, doc.y).lineTo(500, doc.y).strokeColor('#eeeeee').stroke();
+      doc.moveDown(0.5);
+    }
+  });
+}
+
+/**
+ * 📝 Generate header section
+ */
+function generateHeader(doc, metadata, startDate, endDate) {
+  // Title
+  doc.fontSize(20).fillColor('#2c3e50').text('SECURITY PATROL REPORT', { align: 'center' });
+  doc.moveDown(0.5);
+  
+  // Client and Period Info
+  doc.fontSize(12).fillColor('black')
+    .text(`Client: ${metadata.clientName || 'Unknown Client'}`, { align: 'center' })
+    .text(`Period: ${dayjs(startDate).format('DD/MM/YYYY')} - ${dayjs(endDate).format('DD/MM/YYYY')}`, { align: 'center' })
+    .text(`Shift Type: ${metadata.shiftType || 'Day/Night'}`, { align: 'center' })
+    .text(`Days in Range: ${metadata.daysInRange || 0} days`, { align: 'center' });
+  
+  doc.moveDown(1);
+  
+  // Add divider
+  doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).strokeColor('#2c3e50').lineWidth(2).stroke();
+  doc.moveDown(1);
+}
+
+/**
+ * 📄 Generate footer section
+ */
+function generateFooter(doc, metadata) {
+  doc.moveDown(2);
+  
+  // Add separator line
+  doc.moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).strokeColor('#cccccc').stroke();
+  doc.moveDown(0.5);
+  
+  doc.fontSize(8).fillColor('gray')
+    .text(`Report generated: ${dayjs(metadata.generatedAt).tz(TZ).format('DD/MM/YYYY HH:mm:ss')}`, { align: 'center' })
+    .text(`System: Vigicontrol Security Patrol Monitoring`, { align: 'center' })
+    .text(`Client ID: ${metadata.clientId}`, { align: 'center' });
+  
+  // Data source information
+  if (metadata.dataSource) {
+    doc.text(`Data Source: ${metadata.dataSource}`, { align: 'center' });
+  }
+  
+  // Data quality indicator
+  if (!metadata.dataQuality.isValid) {
+    doc.moveDown(0.3);
+    doc.fillColor('orange').text('⚠️ Data quality issues detected - some information may be incomplete', { align: 'center' });
+    
+    if (metadata.dataQuality.issues && metadata.dataQuality.issues.length > 0) {
+      doc.fontSize(7);
+      metadata.dataQuality.issues.slice(0, 3).forEach(issue => {
+        doc.text(`• ${issue}`, { align: 'center' });
+      });
+    }
+  }
+  
+  doc.fillColor('black');
+}
+
+/**
+ * 🚨 Generate error/warning page for reports with issues
+ */
+function generateWarningPage(doc, metadata) {
+  if (!metadata.dataQuality || metadata.dataQuality.isValid) return;
+  
+  doc.addPage();
+  doc.fontSize(16).fillColor('orange').text('⚠️ Data Quality Notice', { align: 'center' });
+  doc.moveDown(1);
+  
+  doc.fontSize(10).fillColor('black');
+  doc.text('This report was generated with the following data quality issues:', { align: 'center' });
+  doc.moveDown(0.5);
+  
+  if (metadata.dataQuality.issues && metadata.dataQuality.issues.length > 0) {
+    metadata.dataQuality.issues.forEach((issue, index) => {
+      doc.fontSize(9).text(`${index + 1}. ${issue}`, { indent: 50 });
+    });
+  }
+  
+  doc.moveDown(1);
+  doc.fontSize(9).fillColor('gray');
+  doc.text('Recommendations:', { indent: 50, underline: true });
+  doc.text('• Verify API connectivity and account number mappings', { indent: 60 });
+  doc.text('• Check database table availability for the date range', { indent: 60 });
+  doc.text('• Confirm patrol schedules are configured correctly', { indent: 60 });
+  doc.text('• Review system logs for detailed error information', { indent: 60 });
+  
+  if (metadata.error) {
+    doc.moveDown(1);
+    doc.fontSize(8).fillColor('red');
+    doc.text(`Error Details: ${metadata.error.message}`, { indent: 50 });
+  }
+  
+  doc.fillColor('black');
+}
+
+/**
+ * 📊 MAIN FUNCTION: Generate PDF report with full API integration
+ */
+export async function generateWeeklyReportPDF(clientId, startDate, endDate) {
+  try {
+    console.log(`\n🧾 ========================================`);
+    console.log(`📊 GENERATING PDF REPORT`);
+    console.log(`   Client ID: ${clientId}`);
+    console.log(`   Period: ${startDate} → ${endDate}`);
+    console.log(`========================================\n`);
+    
+    // 1️⃣ Fetch data using the synchronized report model (with API integration)
+    const reportData = await fetchWeeklyReport(clientId, startDate, endDate);
+    
+    if (!reportData.metadata.success) {
+      throw new Error(`Failed to fetch report data: ${reportData.metadata.error?.message || 'Unknown error'}`);
+    }
+    
+    console.log(`\n✅ Data Successfully Fetched:`);
+    console.log(`   Client: ${reportData.metadata.clientName}`);
+    console.log(`   Posts: ${reportData.posts.length}`);
+    console.log(`   Events: ${reportData.events.length}`);
+    console.log(`   Guard Reports: ${reportData.guardReports.length}`);
+    console.log(`   Performance: ${reportData.metadata.overallPerformance}%`);
+    console.log(`   Data Source: ${reportData.metadata.dataSource || 'Database'}`);
+    
+    // Warn if no data
+    if (reportData.posts.length === 0 && reportData.events.length === 0) {
+      console.warn(`\n⚠️  WARNING: No patrol data found!`);
+      console.warn(`   This could indicate:`);
+      console.warn(`   • API connection issues`);
+      console.warn(`   • Incorrect account number mapping`);
+      console.warn(`   • No patrols during this period`);
+      console.warn(`   • Database fallback returned no results\n`);
+    }
+    
+    // 2️⃣ Create PDF document
+    const doc = new PDFDocument({ 
+      margin: 50, 
+      size: "A4",
+      info: {
+        Title: `Security Patrol Report - ${reportData.metadata.clientName}`,
+        Author: 'Vigicontrol Security System',
+        Subject: `Patrol Report ${dayjs(startDate).format('DD/MM/YYYY')} - ${dayjs(endDate).format('DD/MM/YYYY')}`,
+        Keywords: 'security,patrol,report,vigicontrol',
+        Creator: 'Vigicontrol Reporting System',
+        CreationDate: new Date()
+      }
+    });
+    
+    const buffers = [];
+    doc.on("data", chunk => buffers.push(chunk));
+    
+    const pdfPromise = new Promise((resolve, reject) => {
+      doc.on("end", () => {
+        console.log(`✅ PDF document finalized`);
+        resolve(Buffer.concat(buffers));
+      });
+      doc.on("error", reject);
+    });
+    
+    // 3️⃣ Generate PDF sections using synchronized data
+    console.log(`\n📄 Building PDF sections...`);
+    
+    generateHeader(doc, reportData.metadata, startDate, endDate);
+    generatePerformanceSummary(doc, reportData.metadata, reportData.posts);
+    generateZonePerformanceTable(doc, reportData.posts);
+    generateEventLog(doc, reportData.events, reportData.metadata);
+    generateGuardReports(doc, reportData.guardReports);
+    
+    // Generate warning page if there are data quality issues
+    if (!reportData.metadata.dataQuality.isValid) {
+      generateWarningPage(doc, reportData.metadata);
+    }
+    
+    generateFooter(doc, reportData.metadata);
+    
+    // 4️⃣ Finalize PDF
+    doc.end();
+    
+    const pdfBuffer = await pdfPromise;
+    
+    console.log(`\n✅ ========================================`);
+    console.log(`   PDF GENERATION COMPLETE`);
+    console.log(`   Client: ${reportData.metadata.clientName}`);
+    console.log(`   Size: ${(pdfBuffer.length / 1024).toFixed(2)} KB`);
+    console.log(`   Pages: ~${Math.ceil((reportData.posts.length / 20) + (reportData.events.length / 40) + 3)}`);
+    console.log(`========================================\n`);
+    
+    return pdfBuffer;
+    
+  } catch (error) {
+    console.error('\n❌ ========================================');
+    console.error('   PDF GENERATION FAILED');
+    console.error('   Error:', error.message);
+    console.error('========================================\n');
+    
+    // Generate error PDF
+    const errorDoc = new PDFDocument({ margin: 50, size: "A4" });
+    const errorBuffers = [];
+    errorDoc.on("data", chunk => errorBuffers.push(chunk));
+    
+    const errorPdfPromise = new Promise(resolve => {
+      errorDoc.on("end", () => resolve(Buffer.concat(errorBuffers)));
+    });
+    
+    errorDoc.fontSize(16).fillColor('red').text('❌ Report Generation Failed', { align: 'center' });
+    errorDoc.moveDown();
+    errorDoc.fontSize(12).fillColor('black').text(`Error: ${error.message}`);
+    errorDoc.moveDown();
+    errorDoc.text(`Client ID: ${clientId}`);
+    errorDoc.text(`Period: ${startDate} to ${endDate}`);
+    errorDoc.moveDown();
+    
+    errorDoc.fontSize(10).fillColor('gray');
+    errorDoc.text('Possible causes:', { underline: true });
+    errorDoc.text('• BMSecurity API connection failure');
+    errorDoc.text('• Invalid account number or client ID');
+    errorDoc.text('• Database connection issues');
+    errorDoc.text('• No data available for the selected period');
+    errorDoc.moveDown();
+    
+    errorDoc.text('Please try again or contact system administrator.', { align: 'center' });
+    
+    errorDoc.end();
+    return await errorPdfPromise;
+  }
+}
+
+/**
+ * 🧪 TEST FUNCTION: Generate test PDF with validation
+ */
+export async function generateTestReport(clientId = 1001, startDate = null, endDate = null) {
+  try {
+    console.log('\n🧪 ========================================');
+    console.log('   RUNNING TEST REPORT GENERATION');
+    console.log('========================================\n');
+    
+    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+    
+    console.log(`   Test Parameters:`);
+    console.log(`   Client ID: ${clientId}`);
+    console.log(`   Start Date: ${testStartDate}`);
+    console.log(`   End Date: ${testEndDate}\n`);
+    
+    const pdfBuffer = await generateWeeklyReportPDF(
+      clientId, 
+      testStartDate, 
+      testEndDate
+    );
     
     return {
-      ...zone,
-      ExpectedChecks: expectedForZone,
-      PerformanceRate: performance
+      success: true,
+      pdfSize: pdfBuffer.length,
+      pdfSizeKB: (pdfBuffer.length / 1024).toFixed(2),
+      clientId,
+      period: `${testStartDate} to ${testEndDate}`,
+      message: 'Test PDF generated successfully'
     };
-  });
-}
-
-/**
- * 📊 Get table names for date range (matching controller logic)
- */
-function getTableNames(startDate, endDate) {
-  const start = dayjs(startDate);
-  const end = dayjs(endDate);
-  const tables = new Set();
-  let current = start;
-  
-  while (current.isBefore(end) || current.isSame(end, 'month')) {
-    const monthSuffix = current.format("YYYYMM");
-    tables.add(`_Datos.dbo.p_recepcion${monthSuffix}`);
-    current = current.add(1, 'month').startOf('month');
-  }
-  
-  return Array.from(tables);
-}
-
-/**
- * 🔍 Check if table exists (matching controller logic)
- */
-async function checkTableExists(tableName) {
-  const pool = await poolPromise;
-  try {
-    const tableNameOnly = tableName.split('.').pop();
-    const result = await pool.request()
-      .input("tableName", sql.NVarChar, tableNameOnly)
-      .query(`
-        SELECT 1 AS existsFlag
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_NAME = @tableName
-      `);
-    return result.recordset.length > 0;
   } catch (error) {
-    console.warn(`⚠️ Error checking table ${tableName}:`, error.message);
-    return false;
+    console.error('\n❌ Test report failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      clientId,
+      period: `${startDate} to ${endDate}`
+    };
   }
 }
 
 /**
- * 🏗️ Build UNION query (matching controller logic)
+ * 📧 Generate report for email attachment
  */
-function buildUnionQuery(tables) {
-  return tables.map(table => `SELECT * FROM ${table} r`).join('\n          UNION ALL\n          ');
+export async function generateEmailReport(clientId, startDate, endDate, clientName = 'Client') {
+  try {
+    console.log(`\n📧 Generating email report for ${clientName}...`);
+    
+    const pdfBuffer = await generateWeeklyReportPDF(clientId, startDate, endDate);
+    
+    const fileName = `Patrol_Report_${clientName.replace(/\s+/g, '_')}_${dayjs(startDate).format('DDMMYYYY')}_${dayjs(endDate).format('DDMMYYYY')}.pdf`;
+    
+    return {
+      success: true,
+      pdfBuffer,
+      fileName,
+      clientName,
+      period: `${dayjs(startDate).format('DD/MM/YYYY')} - ${dayjs(endDate).format('DD/MM/YYYY')}`,
+      generatedAt: new Date(),
+      fileSizeKB: (pdfBuffer.length / 1024).toFixed(2)
+    };
+  } catch (error) {
+    console.error('❌ Email report generation failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      fileName: null,
+      pdfBuffer: null
+    };
+  }
 }
 
 /**
- * 🧾 Generate a patrol report PDF (weekly or custom range)
- * NOW USING IMPORTED CALCULATIONS FROM managePatrolSchedules.js
+ * 🔍 Get report metadata without generating PDF
  */
-export async function generateWeeklyReportPDF(
-  clientId,
-  client,
-  startDate,
-  endDate,
-  shiftType = "Day/Night"
-) {
-  console.log(`🧾 Generating patrol report for ${client} (${shiftType})`);
-  console.log(`   Period: ${startDate} → ${endDate}`);
-
-  const pool = await poolPromise;
-  const start = dayjs(startDate).startOf("day").toDate();
-  const end = dayjs(endDate).endOf("day").toDate();
-
-  // ✅ Get client schedule (imported function from managePatrolSchedules.js)
-  const schedule = await getClientSchedule(clientId);
-  console.log(`📋 Schedule loaded:`, {
-    weekday: schedule.patrols_per_day,
-    weekend: schedule.weekend_patrols_per_day,
-    days: schedule.patrol_days,
-    shift: schedule.shift_type,
-    hasCustomSchedule: schedule.has_custom_schedule,
-    configSource: schedule.config_source
-  });
-
-  // ✅ Calculate total expected patrols using imported function
-  const totalExpected = calculateExpectedPatrols(schedule, startDate, endDate);
-  console.log(`🎯 Expected patrols for period: ${totalExpected}`);
-
-  // ✅ Get valid tables for date range (matching controller)
-  const tableNames = getTableNames(startDate, endDate);
-  const tableExistsChecks = await Promise.all(
-    tableNames.map(table => checkTableExists(table))
-  );
-  const validTables = tableNames.filter((_, index) => tableExistsChecks[index]);
-  
-  if (validTables.length === 0) {
-    const mainTableExists = await checkTableExists('_Datos.dbo.p_recepcion');
-    if (mainTableExists) {
-      validTables.push('_Datos.dbo.p_recepcion');
-    } else {
-      throw new Error("No valid tables found for date range");
-    }
-  }
-
-  console.log(`📊 Using tables: ${validTables.join(', ')}`);
-
-  // ✅ Time filter by shift type
-  let timeCondition = "";
-  if (shiftType === "Day") {
-    timeCondition = "AND DATEPART(HOUR, r.rec_tfechahora) BETWEEN 6 AND 17";
-  } else if (shiftType === "Night") {
-    timeCondition =
-      "AND (DATEPART(HOUR, r.rec_tfechahora) >= 18 OR DATEPART(HOUR, r.rec_tfechahora) < 6)";
-  }
-
-  // ✅ Get patrol events with zone names (matching controller fixes)
-  const eventsResult = await pool.request()
-    .input("clientId", sql.Int, clientId)
-    .input("startDate", sql.DateTime, start)
-    .input("endDate", sql.DateTime, end)
-    .query(`
-      SELECT 
-        CONVERT(VARCHAR(10), r.rec_tfechahora, 120) AS Date,
-        CONVERT(VARCHAR(8), r.rec_tfechahora, 108) AS Time,
-        COALESCE(
-          zon.zon_cdescripcion,
-          r.rec_czona,
-          'No Zone'
-        ) AS Zone,
-        COALESCE(
-          NULLIF(r.rec_cContenido, ''),
-          NULLIF(r.rec_calarma, ''),
-          'Patrol Completed'
-        ) AS Event,
-        r.rec_calarma AS Code,
-        ISNULL(r.rec_cObservaciones, '') AS Observations
-      FROM (${buildUnionQuery(validTables)}) AS r
-      LEFT JOIN [_Datos].[dbo].[m_zonas] AS zon
-        ON r.rec_iidcuenta = zon.zon_iidcuenta
-        AND r.rec_czona = zon.zon_ccodigo
-      WHERE r.rec_iidcuenta = @clientId
-        AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-        ${timeCondition}
-      ORDER BY r.rec_tfechahora DESC
-    `);
-
-  const events = eventsResult.recordset || [];
-  console.log(`📊 Found ${events.length} patrol events`);
-
-  // ✅ Daily patrol summary with accurate expected counts
-  const patrolsResult = await pool.request()
-    .input("clientId", sql.Int, clientId)
-    .input("startDate", sql.DateTime, start)
-    .input("endDate", sql.DateTime, end)
-    .query(`
-      SELECT 
-        CAST(r.rec_tfechahora AS DATE) AS PatrolDate,
-        COUNT(*) AS PatrolCount
-      FROM (${buildUnionQuery(validTables)}) AS r
-      WHERE r.rec_iidcuenta = @clientId
-        AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-        ${timeCondition}
-      GROUP BY CAST(r.rec_tfechahora AS DATE)
-      ORDER BY PatrolDate
-    `);
-
-  const patrolData = patrolsResult.recordset || [];
-
-  // ✅ Build daily summary with schedule-based expectations (imported calculation)
-  const dailySummary = [];
-  let currentDate = dayjs(startDate);
-  const endDay = dayjs(endDate);
-  
-  while (currentDate.isSameOrBefore(endDay, 'day')) {
-    const dateStr = currentDate.format('YYYY-MM-DD');
-    const dayOfWeek = currentDate.format('ddd');
+export async function getReportMetadata(clientId, startDate, endDate) {
+  try {
+    console.log(`\n🔍 Fetching report metadata for client ${clientId}...`);
     
-    // ✅ Use imported function to get expected patrols
-    const expected = getExpectedForDate(schedule, currentDate);
+    const reportData = await fetchWeeklyReport(clientId, startDate, endDate);
     
-    // Get actual patrols from database
-    const actual = patrolData.find(p => 
-      dayjs(p.PatrolDate).format('YYYY-MM-DD') === dateStr
-    )?.PatrolCount || 0;
-    
-    const variance = actual - expected;
-    let status = '✅ OK';
-    if (expected === 0) {
-      status = '⏸️ Not Scheduled';
-    } else if (variance < 0) {
-      status = '⚠️ Missed';
-    }
-
-    dailySummary.push({
-      date: dateStr,
-      day: dayOfWeek,
-      expected,
-      actual,
-      variance,
-      status
-    });
-    
-    currentDate = currentDate.add(1, 'day');
-  }
-
-  // ✅ Calculate overall completion rate
-  const totalActual = events.length;
-  const completionRate = totalExpected > 0 
-    ? ((totalActual / totalExpected) * 100).toFixed(1)
-    : '0.0';
-
-  // ✅ Get performance rating using imported function
-  const performanceRating = getPerformanceRating(completionRate);
-
-  console.log(`📈 Completion: ${totalActual}/${totalExpected} (${completionRate}%) - ${performanceRating}`);
-
-  // ✅ Zone performance with zone names and proportional distribution (matching controller)
-  const zoneSummaryResult = await pool.request()
-    .input("clientId", sql.Int, clientId)
-    .input("startDate", sql.DateTime, start)
-    .input("endDate", sql.DateTime, end)
-    .query(`
-      SELECT 
-        COALESCE(
-          zon.zon_cdescripcion,
-          r.rec_czona,
-          'Unknown Zone'
-        ) AS SitePosts,
-        COUNT(*) AS ChecksCompleted
-      FROM (${buildUnionQuery(validTables)}) AS r
-      LEFT JOIN [_Datos].[dbo].[m_zonas] AS zon
-        ON r.rec_iidcuenta = zon.zon_iidcuenta
-        AND r.rec_czona = zon.zon_ccodigo
-      WHERE r.rec_iidcuenta = @clientId
-        AND r.rec_tfechahora BETWEEN @startDate AND @endDate
-        ${timeCondition}
-      GROUP BY COALESCE(zon.zon_cdescripcion, r.rec_czona, 'Unknown Zone')
-      ORDER BY COUNT(*) DESC
-    `);
-
-  // ✅ Apply proportional distribution using imported calculation method
-  let zoneSummary = zoneSummaryResult.recordset || [];
-  zoneSummary = calculateProportionalExpected(zoneSummary, totalExpected);
-
-  console.log(`📍 Zone performance:`, zoneSummary.map(z => ({
-    zone: z.SitePosts,
-    completed: z.ChecksCompleted,
-    expected: z.ExpectedChecks,
-    performance: `${z.PerformanceRate}%`
-  })));
-
-  // ===== GENERATE PDF =====
-  const doc = new PDFDocument({ margin: 40, size: "A4" });
-  const buffers = [];
-  doc.on("data", chunk => buffers.push(chunk));
-  const pdfPromise = new Promise(resolve => 
-    doc.on("end", () => resolve(Buffer.concat(buffers)))
-  );
-
-  const totalDays = dayjs(endDate).diff(dayjs(startDate), 'day') + 1;
-  const avgExpectedPerDay = totalExpected / totalDays;
-  const weeklyTotal = calculateWeeklyTotal(
-    schedule.patrols_per_day,
-    schedule.weekend_patrols_per_day,
-    schedule.patrol_days
-  );
-
-  // ===== HEADER =====
-  doc.fontSize(20).text("Security Patrol Report", { align: "center" });
-  doc.moveDown();
-  doc.fontSize(12).text(`Client: ${client}`);
-  doc.text(`Period: ${startDate} → ${endDate} (${totalDays} days)`);
-  doc.text(`Shift: ${schedule.shift_type}`);
-  doc.moveDown(0.5);
-  
-  // ===== OVERALL SUMMARY =====
-  doc.fontSize(14).text("📊 Overall Performance", { underline: true });
-  doc.moveDown(0.3);
-  doc.fontSize(11).text(`Total Patrols Completed: ${totalActual}`);
-  doc.text(`Expected Patrols: ${totalExpected}`);
-  doc.text(`Completion Rate: ${completionRate}%`);
-  doc.text(`Performance Rating: ${performanceRating}`);
-  doc.text(`Daily Average (Actual): ${(totalActual / totalDays).toFixed(1)}`);
-  doc.text(`Daily Average (Expected): ${avgExpectedPerDay.toFixed(1)}`);
-  doc.moveDown(1);
-
-  // ===== SCHEDULE INFO =====
-  doc.fontSize(14).text("📅 Patrol Schedule", { underline: true });
-  doc.moveDown(0.3);
-  doc.fontSize(11).text(`Weekday Patrols: ${schedule.patrols_per_day} per day`);
-  doc.text(`Weekend Patrols: ${schedule.weekend_patrols_per_day} per day`);
-  doc.text(`Scheduled Days: ${schedule.patrol_days}`);
-  doc.text(`Weekly Total: ${weeklyTotal} patrols`);
-  doc.text(`Schedule Source: ${schedule.config_source || 'default'}`);
-  doc.text(`Custom Schedule: ${schedule.has_custom_schedule ? 'Yes' : 'No'}`);
-  doc.moveDown(1.5);
-
-  // ===== DAILY SUMMARY =====
-  doc.fontSize(16).text("📋 Daily Patrol Summary", { underline: true });
-  doc.moveDown(0.5);
-  
-  if (dailySummary.length > 0) {
-    dailySummary.forEach(row => {
-      if (row.expected === 0) {
-        doc.fontSize(10).fillColor('gray').text(
-          `${row.date} (${row.day}) - Not scheduled`
-        );
-      } else {
-        const color = row.variance < 0 ? 'red' : 'black';
-        doc.fontSize(10).fillColor(color).text(
-          `${row.date} (${row.day}) - Expected: ${row.expected}, Actual: ${row.actual}, ` +
-          `Variance: ${row.variance > 0 ? '+' : ''}${row.variance} → ${row.status}`
-        );
+    return {
+      success: reportData.metadata.success,
+      metadata: {
+        clientName: reportData.metadata.clientName,
+        clientId: reportData.metadata.clientId,
+        startDate: reportData.metadata.startDate,
+        endDate: reportData.metadata.endDate,
+        overallPerformance: reportData.metadata.overallPerformance,
+        totalZones: reportData.posts.length,
+        totalEvents: reportData.events.length,
+        totalGuardReports: reportData.guardReports.length,
+        dataQuality: reportData.metadata.dataQuality,
+        dataSource: reportData.metadata.dataSource,
+        shiftType: reportData.metadata.shiftType,
+        daysInRange: reportData.metadata.daysInRange
+      },
+      summary: {
+        posts: reportData.posts.length,
+        events: reportData.events.length,
+        guardReports: reportData.guardReports.length,
+        totalExpected: reportData.metadata.totalExpectedPatrols,
+        totalCompleted: reportData.metadata.totalCompleted
       }
-      doc.fillColor('black'); // Reset color
-    });
-  } else {
-    doc.fontSize(11).text("No patrol data available.");
+    };
+  } catch (error) {
+    console.error('❌ Failed to get report metadata:', error);
+    return {
+      success: false,
+      error: error.message,
+      metadata: null,
+      summary: null
+    };
   }
-
-  doc.moveDown(1.5);
-
-  // ===== ZONE PERFORMANCE =====
-  doc.fontSize(16).text("📍 Zone Performance Summary", { underline: true });
-  doc.moveDown(0.5);
-  
-  if (zoneSummary.length > 0) {
-    zoneSummary.forEach((row, i) => {
-      const perfRate = parseFloat(row.PerformanceRate);
-      const color = perfRate >= 90 ? 'green' : perfRate >= 70 ? 'black' : 'red';
-      doc.fontSize(11).fillColor(color).text(
-        `${i + 1}. ${row.SitePosts} — Completed: ${row.ChecksCompleted}, ` +
-        `Expected: ${row.ExpectedChecks}, Performance: ${row.PerformanceRate}%`
-      );
-      doc.fillColor('black'); // Reset color
-    });
-  } else {
-    doc.fontSize(11).text("No zone data available.");
-  }
-
-  doc.moveDown(1.5);
-
-  // ===== EVENT LOG =====
-  doc.fontSize(16).text("🕒 Event Log (Recent 50 Events)", { underline: true });
-  doc.moveDown(0.5);
-
-  if (events.length > 0) {
-    const displayEvents = events.slice(0, 50);
-    displayEvents.forEach((e, i) => {
-      doc.fontSize(9).text(
-        `${i + 1}. [${e.Date} ${e.Time}] ${e.Zone} - ${e.Event}`
-      );
-      if (e.Code && e.Code !== '') {
-        doc.fontSize(8).fillColor('gray').text(`   Code: ${e.Code}`);
-      }
-      if (e.Observations && e.Observations !== '') {
-        doc.fontSize(8).fillColor('gray').text(`   Notes: ${e.Observations}`);
-      }
-      doc.fillColor('black'); // Reset color
-      doc.moveDown(0.2);
-    });
-    
-    if (events.length > 50) {
-      doc.fontSize(10).fillColor('gray').text(
-        `... and ${events.length - 50} more events`, 
-        { italics: true }
-      );
-      doc.fillColor('black');
-    }
-  } else {
-    doc.text("No patrol events recorded.");
-  }
-
-  // ===== FOOTER =====
-  doc.moveDown(2);
-  doc.fontSize(8).fillColor('gray').text(
-    `Report generated: ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`,
-    { align: 'center' }
-  );
-  doc.text(
-    `Calculations imported from managePatrolSchedules.js`,
-    { align: 'center' }
-  );
-
-  doc.end();
-  return pdfPromise;
 }
 
-// Export helper functions for use in other modules
-export {
-  calculateExpectedPatrols,
-  getExpectedForDate,
-  calculateWeeklyTotal,
-  getPerformanceRating,
-  calculateProportionalExpected,
-  getTableNames,
-  checkTableExists,
-  buildUnionQuery
-};
+/**
+ * 🔍 Validate report data before PDF generation
+ */
+export async function validateReportData(clientId, startDate, endDate) {
+  try {
+    console.log(`\n🔍 Validating report data availability...`);
+    
+    const metadata = await getReportMetadata(clientId, startDate, endDate);
+    
+    const warnings = [];
+    const errors = [];
+    
+    if (!metadata.success) {
+      errors.push('Failed to fetch report data');
+      return { valid: false, errors, warnings };
+    }
+    
+    if (metadata.summary.posts === 0) {
+      warnings.push('No security posts found - report will be empty');
+    }
+    
+    if (metadata.summary.events === 0) {
+      warnings.push('No patrol events found for this period');
+    }
+    
+    if (metadata.metadata.overallPerformance === 0) {
+      warnings.push('Zero performance detected - verify patrol data');
+    }
+    
+    if (!metadata.metadata.dataQuality.isValid) {
+      warnings.push('Data quality issues detected');
+      if (metadata.metadata.dataQuality.issues) {
+        warnings.push(...metadata.metadata.dataQuality.issues);
+      }
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      metadata: metadata.metadata,
+      canGeneratePDF: errors.length === 0,
+      recommendGeneration: errors.length === 0 && warnings.length < 3
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [error.message],
+      warnings: [],
+      canGeneratePDF: false
+    };
+  }
+}
 
 export default {
   generateWeeklyReportPDF,
-  calculateExpectedPatrols,
-  getExpectedForDate,
-  calculateWeeklyTotal,
-  getPerformanceRating,
-  calculateProportionalExpected
+  generateTestReport,
+  generateEmailReport,
+  getReportMetadata,
+  validateReportData
 };
