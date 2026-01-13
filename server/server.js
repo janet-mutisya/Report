@@ -1,4 +1,4 @@
-// server.js - FULLY OPTIMIZED VERSION
+// server.js - FULLY OPTIMIZED VERSION WITH INCIDENT ROUTES - FIXED ROUTE ORDER
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -233,6 +233,9 @@ import authRoutes from "./routes/auth.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import adminRoutes from "./routes/adminRoutes.js";
 
+// Import incident model for API setup
+import { createIncidentAPI } from './models/incidentModel.js';
+
 // Import the scheduler
 import "./service/scheduler.js";
 
@@ -339,18 +342,22 @@ app.use((req, res, next) => {
 });
 
 // =============================================
-// 🎯 API ROUTES
+// 🎯 API ROUTES - CRITICAL: ORDER MATTERS!
 // =============================================
 
 app.use('/api', apiLimiter);
 
-app.use("/api/test", testRoute);
+// Health check endpoints (no rate limiting)
 app.use('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use("/api/test", testRoute);
+
+// Auth routes with stricter rate limiting
 app.use("/api/auth", authLimiter, authRoutes);
 
+// Main API routes
 app.use("/api/reports", reportRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/sync", dataSyncRoutes);
@@ -362,7 +369,14 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminRoutes);
 
 // =============================================
-// 🏠 ROOT ENDPOINTS
+// 🚨 INCIDENT ROUTES - MUST BE BEFORE ROOT ENDPOINTS
+// =============================================
+console.log('📊 Registering incident API routes...');
+createIncidentAPI(app);
+console.log('✅ Incident routes registered: /api/incidents/*');
+
+// =============================================
+// 🏠 ROOT ENDPOINTS - MUST BE AFTER ALL API ROUTES
 // =============================================
 
 app.get("/", (req, res) => {
@@ -379,6 +393,7 @@ app.get("/", (req, res) => {
       clients: "/api/clients",
       reports: "/api/reports",
       scheduler: "/api/scheduler",
+      incidents: "/api/incidents",
       health: "/api/scheduler/health",
       network: "/api/network/status"
     }
@@ -427,7 +442,8 @@ app.get('/api/health', (req, res) => {
       circuitBreaker: networkBreaker.state,
       emailService: EMAIL_ENABLED ? 'enabled' : 'disabled',
       authentication: 'active',
-      autoDiscovery: 'enabled'
+      autoDiscovery: 'enabled',
+      incidentTracking: 'active'
     }
   });
 });
@@ -492,6 +508,11 @@ app.get('/api', (req, res) => {
         reports: "GET /api/admin/reports",
         system: "GET /api/admin/system"
       },
+      incidents: {
+        count: "GET /api/incidents/count?clientId=X&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
+        details: "GET /api/incidents/details?clientId=X&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
+        period: "GET /api/incidents/:period?clientId=X (periods: daily, weekly, monthly, yesterday, last7days, last30days)"
+      },
       scheduler: {
         base: "/api/scheduler",
         health: "/api/scheduler/health"
@@ -508,7 +529,7 @@ app.get('/api', (req, res) => {
 });
 
 // =============================================
-// 🚨 ERROR HANDLERS
+// 🚨 ERROR HANDLERS - MUST BE LAST
 // =============================================
 
 app.use((req, res) => {
@@ -561,6 +582,7 @@ if (!IS_PRODUCTION || cluster.isWorker) {
     }
     console.log(`🔐 Authentication: ✅ ACTIVE`);
     console.log(`👑 Admin Routes: ✅ ACTIVE (/api/admin)`);
+    console.log(`📊 Incident Tracking: ✅ ACTIVE (/api/incidents)`);
     console.log(`🔗 Allowed origins: ${allowedOrigins.join(', ')}`);
     console.log(`📊 API base URL: http://localhost:${PORT}/api`);
     console.log("===============================================");

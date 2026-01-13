@@ -1,4 +1,4 @@
-// server/models/reportModelOptimized.js - FLEXIBLE SHIFT-BASED MODEL
+// server/models/reportModelOptimized.js - FLEXIBLE SHIFT-BASED MODEL WITH INCIDENT MODEL INTEGRATION
 process.env.TZ = 'Africa/Nairobi';
 console.log('🔧 FORCED TZ:', process.env.TZ);
 
@@ -6,8 +6,9 @@ import { sql, poolPromise } from "../config/database.js";
 import { getClientSchedule, getPatrolScheduleConfig } from "../scripts/managePatrolSchedules.js";
 import bmSecurityAPI from "../service/bmSecurityAPI.js";
 import { getCachedPatrolEvents } from '../service/bmSecurityAPICache.js';
+import { getIncidentCount } from './incidentModel.js'; // ✅ IMPORT INCIDENT MODEL
 import dayjs from "dayjs";
-import utc from 'dayjs/plugin/utc.js';validateAndFormatDates
+import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
 import isSameOrBefore from 'dayjs/plugin/isSameOrBefore.js';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter.js';
@@ -35,9 +36,9 @@ const DEFAULT_REPORT_TYPES = {
   MONTHLY: 'monthly'
 };
 
-// ✅ CANONICAL EVENT CODES
+// ✅ CANONICAL EVENT CODES - SINGLE SOURCE OF TRUTH
 const PATROL_ARRIVAL_CODE = 'V04';   // Patrol arrival (PERFORMANCE METRIC)
-const GUARD_REPORT_CODE = 'V03';     // Incident/update/narrative (INCIDENTS ONLY)
+// V03 incidents now handled by incidentModel.js - removed from here
 
 // 📦 Caching
 const zoneMapCache = new Map();
@@ -105,7 +106,6 @@ function parseEventDate(rawDate) {
 
 /**
  * ✅ FIXED: SHIFT-BASED DATE RANGE FOR ANY DURATION
- * Now correctly calculates shift days instead of calendar days
  */
 function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_TYPES.CUSTOM) {
   try {
@@ -121,10 +121,12 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
       throw new Error("End date cannot be before start date");
     }
     
-    // ✅ FIXED: Calculate SHIFT DAYS instead of calendar days
-    // A shift runs from 18:00 to 06:00 next day
-    // Each calendar day contributes 1 shift
-    const shiftDays = end.diff(start, 'day');
+    // ✅ Calculate SHIFT DAYS instead of calendar days
+    const shiftDays = end.diff(start, 'day') + 1;
+
+    if (shiftDays <= 0) {
+      throw new Error(`Invalid shiftDays calculation: ${shiftDays}`);
+    }    
     
     // For weekly reports, warn but don't enforce
     if (reportType === DEFAULT_REPORT_TYPES.WEEKLY && shiftDays !== 7) {
@@ -134,10 +136,7 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
     logger.info(`✅ VALIDATED: ${reportType.toUpperCase()} report = ${shiftDays} shift days`);
     
     // 🚨 SHIFT-BASED QUERY RANGE
-    // Start query at 18:00 on start date
     const queryStart = start.hour(SHIFT_START_HOUR).minute(0).second(0);
-    
-    // End query at 06:00 on the day AFTER end date
     const queryEnd = end.add(1, 'day')
                         .hour(SHIFT_END_HOUR)
                         .minute(0)
@@ -157,7 +156,7 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
       endDateTime,
       queryStart,
       queryEnd,
-      shiftDays, // ✅ FIXED: Using shiftDays instead of calendarDays
+      shiftDays,
       displayStart: start.format('DD/MM/YYYY'),
       displayEnd: end.format('DD/MM/YYYY'),
       reportType,
@@ -171,51 +170,66 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
 }
 
 /**
- * ✅ Generate date range for common report types
+ * ✅ FIXED BUSINESS RULE: Generate date range for common report types
+ * Weekly must always = 7 shift days
+ * Monthly must always = 30 or 31 shift days (depending on month)
+ * Both must end at today's morning (current shift end)
  */
 function generateDateRangeForReportType(reportType, endDate = null) {
   const now = endDate ? dayjs.tz(endDate, TZ) : dayjs.tz(TZ);
-  const today = now.startOf('day');
-  
-  switch(reportType.toLowerCase()) {
-    case 'daily':
-      const yesterday = today.subtract(1, 'day');
+
+  // Shift day boundary: before 06:00 still counts as yesterday
+  let effectiveDay = now;
+  if (now.hour() < SHIFT_END_HOUR) {
+    effectiveDay = now.subtract(1, 'day');
+  }
+
+  const end = effectiveDay.startOf('day');
+
+  switch (reportType.toLowerCase()) {
+    case 'daily': {
+      const day = end.subtract(1, 'day');
       return {
-        startDate: yesterday.format('YYYY-MM-DD'),
-        endDate: yesterday.format('YYYY-MM-DD')
+        startDate: day.format('YYYY-MM-DD'),
+        endDate: day.format('YYYY-MM-DD')
       };
-      
-    case 'weekly':
-      const weekStart = today.subtract(6, 'day');
+    }
+
+    case 'weekly': {
+      // EXACTLY 7 shift days window
+      const start = end.subtract(6, 'day'); // inclusive = 7 days
       return {
-        startDate: weekStart.format('YYYY-MM-DD'),
-        endDate: today.format('YYYY-MM-DD')
+        startDate: start.format('YYYY-MM-DD'),
+        endDate: end.format('YYYY-MM-DD')
       };
-      
+    }
+
+    case 'monthly': {
+      // EXACT rolling month window (30 or 31 depending on previous month)
+      const daysInWindow = end.daysInMonth(); // number of days in the CURRENT ending month
+      const start = end.subtract(daysInWindow - 1, 'day'); // inclusive window
+      return {
+        startDate: start.format('YYYY-MM-DD'),
+        endDate: end.format('YYYY-MM-DD')
+      };
+    }
+
     case 'last7days':
-      const last7Start = today.subtract(6, 'day');
+      const last7Start = end.subtract(6, 'day');
       return {
         startDate: last7Start.format('YYYY-MM-DD'),
-        endDate: today.format('YYYY-MM-DD')
+        endDate: end.format('YYYY-MM-DD')
       };
       
     case 'last30days':
-      const last30Start = today.subtract(29, 'day');
+      const last30Start = end.subtract(29, 'day');
       return {
         startDate: last30Start.format('YYYY-MM-DD'),
-        endDate: today.format('YYYY-MM-DD')
-      };
-      
-    case 'monthly':
-      const monthStart = today.startOf('month');
-      const monthEnd = today.endOf('month');
-      return {
-        startDate: monthStart.format('YYYY-MM-DD'),
-        endDate: monthEnd.format('YYYY-MM-DD')
+        endDate: end.format('YYYY-MM-DD')
       };
       
     case 'lastmonth':
-      const lastMonth = today.subtract(1, 'month');
+      const lastMonth = end.subtract(1, 'month');
       const lastMonthStart = lastMonth.startOf('month');
       const lastMonthEnd = lastMonth.endOf('month');
       return {
@@ -229,8 +243,7 @@ function generateDateRangeForReportType(reportType, endDate = null) {
 }
 
 /**
- * ✅ SHIFT-AWARE EVENT FILTERING
- * Now includes debug logging for skipped events
+ * ✅ SHIFT-AWARE EVENT FILTERING FOR PATROLS ONLY
  */
 function filterEventsByDateRange(events, dates) {
   const filteredEvents = [];
@@ -251,7 +264,7 @@ function filterEventsByDateRange(events, dates) {
         dates.queryEnd, 
         null, 
         '[)'
-      ); // [start, end) - inclusive start, exclusive end
+      );
       
       if (isWithinRange) {
         filteredEvents.push(event);
@@ -311,11 +324,10 @@ function countV04Patrols(events) {
 }
 
 /**
- * ✅ API EVENT PROCESSING
+ * ✅ API EVENT PROCESSING - V04 ONLY NOW
  */
 function processAllAPIEvents(apiEvents, clientId) {
-  const allEvents = [];
-  const guardReports = []; // V03 incidents/updates
+  const allEvents = []; // Only V04 patrols
   
   for (const event of apiEvents) {
     try {
@@ -332,7 +344,9 @@ function processAllAPIEvents(apiEvents, clientId) {
       // Filter by client
       if (eventClientIdNum !== targetClientIdNum) continue;
       
-      // Mapped event
+      // ✅ ONLY PROCESS V04 PATROLS - V03 NOW HANDLED BY incidentModel.js
+      if (alarmCode !== PATROL_ARRIVAL_CODE) continue;
+      
       const mappedEvent = {
         rec_iid: event.rec_iid || event.Id,
         rec_iidcuenta: targetClientIdNum,
@@ -346,14 +360,6 @@ function processAllAPIEvents(apiEvents, clientId) {
       
       allEvents.push(mappedEvent);
       
-      // V03 = INCIDENTS/UPDATES ONLY
-      if (alarmCode === GUARD_REPORT_CODE) {
-        guardReports.push({
-          ...mappedEvent,
-          __type: 'INCIDENT_REPORT'
-        });
-      }
-      
     } catch (error) {
       // Skip malformed events
     }
@@ -362,9 +368,9 @@ function processAllAPIEvents(apiEvents, clientId) {
   // Use canonical counter for V04 patrols
   const completedCounts = countV04Patrols(allEvents);
   
-  logger.info(`📊 Processed: ${allEvents.length} total events, ${guardReports.length} V03 incidents`);
+  logger.info(`📊 Processed: ${allEvents.length} V04 patrol events`);
   
-  return { events: allEvents, guardReports, completedCounts };
+  return { events: allEvents, completedCounts };
 }
 
 /**
@@ -519,7 +525,7 @@ function calculatePerformance(allPosts, completedCounts, expectedPatrolsPerPost)
 }
 
 /**
- * 🌐 Fetch events from API
+ * 🌐 Fetch events from API - V04 ONLY
  */
 async function fetchPatrolEventsFromAPI(clientId, startDate, endDate) {
   try {
@@ -553,12 +559,11 @@ async function fetchPatrolEventsFromAPI(clientId, startDate, endDate) {
       logger.warn(`⚠️ No events found for client ${clientId}`);
       return { 
         events: [], 
-        guardReports: [], 
         completedCounts: new Map() 
       };
     }
     
-    // Process using canonical logic
+    // Process using canonical logic (V04 only now)
     const processedData = processAllAPIEvents(clientEvents, clientId);
     
     return processedData;
@@ -570,14 +575,14 @@ async function fetchPatrolEventsFromAPI(clientId, startDate, endDate) {
 }
 
 /**
- * 🗃️ Fetch events from database
+ * 🗃️ Fetch events from database - V04 ONLY NOW
  */
 async function fetchAllEventsFromDB(clientId, startDate, endDate, receptionTables = ['p_recepcion202512', 'p_recepcion202511']) {
   const validTables = receptionTables.filter(table => /^p_recepcion\d{6}$/.test(table));
   
   if (validTables.length === 0) {
     logger.warn('No valid partition tables found');
-    return { patrolEvents: [], guardReports: [], completedCounts: new Map() };
+    return { patrolEvents: [], completedCounts: new Map() };
   }
   
   try {
@@ -594,7 +599,8 @@ async function fetchAllEventsFromDB(clientId, startDate, endDate, receptionTable
         rec_cObservaciones
        FROM [_Datos].[dbo].[${table}]
        WHERE rec_iidcuenta = @clientId
-         AND rec_tfechahora BETWEEN @startDate AND @endDate`
+         AND rec_tfechahora BETWEEN @startDate AND @endDate
+         AND rec_calarma = '${PATROL_ARRIVAL_CODE}'` // ✅ ONLY V04 NOW
     ).join('\nUNION ALL\n');
 
     const query = `${unions} ORDER BY rec_tfechahora`;
@@ -605,36 +611,18 @@ async function fetchAllEventsFromDB(clientId, startDate, endDate, receptionTable
       .input('endDate', sql.DateTime, endDate)
       .query(query);
     
-    const patrolEvents = [];
-    const guardReports = [];
-    
-    // Process each event
-    for (const event of result.recordset) {
-      const alarmCode = (event.rec_calarma || '').toString().trim().toUpperCase();
-      
-      // V04 → Patrol arrivals
-      if (alarmCode === PATROL_ARRIVAL_CODE) {
-        patrolEvents.push(event);
-      }
-      // V03 → Guard reports/incidents
-      else if (alarmCode === GUARD_REPORT_CODE) {
-        guardReports.push({
-          ...event,
-          __type: 'INCIDENT_REPORT'
-        });
-      }
-    }
+    const patrolEvents = result.recordset || [];
     
     // Use canonical counter for V04 patrols
-    const completedCounts = countV04Patrols([...patrolEvents, ...guardReports]);
+    const completedCounts = countV04Patrols(patrolEvents);
     
-    logger.info(`✅ Database: ${Array.from(completedCounts.values()).reduce((a,b)=>a+b,0)} V04 patrols, ${guardReports.length} V03 incidents`);
+    logger.info(`✅ Database: ${Array.from(completedCounts.values()).reduce((a,b)=>a+b,0)} V04 patrols`);
     
-    return { patrolEvents, guardReports, completedCounts };
+    return { patrolEvents, completedCounts };
     
   } catch (error) {
     logger.error(`Error fetching events from database:`, error.message);
-    return { patrolEvents: [], guardReports: [], completedCounts: new Map() };
+    return { patrolEvents: [], completedCounts: new Map() };
   }
 }
 
@@ -704,8 +692,6 @@ function extractEventData(event, zoneMap, eventMap) {
     let eventDescription;
     if (alarmCode === PATROL_ARRIVAL_CODE) {
       eventDescription = 'VigiControl Arrival';
-    } else if (alarmCode === GUARD_REPORT_CODE) {
-      eventDescription = 'Guard Report';
     } else if (eventMap.get(alarmCode)) {
       eventDescription = eventMap.get(alarmCode);
     } else {
@@ -787,7 +773,7 @@ async function fetchClientScheduleAndExpectedPatrols(clientId, dates) {
       hasCustomSchedule = defaultSchedule.has_custom_schedule || false;
     }
     
-    // ✅ FIXED: Expected patrols = shift days × patrols per day
+    // Expected patrols = shift days × patrols per day
     const expectedPatrolsPerPost = dates.shiftDays * patrolsPerDay;
     
     logger.info(`📅 EXPECTED PATROLS: ${dates.shiftDays} shift days × ${patrolsPerDay} patrols/day = ${expectedPatrolsPerPost} per post`);
@@ -799,7 +785,7 @@ async function fetchClientScheduleAndExpectedPatrols(clientId, dates) {
       patrolDays,
       hasCustomSchedule,
       scheduleInfo: `${patrolsPerDay} patrols/day per post (${SHIFT_START_HOUR}:00 - ${SHIFT_END_HOUR}:00 next day)`,
-      shiftDays: dates.shiftDays, // ✅ Added for clarity
+      shiftDays: dates.shiftDays,
       calculation: `${dates.shiftDays} shift days × ${patrolsPerDay} patrols/day = ${expectedPatrolsPerPost} per post`
     };
     
@@ -819,41 +805,12 @@ async function fetchClientScheduleAndExpectedPatrols(clientId, dates) {
       patrolDays: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
       hasCustomSchedule: false,
       scheduleInfo: `${PATROLS_PER_DAY_PER_POST} patrols/day per post (${SHIFT_START_HOUR}:00 - ${SHIFT_END_HOUR}:00 next day)`,
-      shiftDays: dates.shiftDays, // ✅ Added for clarity
+      shiftDays: dates.shiftDays,
       calculation: `${dates.shiftDays} shift days × ${PATROLS_PER_DAY_PER_POST} patrols/day = ${expectedPatrolsPerPost} per post`
     };
     
     scheduleCache.set(cacheKey, { data: result, timestamp: Date.now() });
     return result;
-  }
-}
-
-/**
- * 🔍 Extract guard report text (V03 incidents only)
- */
-function extractGuardReportText(rawData) {
-  if (!rawData) return 'No details available';
-  
-  try {
-    const rawText = rawData.rec_cObservaciones || rawData.Observaciones || '';
-    if (!rawText.trim()) return 'No details available';
-    
-    const reports = rawText.split('[VigiControl]')
-      .filter(part => part.trim())
-      .map(part => {
-        let text = part.trim();
-        const adminIndex = text.indexOf('[Admin]');
-        if (adminIndex !== -1) {
-          text = text.substring(0, adminIndex).trim();
-        }
-        text = text.replace(/\[\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}\]/g, '').trim();
-        return text;
-      })
-      .filter(text => text);
-    
-    return reports.length > 0 ? reports.join('; ') : 'No details available';
-  } catch (error) {
-    return 'Error processing report';
   }
 }
 
@@ -892,7 +849,44 @@ async function getClientInfo(clientId) {
 }
 
 /**
- * 📊 MAIN: Fetch report - FLEXIBLE SHIFT-BASED LOGIC
+ * ✅ INTEGRATED: FETCH INCIDENTS FROM INCIDENT MODEL
+ */
+async function fetchIncidentsFromModel(clientId, startDate, endDate) {
+  try {
+    logger.info(`🔍 Fetching incidents from incidentModel: ${startDate} → ${endDate}`);
+    
+    const incidentResult = await getIncidentCount(
+      clientId,
+      startDate,
+      endDate
+    );
+    
+    if (!incidentResult.success) {
+      logger.warn(`⚠️ Incident model returned no data: ${incidentResult.error}`);
+      return [];
+    }
+    
+    logger.info(`✅ Incident model: ${incidentResult.totalIncidents} incidents found`);
+    
+    // Map incidents into report format
+    const guardReports = incidentResult.incidents.map(incident => ({
+      id: incident.id,
+      date: incident.date, // Already formatted as 'DD/MM/YYYY HH:mm:ss'
+      zone: incident.zone,
+      report: incident.observations || incident.content || 'No details available',
+      type: 'INCIDENT_REPORT'
+    }));
+    
+    return guardReports;
+    
+  } catch (error) {
+    logger.error(`❌ Error fetching incidents from model:`, error.message);
+    return [];
+  }
+}
+
+/**
+ * 📊 MAIN: Fetch report - WITH INCIDENT MODEL INTEGRATION
  */
 export const fetchPatrolReport = async (clientId, startDate, endDate, usePartitions = true, reportType = DEFAULT_REPORT_TYPES.CUSTOM) => {
   const reportStartTime = Date.now();
@@ -927,9 +921,20 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
 
     logger.info(`📊 Found ${allSecurityPosts.length} security posts`);
 
-    // Fetch events
-    let allEvents = [];
+    // ✅ INTEGRATION: Fetch incidents from incidentModel
     let guardReports = [];
+    const incidentFetchStart = Date.now();
+    
+    try {
+      guardReports = await fetchIncidentsFromModel(clientId, startDate, endDate);
+      logger.info(`✅ Incident fetch: ${guardReports.length} incidents (${Date.now() - incidentFetchStart}ms)`);
+    } catch (incidentError) {
+      logger.error(`⚠️ Incident fetch failed: ${incidentError.message}`);
+      guardReports = []; // Continue with empty incidents
+    }
+
+    // Fetch patrol events (V04 only)
+    let allEvents = [];
     let completedCounts = new Map();
     let dataSource = 'UNKNOWN';
     
@@ -943,57 +948,33 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         }
         
         allEvents = apiData.events;
-        guardReports = apiData.guardReports;
         completedCounts = apiData.completedCounts;
         dataSource = 'API';
       } catch (apiError) {
         logger.warn(`⚠️ API failed, falling back to DB: ${apiError.message}`);
         const dbData = await fetchAllEventsFromDB(clientId, dates.startDateTime, dates.endDateTime, tableNames);
-        allEvents = [...dbData.patrolEvents, ...dbData.guardReports];
-        guardReports = dbData.guardReports;
+        allEvents = dbData.patrolEvents;
         completedCounts = dbData.completedCounts;
         dataSource = 'DATABASE_FALLBACK';
       }
     } else {
       const dbData = await fetchAllEventsFromDB(clientId, dates.startDateTime, dates.endDateTime, tableNames);
-      allEvents = [...dbData.patrolEvents, ...dbData.guardReports];
-      guardReports = dbData.guardReports;
+      allEvents = dbData.patrolEvents;
       completedCounts = dbData.completedCounts;
       dataSource = 'DATABASE_DIRECT';
     }
     
-    // ✅ Filter events to only include those within the SHIFT window
-    logger.info(`📅 Before filtering: ${allEvents.length} total events`);
-    const originalCount = allEvents.length;
+    logger.info(`📅 Before filtering: ${allEvents.length} V04 patrol events`);
     
-    allEvents = filterEventsByDateRange(allEvents, dates);
+    // Filter patrols by shift window only (incidents already filtered by incidentModel)
+    const filteredPatrols = filterEventsByDateRange(allEvents, dates);
     
     // Re-count V04 patrols after filtering
-    completedCounts = countV04Patrols(allEvents);
-    
-    // ✅ FIXED: Filter guard reports using the same shift window with debug logging
-    const filteredGuardReports = [];
-    for (const report of guardReports) {
-      const eventDate = parseEventDate(report.rec_tfechahora);
-      if (eventDate && eventDate.isValid()) {
-        const isWithinRange = eventDate.isBetween(
-          dates.queryStart, 
-          dates.queryEnd, 
-          null, 
-          '[)'
-        );
-        
-        if (isWithinRange) {
-          filteredGuardReports.push(report);
-        } else if (logger.level === 'debug') {
-          logger.debug(`Skipped V03 report (outside shift window): ${report.rec_iid} at ${eventDate.format('DD/MM/YYYY HH:mm')}`);
-        }
-      }
-    }
-    
-    guardReports = filteredGuardReports;
-    
-    logger.info(`✅ After filtering: ${allEvents.length} events (removed ${originalCount - allEvents.length}), ${Array.from(completedCounts.values()).reduce((a,b)=>a+b,0)} V04 patrols, ${guardReports.length} V03 incidents`);
+    completedCounts = countV04Patrols(filteredPatrols);
+
+    logger.info(`✅ After filtering:`);
+    logger.info(`   Patrols (V04): ${filteredPatrols.length} within shift window`);
+    logger.info(`   Incidents (V03): ${guardReports.length} from incidentModel`);
 
     // Enhance zone matching for display
     const enhancedCounts = new Map();
@@ -1006,11 +987,7 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
     }
 
     // Process events for display (V04 patrols only)
-    const processedEvents = allEvents
-      .filter(event => {
-        const alarmCode = (event.rec_calarma || '').toString().trim().toUpperCase();
-        return alarmCode === PATROL_ARRIVAL_CODE;
-      })
+    const processedEvents = filteredPatrols
       .map(event => extractEventData(event, zoneMap, eventMap))
       .filter(event => event.Date !== 'N/A' || event.Zone !== 'Unknown Post');
 
@@ -1023,38 +1000,21 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
     
     logger.info(`📊 Performance: ${performanceResults.overallRate}% (${performanceResults.totalCompleted}/${performanceResults.totalExpected} V04 patrols)`);
 
-    // Process guard reports (V03 incidents only)
-    const processedGuardReports = guardReports.map(report => {
-      const parsedDate = parseEventDate(report.rec_tfechahora);
-      const reportDate = parsedDate && parsedDate.isValid() 
-        ? parsedDate.format('DD/MM/YYYY HH:mm')
-        : 'N/A';
-      const zoneName = zoneMap.get(String(report.rec_czona).trim()) || `Post ${report.rec_czona}`;
-      const reportText = extractGuardReportText(report);
-      
-      return {
-        id: report.rec_iid,
-        date: reportDate,
-        zone: zoneName,
-        report: reportText,
-        type: 'INCIDENT_REPORT'
-      };
-    });
-
-    // ✅ FIXED METADATA FOR SHIFT-BASED CALCULATIONS
+    // ✅ FIXED METADATA WITH SEPARATE SOURCES
     const totalTime = Date.now() - reportStartTime;
     const reportData = {
       posts: performanceResults.performanceData,
       events: processedEvents,        // V04 patrols only
-      guardReports: processedGuardReports, // V03 incidents only
+      guardReports: guardReports,     // V03 incidents from incidentModel
       metadata: {
-        // Flexible report type
+        // Report info
         reportType: reportType.toUpperCase(),
         patrolDefinition: {
           patrolCode: PATROL_ARRIVAL_CODE,
-          guardReportCode: GUARD_REPORT_CODE,
           patrolWindow: `${SHIFT_START_HOUR}:00 → ${SHIFT_END_HOUR}:00 next day`,
-          shiftDays: dates.shiftDays, // ✅ Now shows shift days
+          patrolFiltering: 'Shift-based (18:00→06:00)',
+          incidentFiltering: 'Calendar days via incidentModel.js',
+          shiftDays: dates.shiftDays,
           patrolsPerDay: scheduleData.patrolsPerDay,
           expectedPatrolsPerPost: expectedPatrolsPerPost
         },
@@ -1067,8 +1027,7 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         // Date info
         startDate: dates.displayStart,
         endDate: dates.displayEnd,
-        shiftDays: dates.shiftDays, // ✅ Changed from calendarDays to shiftDays
-        calendarDays: dates.shiftDays, // ✅ Backward compatibility
+        shiftDays: dates.shiftDays,
         
         // Performance metrics
         totalExpectedPatrols: expectedPatrolsPerPost * performanceResults.totalZones,
@@ -1077,6 +1036,10 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         patrolsPerDay: scheduleData.patrolsPerDay,
         expectedCalculation: scheduleData.calculation,
         
+        // Incident metrics
+        totalIncidents: guardReports.length,
+        incidentSource: 'incidentModel.js',
+        
         // System info
         generatedAt: new Date(),
         dataSource,
@@ -1084,6 +1047,7 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         processingTime: totalTime,
         timezone: TZ,
         shiftWindow: `${SHIFT_START_HOUR}:00 - ${SHIFT_END_HOUR}:00 next day`,
+        incidentWindow: '00:00 - 23:59 calendar days',
         dateRangeExplanation: `Patrol window: ${dates.displayStart} ${SHIFT_START_HOUR}:00 → ${dates.displayEnd} ${SHIFT_END_HOUR}:00`,
         
         // Data quality
@@ -1091,15 +1055,16 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
           isValid: true,
           reportType: reportType,
           postsCount: performanceResults.totalZones,
-          eventsCount: processedEvents.length,
-          guardReportsCount: processedGuardReports.length,
+          patrolsCount: filteredPatrols.length,
+          incidentsCount: guardReports.length,
           underperformingZones: performanceResults.underperformingZones,
           excellentZones: performanceResults.excellentZones,
           patrolsCounted: performanceResults.totalCompleted,
-          eventsFiltered: true,
-          eventsRemoved: originalCount - allEvents.length,
+          separateSources: true,
+          patrolsFrom: dataSource,
+          incidentsFrom: 'incidentModel.js',
           shiftBased: true,
-          shiftDays: dates.shiftDays, // ✅ Added
+          shiftDays: dates.shiftDays,
           flexibleRange: true
         },
         success: true
@@ -1112,7 +1077,7 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
     const completionRate = expectedTotal > 0 ? (totalV04 / expectedTotal * 100) : 0;
     
     if (totalV04 === 0) {
-      logger.error(`🚨 CRITICAL: No V04 patrols found for selected shift window!`);
+      logger.warn(`⚠️ No V04 patrols found for selected shift window!`);
     } else if (completionRate < 30) {
       logger.warn(`⚠️ LOW: ${totalV04} V04 patrols, expected ${expectedTotal} (${Math.round(completionRate)}%)`);
     } else if (completionRate > 110) {
@@ -1134,15 +1099,14 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         reportType: 'ERROR',
         patrolDefinition: {
           patrolCode: PATROL_ARRIVAL_CODE,
-          guardReportCode: GUARD_REPORT_CODE,
-          patrolWindow: `${SHIFT_START_HOUR}:00 → ${SHIFT_END_HOUR}:00 next day`
+          patrolWindow: `${SHIFT_START_HOUR}:00 → ${SHIFT_END_HOUR}:00 next day`,
+          incidentWindow: '00:00 → 23:59 calendar days'
         },
         clientId: parseInt(clientId) || 0,
         clientName: 'Unknown',
         startDate: startDate,
         endDate: endDate,
         shiftDays: 0,
-        calendarDays: 0, // Backward compatibility
         totalExpectedPatrols: 0,
         totalCompleted: 0,
         overallPerformance: 0,
@@ -1151,7 +1115,11 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
         usingAPI: USE_API,
         processingTime: Date.now() - reportStartTime,
         error: { message: error.message },
-        dataQuality: { isValid: false, flexibleRange: false },
+        dataQuality: { 
+          isValid: false, 
+          separateSources: false,
+          flexibleRange: false 
+        },
         success: false
       }
     };
@@ -1187,7 +1155,11 @@ export const createPatrolReportAPI = (app) => {
         success: reportData.metadata.success,
         data: reportData,
         timestamp: new Date(),
-        note: `Patrol window: ${SHIFT_START_HOUR}:00 - ${SHIFT_END_HOUR}:00 next day (${reportData.metadata.shiftDays} shift days)`
+        note: `Patrols from ${reportData.metadata.dataSource}, incidents from incidentModel.js`,
+        sources: {
+          patrols: reportData.metadata.dataSource,
+          incidents: 'incidentModel.js'
+        }
       });
       
     } catch (error) {
@@ -1229,7 +1201,11 @@ export const createPatrolReportAPI = (app) => {
         data: reportData,
         timestamp: new Date(),
         generatedFor: type,
-        dateRange: dateRange
+        dateRange: dateRange,
+        sources: {
+          patrols: reportData.metadata.dataSource,
+          incidents: 'incidentModel.js'
+        }
       });
       
     } catch (error) {
@@ -1251,53 +1227,12 @@ export const fetchWeeklyReport = async (clientId, startDate, endDate, usePartiti
   return fetchPatrolReport(clientId, startDate, endDate, usePartitions, DEFAULT_REPORT_TYPES.WEEKLY);
 };
 
-/**
- * 🧪 Test function for flexible date ranges
- */
-export const testFlexibleDateRange = async (clientId, startDate, endDate, reportType = 'custom') => {
-  try {
-    const dates = validateAndFormatDates(startDate, endDate, reportType);
-    
-    const testEvents = [
-      { rec_iid: 1, rec_tfechahora: '2025-12-17 17:59:59', rec_calarma: 'V04', rec_czona: 'ZONE1' }, // Before window
-      { rec_iid: 2, rec_tfechahora: '2025-12-17 18:00:00', rec_calarma: 'V04', rec_czona: 'ZONE1' }, // Start of window (INCLUDED)
-      { rec_iid: 3, rec_tfechahora: '2025-12-18 08:00:00', rec_calarma: 'V04', rec_czona: 'ZONE1' }, // Inside window (INCLUDED)
-      { rec_iid: 4, rec_tfechahora: '2025-12-25 05:59:59', rec_calarma: 'V04', rec_czona: 'ZONE2' }, // Just before end (INCLUDED)
-      { rec_iid: 5, rec_tfechahora: '2025-12-25 06:00:00', rec_calarma: 'V04', rec_czona: 'ZONE2' }, // At end time (EXCLUDED - boundary)
-      { rec_iid: 6, rec_tfechahora: '2025-12-25 06:00:01', rec_calarma: 'V04', rec_czona: 'ZONE2' }, // After window (EXCLUDED)
-      { rec_iid: 7, rec_tfechahora: '2025-12-20 10:00:00', rec_calarma: 'V03', rec_czona: 'ZONE3' }, // V03 incident
-    ];
-    
-    const filtered = filterEventsByDateRange(testEvents, dates);
-    const patrolCounts = countV04Patrols(filtered);
-    const v03Count = filtered.filter(e => e.rec_calarma === 'V03').length;
-    
-    return {
-      userRange: `${startDate} to ${endDate}`,
-      reportType: reportType,
-      shiftDays: dates.shiftDays, // ✅ Now shows shift days
-      shiftQueryRange: `${dates.queryStart.format('DD/MM/YYYY HH:mm:ss')} to ${dates.queryEnd.format('DD/MM/YYYY HH:mm:ss')}`,
-      totalEvents: testEvents.length,
-      filteredEvents: filtered.length,
-      v04PatrolsCounted: Array.from(patrolCounts.values()).reduce((a,b)=>a+b,0),
-      v03IncidentsCounted: v03Count,
-      explanation: `Events between ${SHIFT_START_HOUR}:00 (inclusive) and ${SHIFT_END_HOUR}:00 (exclusive)`,
-      flexible: true
-    };
-  } catch (error) {
-    return {
-      error: error.message,
-      flexible: true
-    };
-  }
-};
-
 export default {
   fetchPatrolReport,
   fetchWeeklyReport, // Backward compatibility
   createPatrolReportAPI,
-  testFlexibleDateRange,
+  filterEventsByDateRange,
   countV04Patrols,
   DEFAULT_REPORT_TYPES,
   generateDateRangeForReportType
-};  
+};

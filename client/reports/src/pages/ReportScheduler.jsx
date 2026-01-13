@@ -47,6 +47,9 @@ const SecurityReportsPage = () => {
 
   // Show/Hide Manual Report Section
   const [showManualReport, setShowManualReport] = useState(false);
+  
+  // Manual Report Sending State
+  const [isSendingReport, setIsSendingReport] = useState(false);
 
   // API Helper Function
   const fetchAPI = useCallback(async (url, options = {}) => {
@@ -189,9 +192,12 @@ const SecurityReportsPage = () => {
     }
   }, [fetchAPI, fetchSchedules]);
 
-  // Report Functions - SEND MANUAL REPORT
+  // Report Functions - SEND MANUAL REPORT (UPDATED WITH LOADING STATE)
   const sendReport = useCallback(async () => {
     try {
+      setIsSendingReport(true);
+      setError(null);
+      
       if (!reportForm.clientId) {
         setError('Please select a client');
         return;
@@ -236,6 +242,8 @@ const SecurityReportsPage = () => {
     } catch (reportError) {
       console.error('❌ Send report error:', reportError);
       setError(reportError.message);
+    } finally {
+      setIsSendingReport(false);
     }
   }, [reportForm, fetchAPI]);
 
@@ -546,7 +554,8 @@ const SecurityReportsPage = () => {
                     <select
                       value={reportForm.clientId}
                       onChange={(e) => setReportForm({ ...reportForm, clientId: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      disabled={isSendingReport}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     >
                       <option value="">Select a client</option>
                       {clients.map((client) => (
@@ -562,7 +571,8 @@ const SecurityReportsPage = () => {
                     <select
                       value={reportForm.reportPeriod}
                       onChange={(e) => setReportForm({ ...reportForm, reportPeriod: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      disabled={isSendingReport}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     >
                       <option value="previousWeek">Previous Week</option>
                       <option value="custom">Custom Range</option>
@@ -577,7 +587,8 @@ const SecurityReportsPage = () => {
                           type="date"
                           value={reportForm.startDate}
                           onChange={(e) => setReportForm({ ...reportForm, startDate: e.target.value })}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          disabled={isSendingReport}
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                         />
                       </div>
                       <div>
@@ -586,7 +597,8 @@ const SecurityReportsPage = () => {
                           type="date"
                           value={reportForm.endDate}
                           onChange={(e) => setReportForm({ ...reportForm, endDate: e.target.value })}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                          disabled={isSendingReport}
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                         />
                       </div>
                     </div>
@@ -601,7 +613,8 @@ const SecurityReportsPage = () => {
                       value={reportForm.recipientEmail}
                       onChange={(e) => setReportForm({ ...reportForm, recipientEmail: e.target.value })}
                       placeholder="Leave blank to use default"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                      disabled={isSendingReport}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
                     />
                     <p className="mt-1 text-xs text-gray-500">
                       If not provided, report will be sent to the client's default email
@@ -610,11 +623,20 @@ const SecurityReportsPage = () => {
 
                   <button
                     onClick={sendReport}
-                    disabled={!reportForm.clientId}
-                    className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium transition-colors"
+                    disabled={!reportForm.clientId || isSendingReport}
+                    className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium transition-colors"
                   >
-                    <Send size={16} />
-                    Send Report Now
+                    {isSendingReport ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" />
+                        Sending Report...
+                      </>
+                    ) : (
+                      <>
+                        <Send size={16} />
+                        Send Report Now
+                      </>
+                    )}
                   </button>
                 </div>
 

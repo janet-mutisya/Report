@@ -244,7 +244,6 @@ body {
 <div class="header-banner">
 <span class="shield-icon">🛡️</span>
 <h1>Security Operations Report</h1>
-<p>Professional Security Intelligence & Documentation</p>
 </div>
 <div class="content-wrapper">
 <div class="greeting-text">${greeting}, ${safeRecipient}</div>

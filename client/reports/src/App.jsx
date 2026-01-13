@@ -38,9 +38,9 @@ function ProtectedRoute({ children, allowedRoles = [] }) {
   return children;
 }
 
-// Main Navigation Component with Role-Based Menu
-function MainNav() {
-  const [menuOpen, setMenuOpen] = useState(false);
+// Sidebar Component with Role-Based Menu
+function Sidebar() {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [user, setUser] = useState(null);
   const navigate = useNavigate();
 
@@ -84,270 +84,192 @@ function MainNav() {
   const isAdmin = user?.role === 'admin';
 
   return (
-    <nav className="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 shadow-lg">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-16">
-          {/* Logo/Brand */}
+    <>
+      {/* Mobile Header */}
+      <div className="lg:hidden fixed top-0 left-0 right-0 z-50 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 shadow-lg">
+        <div className="flex justify-between items-center h-16 px-4">
           <Link 
             to={isAdmin ? "/admin" : "/client-dashboard"} 
             className="flex items-center group"
           >
             <Shield className="w-8 h-8 text-white mr-3" />
-            <h1 className="text-white text-2xl font-bold">
+            <h1 className="text-white text-xl font-bold">
               BM Security
             </h1>
           </Link>
 
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center space-x-2">
+          <button
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            className="text-white hover:bg-white/20 p-2 rounded-lg transition-colors"
+          >
+            {sidebarOpen ? (
+              <X className="w-6 h-6" />
+            ) : (
+              <Menu className="w-6 h-6" />
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Mobile Overlay */}
+      {sidebarOpen && (
+        <div 
+          className="lg:hidden fixed inset-0 bg-black/50 z-40"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar */}
+      <aside className={`
+        fixed top-0 left-0 h-full bg-gradient-to-b from-blue-600 via-indigo-600 to-purple-600 shadow-xl z-40
+        transition-transform duration-300 ease-in-out
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+        lg:translate-x-0 lg:w-64
+        w-64
+      `}>
+        <div className="flex flex-col h-full">
+          {/* Logo/Brand - Desktop Only */}
+          <div className="hidden lg:flex items-center h-16 px-6 border-b border-white/20">
+            <Link 
+              to={isAdmin ? "/admin" : "/client-dashboard"} 
+              className="flex items-center group"
+            >
+              <Shield className="w-8 h-8 text-white mr-3" />
+              <h1 className="text-white text-xl font-bold">
+                BM Security
+              </h1>
+            </Link>
+          </div>
+
+          {/* User Info */}
+          {user ? (
+            <div className="px-6 py-4 border-b border-white/20">
+              <div className="text-white">
+                <div className="font-medium text-sm truncate">{user.fullName || user.email}</div>
+                <div className="flex flex-col gap-1 mt-2">
+                  {user.companyName && (
+                    <span className="text-xs text-white/70 truncate">{user.companyName}</span>
+                  )}
+                  <span className={`text-xs px-2 py-1 rounded-full font-semibold inline-block w-fit ${
+                    isAdmin 
+                      ? 'bg-yellow-500 text-white' 
+                      : 'bg-green-500 text-white'
+                  }`}>
+                    {isAdmin ? 'Admin' : 'Client'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="px-6 py-4 border-b border-white/20">
+              <div className="text-white text-sm">Guest</div>
+            </div>
+          )}
+
+          {/* Navigation Menu */}
+          <nav className="flex-1 overflow-y-auto py-4 px-3">
             {user ? (
-              <>
-                {/* Show different menus based on role */}
+              <div className="space-y-1">
                 {isAdmin ? (
                   // Admin Menu Items
                   <>
                     <Link
                       to="/admin"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
+                      onClick={() => setSidebarOpen(false)}
+                      className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
-                      <BarChart3 className="w-5 h-5" />
+                      <BarChart3 className="w-5 h-5 flex-shrink-0" />
                       <span className="font-medium">Analytics</span>
                     </Link>
 
-                    
                     <Link
                       to="/backup-sync"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
+                      onClick={() => setSidebarOpen(false)}
+                      className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
-                      <Database className="w-5 h-5" />
-                      <span className="font-medium">Backup</span>
-                    </Link>
-
-                    <Link
-                      to="/scheduler"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
-                    >
-                      <Clock className="w-5 h-5" />
-                      <span className="font-medium">Scheduler</span>
-                    </Link>
-
-                    <Link
-                      to="/patrol-schedule"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
-                    >
-                      <MapPin className="w-5 h-5" />
-                      <span className="font-medium">Patrol</span>
-                    </Link>
-
-                    <Link
-                      to="/admin/clients"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
-                    >
-                      <Users className="w-5 h-5" />
-                      <span className="font-medium">Clients</span>
-                    </Link>
-                  </>
-                ) : (
-                  // Client Menu Items
-                  <>
-                    <Link
-                      to="/client-dashboard"
-                      className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
-                    >
-                      <BarChart3 className="w-5 h-5" />
-                      <span className="font-medium">Dashboard</span>
-                    </Link>
-                  </>
-                )}
-
-                {/* User Profile & Logout */}
-                <div className="flex items-center gap-3 ml-4 pl-4 border-l border-white/30">
-                  <div className="text-white text-sm">
-                    <div className="font-medium">{user.fullName || user.email}</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      {user.companyName && (
-                        <span className="text-xs text-white/70">{user.companyName}</span>
-                      )}
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
-                        isAdmin 
-                          ? 'bg-yellow-500 text-white' 
-                          : 'bg-green-500 text-white'
-                      }`}>
-                        {isAdmin ? 'Admin' : 'Client'}
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={handleLogout}
-                    className="flex items-center gap-2 text-white hover:bg-white/20 px-3 py-2 rounded-lg transition-colors"
-                    title="Logout"
-                  >
-                    <LogOut className="w-5 h-5" />
-                  </button>
-                </div>
-              </>
-            ) : (
-              // Public Menu (Login/Signup)
-              <>
-                <Link
-                  to="/login"
-                  className="flex items-center gap-2 text-white hover:bg-white/20 px-4 py-2 rounded-lg transition-colors"
-                >
-                  <User className="w-5 h-5" />
-                  <span className="font-medium">Login</span>
-                </Link>
-                <Link
-                  to="/signup"
-                  className="flex items-center gap-2 bg-white text-blue-600 hover:bg-blue-50 px-4 py-2 rounded-lg transition-colors font-medium"
-                >
-                  <span>Sign Up</span>
-                </Link>
-              </>
-            )}
-          </div>
-
-          {/* Mobile Menu Button */}
-          <div className="md:hidden">
-            <button
-              onClick={() => setMenuOpen(!menuOpen)}
-              className="text-white hover:bg-white/20 p-2 rounded-lg transition-colors"
-            >
-              {menuOpen ? (
-                <X className="w-6 h-6" />
-              ) : (
-                <Menu className="w-6 h-6" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Mobile Navigation */}
-        {menuOpen && (
-          <div className="md:hidden pb-4 space-y-2">
-            {user ? (
-              <>
-                {/* User Info */}
-                <div className="text-white px-4 py-3 border-b border-white/20 mb-2">
-                  <div className="font-medium">{user.fullName || user.email}</div>
-                  <div className="flex items-center gap-2 mt-1">
-                    {user.companyName && (
-                      <span className="text-xs text-white/70">{user.companyName}</span>
-                    )}
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${
-                      isAdmin 
-                        ? 'bg-yellow-500 text-white' 
-                        : 'bg-green-500 text-white'
-                    }`}>
-                      {isAdmin ? 'Admin' : 'Client'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Mobile Menu Items based on role */}
-                {isAdmin ? (
-                  // Admin Mobile Menu
-                  <>
-                    <Link
-                      to="/admin"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
-                    >
-                      <BarChart3 className="w-5 h-5" />
-                      <span className="font-medium">Analytics Dashboard</span>
-                    </Link>
-
-                    <Link
-                      to="/weekly-report"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
-                    >
-                      <FileText className="w-5 h-5" />
-                      <span className="font-medium">Weekly Reports</span>
-                    </Link>
-
-                    <Link
-                      to="/backup-sync"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
-                    >
-                      <Database className="w-5 h-5" />
+                      <Database className="w-5 h-5 flex-shrink-0" />
                       <span className="font-medium">Backup & Sync</span>
                     </Link>
 
                     <Link
                       to="/scheduler"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
+                      onClick={() => setSidebarOpen(false)}
+                      className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
-                      <Clock className="w-5 h-5" />
-                      <span className="font-medium">Report Scheduler</span>
+                      <Clock className="w-5 h-5 flex-shrink-0" />
+                      <span className="font-medium">Scheduler</span>
                     </Link>
 
                     <Link
                       to="/patrol-schedule"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
+                      onClick={() => setSidebarOpen(false)}
+                      className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
-                      <MapPin className="w-5 h-5" />
+                      <MapPin className="w-5 h-5 flex-shrink-0" />
                       <span className="font-medium">Patrol Schedule</span>
                     </Link>
 
                     <Link
                       to="/admin/clients"
-                      onClick={() => setMenuOpen(false)}
-                      className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
+                      onClick={() => setSidebarOpen(false)}
+                      className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
-                      <Users className="w-5 h-5" />
-                      <span className="font-medium">Client Management</span>
+                      <Users className="w-5 h-5 flex-shrink-0" />
+                      <span className="font-medium">Clients</span>
                     </Link>
                   </>
                 ) : (
-                  // Client Mobile Menu
+                  // Client Menu Items
                   <Link
                     to="/client-dashboard"
-                    onClick={() => setMenuOpen(false)}
-                    className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
+                    onClick={() => setSidebarOpen(false)}
+                    className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                   >
-                    <BarChart3 className="w-5 h-5" />
-                    <span className="font-medium">My Dashboard</span>
+                    <BarChart3 className="w-5 h-5 flex-shrink-0" />
+                    <span className="font-medium">Dashboard</span>
                   </Link>
                 )}
-
-                {/* Logout Button */}
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    handleLogout();
-                  }}
-                  className="flex items-center gap-3 text-white hover:bg-red-500/30 px-4 py-3 rounded-lg transition-colors w-full mt-4"
-                >
-                  <LogOut className="w-5 h-5" />
-                  <span className="font-medium">Logout</span>
-                </button>
-              </>
+              </div>
             ) : (
-              // Public Mobile Menu
-              <>
+              // Public Menu (Login/Signup)
+              <div className="space-y-1">
                 <Link
                   to="/login"
-                  onClick={() => setMenuOpen(false)}
-                  className="flex items-center gap-3 text-white hover:bg-white/20 px-4 py-3 rounded-lg transition-colors"
+                  onClick={() => setSidebarOpen(false)}
+                  className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                 >
+                  <User className="w-5 h-5 flex-shrink-0" />
                   <span className="font-medium">Login</span>
                 </Link>
                 <Link
                   to="/signup"
-                  onClick={() => setMenuOpen(false)}
-                  className="flex items-center gap-3 bg-white text-blue-600 hover:bg-blue-50 px-4 py-3 rounded-lg transition-colors font-medium"
+                  onClick={() => setSidebarOpen(false)}
+                  className="flex items-center gap-3 bg-white text-blue-600 hover:bg-blue-50 px-3 py-3 rounded-lg transition-colors font-medium"
                 >
                   <span>Sign Up</span>
                 </Link>
-              </>
+              </div>
             )}
-          </div>
-        )}
-      </div>
-    </nav>
+          </nav>
+
+          {/* Logout Button - Bottom */}
+          {user && (
+            <div className="px-3 py-4 border-t border-white/20">
+              <button
+                onClick={() => {
+                  setSidebarOpen(false);
+                  handleLogout();
+                }}
+                className="flex items-center gap-3 text-white hover:bg-red-500/30 px-3 py-3 rounded-lg transition-colors w-full"
+              >
+                <LogOut className="w-5 h-5 flex-shrink-0" />
+                <span className="font-medium">Logout</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
   );
 }
 
@@ -355,160 +277,154 @@ function App() {
   return (
     <Router>
       <div className="min-h-screen bg-gray-50">
-        <MainNav />
+        <Sidebar />
         
-        <main className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-          <Routes>
-            {/* Public Routes */}
-            <Route path="/login" element={<Login />} />
-            <Route path="/signup" element={<Signup />} />
+        {/* Main Content Area - Adjusted for sidebar */}
+        <main className="lg:ml-64 pt-16 lg:pt-0">
+          <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
+            <Routes>
+              {/* Public Routes */}
+              <Route path="/login" element={<Login />} />
+              <Route path="/signup" element={<Signup />} />
 
-            {/* Client Dashboard - Accessible to Authenticated Clients */}
-            <Route 
-              path="/client-dashboard" 
-              element={
-                <ProtectedRoute>
-                  <Dashboard />
-                </ProtectedRoute>
-              } 
-            />
+              {/* Client Dashboard - Accessible to Authenticated Clients */}
+              <Route 
+                path="/client-dashboard" 
+                element={
+                  <ProtectedRoute>
+                    <Dashboard />
+                  </ProtectedRoute>
+                } 
+              />
 
-            {/* Admin Routes */}
-            <Route 
-              path="/admin" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <WeeklyReport />
-                </ProtectedRoute>
-              } 
-            />
-            
-            <Route 
-              path="/admin/clients" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <AdminDashboard />
-                </ProtectedRoute>
-              } 
-            />
-            
-            <Route 
-              path="/weekly-report" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <WeeklyReport />
-                </ProtectedRoute>
-              } 
-            />
-            
-            <Route 
-              path="/backup-sync" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <BackupSync />
-                </ProtectedRoute>
-              } 
-            />
-            
-            <Route 
-              path="/scheduler" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <ReportScheduler />
-                </ProtectedRoute>
-              } 
-            />
-            
-            <Route 
-              path="/patrol-schedule" 
-              element={
-                <ProtectedRoute allowedRoles={['admin']}>
-                  <PatrolScheduleManager />
-                </ProtectedRoute>
-              } 
-            />
+              {/* Admin Routes */}
+              <Route 
+                path="/admin" 
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <WeeklyReport />
+                  </ProtectedRoute>
+                } 
+              />
+              
+              <Route 
+                path="/admin/clients" 
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <AdminDashboard />
+                  </ProtectedRoute>
+                } 
+              />
+              
+              <Route 
+                path="/backup-sync" 
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <BackupSync />
+                  </ProtectedRoute>
+                } 
+              />
+              
+              <Route 
+                path="/scheduler" 
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <ReportScheduler />
+                  </ProtectedRoute>
+                } 
+              />
+              
+              <Route 
+                path="/patrol-schedule" 
+                element={
+                  <ProtectedRoute allowedRoles={['admin']}>
+                    <PatrolScheduleManager />
+                  </ProtectedRoute>
+                } 
+              />
 
-            {/* Root Redirect based on role */}
-            <Route 
-              path="/" 
-              element={
-                (() => {
-                  const token = localStorage.getItem('token');
-                  const userData = localStorage.getItem('user');
-                  
-                  if (!token || !userData) {
-                    return <Navigate to="/login" replace />;
-                  }
-                  
-                  try {
-                    const user = JSON.parse(userData);
-                    if (user.role === 'admin') {
-                      return <Navigate to="/admin" replace />;
-                    } else {
-                      return <Navigate to="/client-dashboard" replace />;
+              {/* Root Redirect based on role */}
+              <Route 
+                path="/" 
+                element={
+                  (() => {
+                    const token = localStorage.getItem('token');
+                    const userData = localStorage.getItem('user');
+                    
+                    if (!token || !userData) {
+                      return <Navigate to="/login" replace />;
                     }
-                  } catch (error) {
-                    console.error('Error parsing user data:', error);
-                    return <Navigate to="/login" replace />;
-                  }
-                })()
-              } 
-            />
-
-            {/* Redirect old dashboard path */}
-            <Route 
-              path="/dashboard" 
-              element={
-                (() => {
-                  const token = localStorage.getItem('token');
-                  const userData = localStorage.getItem('user');
-                  
-                  if (!token || !userData) {
-                    return <Navigate to="/login" replace />;
-                  }
-                  
-                  try {
-                    const user = JSON.parse(userData);
-                    if (user.role === 'admin') {
-                      return <Navigate to="/admin" replace />;
-                    } else {
-                      return <Navigate to="/client-dashboard" replace />;
+                    
+                    try {
+                      const user = JSON.parse(userData);
+                      if (user.role === 'admin') {
+                        return <Navigate to="/admin" replace />;
+                      } else {
+                        return <Navigate to="/client-dashboard" replace />;
+                      }
+                    } catch (error) {
+                      console.error('Error parsing user data:', error);
+                      return <Navigate to="/login" replace />;
                     }
-                  } catch (error) {
-                    console.error('Error parsing user data:', error);
-                    return <Navigate to="/login" replace />;
-                  }
-                })()
-              } 
-            />
+                  })()
+                } 
+              />
 
-            {/* Fallback - Redirect to appropriate dashboard */}
-            <Route 
-              path="*" 
-              element={
-                (() => {
-                  const token = localStorage.getItem('token');
-                  const userData = localStorage.getItem('user');
-                  
-                  if (!token || !userData) {
-                    return <Navigate to="/login" replace />;
-                  }
-                  
-                  try {
-                    const user = JSON.parse(userData);
-                    if (user.role === 'admin') {
-                      return <Navigate to="/admin" replace />;
-                    } else {
-                      return <Navigate to="/client-dashboard" replace />;
+              {/* Redirect old dashboard path */}
+              <Route 
+                path="/dashboard" 
+                element={
+                  (() => {
+                    const token = localStorage.getItem('token');
+                    const userData = localStorage.getItem('user');
+                    
+                    if (!token || !userData) {
+                      return <Navigate to="/login" replace />;
                     }
-                  } catch (error) {
-                    console.error('Error parsing user data:', error);
-                    return <Navigate to="/login" replace />;
-                  }
-                })()
-              } 
-            />
-          </Routes>
+                    
+                    try {
+                      const user = JSON.parse(userData);
+                      if (user.role === 'admin') {
+                        return <Navigate to="/admin" replace />;
+                      } else {
+                        return <Navigate to="/client-dashboard" replace />;
+                      }
+                    } catch (error) {
+                      console.error('Error parsing user data:', error);
+                      return <Navigate to="/login" replace />;
+                    }
+                  })()
+                } 
+              />
+
+              {/* Fallback - Redirect to appropriate dashboard */}
+              <Route 
+                path="*" 
+                element={
+                  (() => {
+                    const token = localStorage.getItem('token');
+                    const userData = localStorage.getItem('user');
+                    
+                    if (!token || !userData) {
+                      return <Navigate to="/login" replace />;
+                    }
+                    
+                    try {
+                      const user = JSON.parse(userData);
+                      if (user.role === 'admin') {
+                        return <Navigate to="/admin" replace />;
+                      } else {
+                        return <Navigate to="/client-dashboard" replace />;
+                      }
+                    } catch (error) {
+                      console.error('Error parsing user data:', error);
+                      return <Navigate to="/login" replace />;
+                    }
+                  })()
+                } 
+              />
+            </Routes>
+          </div>
         </main>
       </div>
     </Router>

@@ -149,8 +149,13 @@ export default function SecurityDashboard() {
       const completed = parseInt(zone.ChecksCompleted) || 0;
       const expected = parseInt(zone.ExpectedChecks) || 0;
       
-      // Use the backend-calculated performance rate
-      const performanceRate = parseFloat(zone.PerformanceRate) || 0;
+      // Calculate performance rate correctly
+      let performanceRate = 0;
+      if (expected > 0) {
+        performanceRate = (completed / expected) * 100;
+      } else if (completed > 0) {
+        performanceRate = 100; // If no expected but completed, treat as 100%
+      }
       
       // Calculate if exceeded expectations
       const exceeded = completed > expected;
@@ -468,10 +473,18 @@ export default function SecurityDashboard() {
     const performanceRating = report.calculations.performanceRating || 'N/A';
     const expectedPerZone = report.calculations.expectedPerZone || 0;
 
+    // Calculate performance data properly - FIXED
     const performanceData = validSummary.map((row) => {
       const completed = parseInt(row.ChecksCompleted) || 0;
       const expected = parseInt(row.ExpectedChecks) || 0;
-      const performanceRate = row.actualPerformance || 0;
+      let performanceRate = 0;
+      
+      // Calculate performance rate correctly
+      if (expected > 0) {
+        performanceRate = (completed / expected) * 100;
+      } else if (completed > 0) {
+        performanceRate = 100; // If no expected but completed, treat as 100%
+      }
       
       return {
         name: row.SitePosts,
@@ -479,7 +492,7 @@ export default function SecurityDashboard() {
         expected: expected,
         rate: performanceRate,
         missed: Math.max(0, expected - completed),
-        exceeded: row.exceeded || false
+        exceeded: completed > expected
       };
     });
 
@@ -507,7 +520,7 @@ export default function SecurityDashboard() {
       totalIncidents,
       guardReportsData,
       totalMissedPatrols,
-      performanceData,
+      performanceData: performanceData.filter(p => p.name && p.name.trim().length > 0), // Filter out empty names
       totalCompleted,
       totalExpected,
       overallRate: Math.round(overallRate),
@@ -515,7 +528,7 @@ export default function SecurityDashboard() {
       efficiencyData,
       weeklyTrendData,
       scheduleInfo: report.schedule,
-      validZonesCount: report.calculations.validZonesCount,
+      validZonesCount: report.calculations.validZonesCount || performanceData.length,
       expectedPerZone: expectedPerZone,
       calculationMethod: report.calculations.method
     };
@@ -1538,7 +1551,7 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* Performance Charts */}
+            {/* COMPLETE WORKING PIE CHART WITH GRID WRAPPER */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
               {/* Performance Distribution Pie Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
@@ -1546,61 +1559,78 @@ export default function SecurityDashboard() {
                   <Target className="w-5 h-5 text-blue-600" />
                   Performance Distribution
                 </h3>
-                <ResponsiveContainer width="100%" height={320}>
-                  <PieChart>
-                    <Pie
-                      data={[
-                        { 
-                          name: 'Excellent (≥90%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 90 && !p.exceeded).length,
-                          fill: '#10b981'
-                        },
-                        { 
-                          name: 'Good (80-89%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 80 && p.rate < 90 && !p.exceeded).length,
-                          fill: '#84cc16'
-                        },
-                        { 
-                          name: 'Fair (70-79%)', 
-                          value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 80 && !p.exceeded).length,
-                          fill: '#eab308'
-                        },
-                        { 
-                          name: 'Poor (<70%)', 
-                          value: metrics.performanceData.filter(p => p.rate < 70 && !p.exceeded).length,
-                          fill: '#ef4444'
-                        },
-                        { 
-                          name: 'Exceeded Target', 
-                          value: metrics.performanceData.filter(p => p.exceeded).length,
-                          fill: '#3b82f6'
-                        }
-                      ].filter(item => item.value > 0)}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
-                      outerRadius={100}
-                      dataKey="value"
-                    >
-                    </Pie>
-                    <Tooltip 
-                      formatter={(value, name) => [value, name]}
-                      contentStyle={{ backgroundColor: "#fff", border: "1px solid #e5e7eb", borderRadius: "8px" }}
-                    />
-                    <Legend 
-                      verticalAlign="bottom" 
-                      height={36}
-                      iconType="circle"
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="mt-4 text-xs text-gray-600 text-center">
-                  Total Zones: {metrics.performanceData.length}
-                </div>
+                
+                {metrics.performanceData && metrics.performanceData.length > 0 ? (
+                  <>
+                    <ResponsiveContainer width="100%" height={320}>
+                      <PieChart>
+                        <Pie
+                          data={[
+                            { 
+                              name: 'Excellent (≥90%)', 
+                              value: metrics.performanceData.filter(p => p.rate >= 90 && !p.exceeded).length
+                            },
+                            { 
+                              name: 'Good (80-89%)', 
+                              value: metrics.performanceData.filter(p => p.rate >= 80 && p.rate < 90 && !p.exceeded).length
+                            },
+                            { 
+                              name: 'Fair (70-79%)', 
+                              value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 80 && !p.exceeded).length
+                            },
+                            { 
+                              name: 'Poor (<70%)', 
+                              value: metrics.performanceData.filter(p => p.rate < 70 && !p.exceeded).length
+                            },
+                            { 
+                              name: 'Exceeded Target', 
+                              value: metrics.performanceData.filter(p => p.exceeded).length
+                            }
+                          ].filter(item => item.value > 0)}
+                          cx="50%"
+                          cy="50%"
+                          labelLine={false}
+                          label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                          outerRadius={100}
+                          dataKey="value"
+                        >
+                          {[
+                            { value: metrics.performanceData.filter(p => p.rate >= 90 && !p.exceeded).length, color: '#10b981' },
+                            { value: metrics.performanceData.filter(p => p.rate >= 80 && p.rate < 90 && !p.exceeded).length, color: '#84cc16' },
+                            { value: metrics.performanceData.filter(p => p.rate >= 70 && p.rate < 80 && !p.exceeded).length, color: '#eab308' },
+                            { value: metrics.performanceData.filter(p => p.rate < 70 && !p.exceeded).length, color: '#ef4444' },
+                            { value: metrics.performanceData.filter(p => p.exceeded).length, color: '#3b82f6' }
+                          ].filter(item => item.value > 0).map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          formatter={(value, name) => [value, name]}
+                          contentStyle={{ 
+                            backgroundColor: "#fff", 
+                            border: "1px solid #e5e7eb", 
+                            borderRadius: "8px" 
+                          }}
+                        />
+                        <Legend 
+                          verticalAlign="bottom" 
+                          height={36}
+                          iconType="circle"
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="mt-4 text-xs text-gray-600 text-center">
+                      Total Zones: {metrics.performanceData.length}
+                    </div>
+                  </>
+                ) : (
+                  <div className="h-80 flex items-center justify-center">
+                    <p className="text-gray-500">No performance data available</p>
+                  </div>
+                )}
               </div>
 
-              {/* Performance Trend */}
+              {/* Performance Trend Line Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <BarChart3 className="w-5 h-5 text-blue-600" />

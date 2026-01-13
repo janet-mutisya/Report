@@ -1,4 +1,4 @@
-// server/service/bmSecurityAPI.js - PRODUCTION OPTIMIZED VERSION
+// server/service/bmSecurityAPI.js - PRODUCTION OPTIMIZED VERSION - FIXED
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -14,7 +14,7 @@ dotenv.config({ path: join(__dirname, '..', '.env') });
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
-dayjs.extend(minMax); // Added for min/max functionality
+dayjs.extend(minMax);
 
 const axiosInstance = axios.create({
   withCredentials: true,
@@ -23,7 +23,7 @@ const axiosInstance = axios.create({
 
 // Cache for API results with TTL
 const rawCache = new Map();
-const accountResolutionCache = new Map(); // Cache for negative account resolution
+const accountResolutionCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 // Concurrency limiter for parallel chunk fetching
@@ -78,10 +78,10 @@ class BMSecurityAPI {
       clientid: process.env.BM_API_CLIENT_ID
     };
 
-    // Concurrency limiter - 2 parallel chunks max (safe for BM API)
+    // Concurrency limiter - 2 parallel chunks max
     this.limiter = new ConcurrencyLimiter(2);
 
-    console.log('⚡ BMSecurity API Service initialized (PRODUCTION OPTIMIZED)');
+    console.log('⚡ BMSecurity API Service initialized (PRODUCTION OPTIMIZED - FIXED)');
     console.log(`  Base URL: ${this.baseURL}`);
     console.log(`  Parallel chunks: ${this.limiter.maxConcurrent}`);
     
@@ -95,11 +95,11 @@ class BMSecurityAPI {
     };
 
     // Clean old cache entries periodically
-    setInterval(() => this.cleanExpiredCache(), 5 * 60 * 1000); // Every 5 minutes
+    setInterval(() => this.cleanExpiredCache(), 5 * 60 * 1000);
   }
 
   /**
-   * 🔐 Login to BMSecurity API - WITH MUTEX & BUFFER
+   * 🔐 Login to BMSecurity API
    */
   async login() {
     try {
@@ -152,7 +152,7 @@ class BMSecurityAPI {
       }
       
       this.token = token;
-      this.tokenExpiry = Date.now() + (55 * 60 * 1000); // 55 minutes buffer (FIX: Cache token expiry buffer)
+      this.tokenExpiry = Date.now() + (55 * 60 * 1000); // 55 minutes buffer
       
       console.log('✅ BMSecurity API: Logged in successfully');
       
@@ -165,7 +165,7 @@ class BMSecurityAPI {
   }
 
   /**
-   * 🔄 Ensure we have a valid token - WITH MUTEX
+   * 🔄 Ensure we have a valid token
    */
   async ensureAuthenticated() {
     // If we have a valid token, use it
@@ -337,10 +337,10 @@ class BMSecurityAPI {
   }
 
   /**
-   * 🚀 OPTIMIZED FETCHING (PUBLIC API)
+   * 🚀 OPTIMIZED FETCHING (PUBLIC API) - FIXED FOR SINGLE-DAY QUERIES
    */
   async getPatrolEvents(accountNumber, startDate, endDate) {
-    // FIX: Timezone-safe cache key
+    // Timezone-safe cache key
     const cacheKey = [
       accountNumber || 'ALL',
       dayjs(startDate).tz('Africa/Nairobi').format('YYYY-MM-DD'),
@@ -375,7 +375,6 @@ class BMSecurityAPI {
     while (cursor.isBefore(endDateObj) || cursor.isSame(endDateObj, 'day')) {
       const chunkStart = cursor.toDate();
       const potentialEnd = cursor.add(CHUNK_SIZE_DAYS - 1, 'day');
-      // FIXED: Using dayjs.min() static method instead of instance method
       const chunkEnd = dayjs.min(potentialEnd, endDateObj).toDate();
       chunks.push([chunkStart, chunkEnd]);
       cursor = dayjs(chunkEnd).add(1, 'day');
@@ -383,7 +382,7 @@ class BMSecurityAPI {
 
     console.log(`📊 Processing ${daysInRange} days in ${chunks.length} chunks`);
 
-    // FIX: Cache negative account resolution
+    // 🔥 FIX: Account resolution (only if accountNumber provided)
     if (accountNumber) {
       const cacheKey = `account_resolution_${accountNumber}`;
       const cachedResolution = accountResolutionCache.get(cacheKey);
@@ -392,10 +391,9 @@ class BMSecurityAPI {
         resolvedAccount = cachedResolution.variant;
         console.log(`✅ Using cached account variant: ${resolvedAccount}`);
       } else {
-        // Try each variant
+        // Try each variant with first chunk
         for (const variant of accountVariants) {
           try {
-            // Test with first chunk
             const testEvents = await this.fetchPatrolEventsRange(variant, chunks[0][0], chunks[0][1], 0);
             if (testEvents.length > 0) {
               resolvedAccount = variant;
@@ -426,17 +424,30 @@ class BMSecurityAPI {
         }
       }
     } else {
+      // 🔥 FIX: For null accountNumber, use empty string
       resolvedAccount = '';
+      console.log('✅ No account filter - fetching all accounts');
     }
 
-    // OPTIMIZATION: Parallel chunk fetching with concurrency limit
-    if (chunks.length > 1) {
-      const remainingChunks = chunks.slice(resolvedAccount ? 1 : 0);
-      const chunkPromises = remainingChunks.map(([chunkStart, chunkEnd], index) => 
-        this.limiter.run(() => 
-          this.fetchPatrolEventsRange(resolvedAccount, chunkStart, chunkEnd, index + 1)
-        )
-      );
+    // 🔥 CRITICAL FIX: Determine which chunks still need to be fetched
+    // If account was resolved, we already fetched chunk 0, so skip it
+    // If no account (null), we need to fetch ALL chunks including chunk 0
+    const chunksToFetch = accountNumber && resolvedAccount && chunks.length > 1
+      ? chunks.slice(1)  // Skip first chunk (already fetched during account resolution)
+      : accountNumber && resolvedAccount && chunks.length === 1
+      ? []               // Single chunk already fetched during resolution
+      : chunks;          // No account number: fetch all chunks
+
+    console.log(`📋 Chunks to fetch: ${chunksToFetch.length}/${chunks.length} (${accountNumber ? 'account-filtered' : 'all-accounts'})`);
+
+    // 🔥 FIX: Fetch remaining chunks (works for single-day AND multi-day AND null account)
+    if (chunksToFetch.length > 0) {
+      const chunkPromises = chunksToFetch.map(([chunkStart, chunkEnd], index) => {
+        const actualChunkIndex = accountNumber && resolvedAccount && chunks.length > 1 ? index + 1 : index;
+        return this.limiter.run(() => 
+          this.fetchPatrolEventsRange(resolvedAccount, chunkStart, chunkEnd, actualChunkIndex)
+        );
+      });
 
       const chunkResults = await Promise.allSettled(chunkPromises);
       
@@ -451,7 +462,7 @@ class BMSecurityAPI {
 
     console.log(`\n🧮 RAW EVENTS AFTER CHUNK FETCHES: ${allEvents.length}`);
 
-    // FIX: Final deduplication (cross-page/cross-chunk safety)
+    // Final deduplication (cross-page/cross-chunk safety)
     const dedupedEvents = this.dedupeBMEvents(allEvents);
     console.log(`🧮 FINAL EVENTS AFTER DEDUPE: ${dedupedEvents.length}`);
 
@@ -593,7 +604,7 @@ class BMSecurityAPI {
         eventsCount: result.total,
         daysCovered: result.daysCovered,
         cacheSize: rawCache.size,
-        message: 'Production optimized API: chunking + parallel + caching'
+        message: 'Production optimized API: chunking + parallel + caching (FIXED)'
       };
     } catch (error) {
       return { success: false, error: error.message };
@@ -615,7 +626,7 @@ class BMSecurityAPI {
     }
     
     for (const [key, value] of accountResolutionCache.entries()) {
-      if (now - value.timestamp > 5 * 60 * 1000) { // 5 minutes for account resolution
+      if (now - value.timestamp > 5 * 60 * 1000) {
         accountResolutionCache.delete(key);
         cleaned++;
       }
@@ -651,7 +662,7 @@ class BMSecurityAPI {
     return {
       rawCache: {
         size: rawCache.size,
-        keys: Array.from(rawCache.keys()).slice(0, 10) // First 10 keys only
+        keys: Array.from(rawCache.keys()).slice(0, 10)
       },
       accountResolutionCache: {
         size: accountResolutionCache.size

@@ -1,4 +1,4 @@
-// server/service/pdfService.js - CLIENT-FRIENDLY VERSION WITH ALL EVENTS
+// server/service/pdfService.js - FIXED INCIDENT REPORTS VERSION WITH ZONE NAMES
 import PDFDocument from "pdfkit";
 import dayjs from "dayjs";
 import fs from 'fs';
@@ -144,141 +144,231 @@ function calculateActualDays(startDate, endDate) {
 }
 
 /**
- * Extract and format incident text
+ * Extract clean incident description from raw text
+ * Removes timestamps, tags, and formatting artifacts
  */
-function extractIncidentReport(event) {
-  try {
-    // First check if it's already a processed guard report
-    if (event.report) {
-      return event.report;
-    }
-    
-    // Extract from raw V03 event data
-    const rawText = event.rec_cObservaciones || 
-                    event.Observaciones || 
-                    event.observaciones || 
-                    event.rec_cContenido || 
-                    '';
-    
-    if (!rawText.trim()) {
-      return 'No details provided';
-    }
-    
-    let cleanText = rawText.trim();
-    
-    // Remove [VigiControl] tags and timestamps
-    cleanText = cleanText.replace(/\[VigiControl\]/gi, '');
-    cleanText = cleanText.replace(/\[\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}\]/g, '');
-    
-    // Remove [Admin] sections
-    const adminIndex = cleanText.indexOf('[Admin]');
-    if (adminIndex !== -1) {
-      cleanText = cleanText.substring(0, adminIndex).trim();
-    }
-    
-    // Clean up multiple spaces and newlines
-    cleanText = cleanText.replace(/\s+/g, ' ').trim();
-    
-    return cleanText || 'Incident reported (no details)';
-  } catch (error) {
-    logger.warn(`Error extracting incident text: ${error.message}`);
-    return 'Error processing incident details';
-  }
+function extractIncidentDescription(rawText) {
+  if (!rawText) return '';
+  
+  let cleaned = rawText.trim();
+  
+  // Remove timestamp patterns like [08/01/2026 17:17:50] or [08/01/2026 17:17]
+  cleaned = cleaned.replace(/\[\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(:\d{2})?\]/g, '');
+  
+  // Remove [VigiControl] and similar tags
+  cleaned = cleaned.replace(/\[vigicontrol\]/gi, '');
+  cleaned = cleaned.replace(/\[irservices\]/gi, '');
+  
+  // Remove any remaining square bracket content at the start
+  cleaned = cleaned.replace(/^\s*\[.*?\]\s*/g, '');
+  
+  // Clean up multiple spaces and newlines
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  return cleaned;
 }
 
 /**
- * Categorize incidents based on content
+ * Get zone name with comprehensive fallback strategy
  */
-function categorizeIncident(incidentText) {
-  const text = incidentText.toLowerCase();
+function getZoneName(incidentData) {
+  // Priority 1: Check specific zone fields
+  if (incidentData.zone) return cleanPostName(incidentData.zone);
+  if (incidentData.zoneName) return cleanPostName(incidentData.zoneName);
+  if (incidentData.zone_name) return cleanPostName(incidentData.zone_name);
+  if (incidentData.Zone) return cleanPostName(incidentData.Zone);
   
-  if (text.includes('theft') || text.includes('steal') || text.includes('robbery')) {
-    return 'THEFT';
-  } else if (text.includes('vandal') || text.includes('damage') || text.includes('broken')) {
-    return 'VANDALISM';
-  } else if (text.includes('fire') || text.includes('smoke') || text.includes('flame')) {
-    return 'FIRE';
-  } else if (text.includes('suspicious') || text.includes('unknown') || text.includes('strange')) {
-    return 'SUSPICIOUS ACTIVITY';
-  } else if (text.includes('medical') || text.includes('injury') || text.includes('hurt')) {
-    return 'MEDICAL EMERGENCY';
-  } else if (text.includes('power') || text.includes('electricity') || text.includes('outage')) {
-    return 'POWER OUTAGE';
-  } else if (text.includes('security') || text.includes('breach') || text.includes('intruder')) {
-    return 'SECURITY BREACH';
-  } else if (text.includes('equipment') || text.includes('fault') || text.includes('malfunction')) {
-    return 'EQUIPMENT ISSUE';
-  } else if (text.includes('weather') || text.includes('rain') || text.includes('storm')) {
-    return 'WEATHER RELATED';
-  } else if (text.includes('animal') || text.includes('dog') || text.includes('wildlife')) {
-    return 'ANIMAL INCIDENT';
+  // Priority 2: Check post fields
+  if (incidentData.post) return cleanPostName(incidentData.post);
+  if (incidentData.postName) return cleanPostName(incidentData.postName);
+  if (incidentData.post_name) return cleanPostName(incidentData.post_name);
+  if (incidentData.SecurityPost) return cleanPostName(incidentData.SecurityPost);
+  
+  // Priority 3: Check rec_czona fields
+  if (incidentData.rec_czona) return `Zone ${incidentData.rec_czona}`;
+  if (incidentData.rec_czonanombre) return cleanPostName(incidentData.rec_czonanombre);
+  
+  // Priority 4: Try to extract from description
+  if (incidentData.description || incidentData.report) {
+    const text = (incidentData.description || incidentData.report || '').toLowerCase();
+    const zoneMatch = text.match(/zone\s+(\w+)/i) || 
+                     text.match(/post\s+(\w+)/i) ||
+                     text.match(/at\s+(.+?)\s+post/i) ||
+                     text.match(/in\s+(.+?)\s+area/i);
+    if (zoneMatch && zoneMatch[1]) {
+      return cleanPostName(zoneMatch[1].toUpperCase());
+    }
   }
   
-  return 'GENERAL INCIDENT';
+  // Priority 5: Try location field
+  if (incidentData.location) return cleanPostName(incidentData.location);
+  
+  // Fallback
+  return 'Unknown Location';
 }
 
 /**
- * Process guard reports (incident reports)
+ * Process guard reports - Extract FULL incident details with zone names
  */
 function processGuardReports(reportData) {
   const incidents = [];
   
-  // Method 1: Check guardReports array
+  logger.info('🔍 Processing guard reports for incidents...');
+  
+  // Method 1: Check guardReports array (primary source)
   if (Array.isArray(reportData.guardReports) && reportData.guardReports.length > 0) {
-    reportData.guardReports.forEach(report => {
+    logger.info(`   Found ${reportData.guardReports.length} guard reports to process`);
+    
+    reportData.guardReports.forEach((report, index) => {
+      logger.debug(`   Report ${index + 1}:`, {
+        type: report.type || report.__type,
+        hasZone: !!report.zone,
+        hasPost: !!report.post,
+        hasZoneName: !!report.zoneName,
+        hasReport: !!report.report,
+        hasIncidentName: !!report.incidentName,
+        hasTitle: !!report.title
+      });
+      
       if (report.type === 'INCIDENT_REPORT' || report.__type === 'INCIDENT_REPORT') {
-        const incidentText = report.report || 'No details provided';
-        const category = categorizeIncident(incidentText);
+        const rawDescription = report.report || report.description || report.content || '';
+        const cleanDescription = extractIncidentDescription(rawDescription);
+        
+        // Parse date/time
+        let incidentDate = 'N/A';
+        let incidentTime = 'N/A';
+        if (report.date) {
+          const dateObj = dayjs(report.date);
+          if (dateObj.isValid()) {
+            incidentDate = dateObj.format('DD/MM/YYYY');
+            incidentTime = dateObj.format('HH:mm:ss');
+          }
+        }
+        
+        // Get zone name with fallback
+        const zoneName = getZoneName(report);
         
         incidents.push({
           id: report.id || report.rec_iid || `inc-${incidents.length + 1}`,
-          date: report.date || 'N/A',
-          zone: report.zone || 'Unknown Post',
-          report: incidentText,
-          category: category,
-          priority: category.includes('THEFT') || category.includes('FIRE') || category.includes('MEDICAL') ? 'HIGH' : 'MEDIUM'
+          date: incidentDate,
+          time: incidentTime,
+          dateTime: report.date || 'N/A',
+          zone: zoneName,
+          description: cleanDescription,
+          priority: report.priority || 'MEDIUM',
+          reportedBy: report.guardName || report.officer || report.reportedBy || 'Guard',
+          rawText: rawDescription,
+          source: 'guardReport'
         });
+        
+        logger.info(`   ✅ Added incident from guard report:`);
+        logger.info(`      Zone: ${zoneName}`);
+        logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
       }
     });
   }
   
-  // Method 2: Check events array for any incident events (fallback)
+  // Method 2: Check events array for V03 (incident) events
   if (incidents.length === 0 && Array.isArray(reportData.events)) {
-    reportData.events.forEach(event => {
+    logger.info(`   No guardReports found, checking ${reportData.events.length} events...`);
+    
+    reportData.events.forEach((event, index) => {
       const alarmCode = (event.rec_calarma || event.AlarmCode || '').toString().trim().toUpperCase();
       
       if (alarmCode === 'V03') {
-        const incidentText = extractIncidentReport(event);
-        const category = categorizeIncident(incidentText);
+        logger.debug(`   Event ${index + 1} is V03 (incident)`);
         
-        // Parse date
+        // Get raw text content
+        const rawText = event.rec_cObservaciones || 
+                        event.Observaciones || 
+                        event.observaciones || 
+                        event.rec_cContenido || 
+                        '';
+        
+        const cleanDescription = extractIncidentDescription(rawText);
+        
+        // Parse date/time
         let incidentDate = 'N/A';
+        let incidentTime = 'N/A';
         if (event.rec_tfechahora) {
           const dateObj = dayjs(event.rec_tfechahora);
           if (dateObj.isValid()) {
-            incidentDate = dateObj.format('DD/MM/YYYY HH:mm');
+            incidentDate = dateObj.format('DD/MM/YYYY');
+            incidentTime = dateObj.format('HH:mm:ss');
           }
         }
         
-        // Get zone name
-        let zoneName = event.Zone || 'Unknown Post';
-        if (!zoneName || zoneName === 'Unknown Post') {
-          zoneName = event.rec_czona ? `Post ${event.rec_czona}` : 'Unknown Post';
-        }
+        // Get zone name with comprehensive fallback
+        const zoneName = getZoneName(event);
         
         incidents.push({
           id: event.rec_iid || `inc-${incidents.length + 1}`,
           date: incidentDate,
+          time: incidentTime,
+          dateTime: event.rec_tfechahora || 'N/A',
           zone: zoneName,
-          report: incidentText,
-          category: category,
-          priority: category.includes('THEFT') || category.includes('FIRE') || category.includes('MEDICAL') ? 'HIGH' : 'MEDIUM'
+          description: cleanDescription,
+          priority: 'MEDIUM',
+          reportedBy: event.rec_coperador || event.Operator || 'Guard',
+          rawText: rawText,
+          source: 'event'
         });
+        
+        logger.info(`   ✅ Added incident from event:`);
+        logger.info(`      Zone: ${zoneName}`);
+        logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
       }
     });
   }
   
-  logger.info(`📊 Processed ${incidents.length} incident reports`);
+  // Method 3: Check incidents array directly
+  if (incidents.length === 0 && Array.isArray(reportData.incidents)) {
+    logger.info(`   Checking incidents array (${reportData.incidents.length} items)...`);
+    
+    reportData.incidents.forEach((incident, index) => {
+      const rawDescription = incident.description || incident.notes || incident.details || '';
+      const cleanDescription = extractIncidentDescription(rawDescription);
+      
+      // Parse date/time
+      let incidentDate = 'N/A';
+      let incidentTime = 'N/A';
+      if (incident.date || incident.incidentDate) {
+        const dateObj = dayjs(incident.date || incident.incidentDate);
+        if (dateObj.isValid()) {
+          incidentDate = dateObj.format('DD/MM/YYYY');
+          incidentTime = dateObj.format('HH:mm:ss');
+        }
+      }
+      
+      // Get zone name with comprehensive fallback
+      const zoneName = getZoneName(incident);
+      
+      incidents.push({
+        id: incident.id || incident.incidentId || `inc-${incidents.length + 1}`,
+        date: incidentDate,
+        time: incidentTime,
+        dateTime: incident.date || incident.incidentDate || 'N/A',
+        zone: zoneName,
+        description: cleanDescription,
+        priority: incident.priority || incident.severity || 'MEDIUM',
+        reportedBy: incident.reportedBy || incident.reporter || 'Guard',
+        rawText: rawDescription,
+        source: 'incidentsArray'
+      });
+      
+      logger.info(`   ✅ Added incident from incidents array:`);
+      logger.info(`      Zone: ${zoneName}`);
+      logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
+    });
+  }
+  
+  logger.info(`📊 Processed ${incidents.length} total incidents`);
+  
+  // Debug log all incidents with zones
+  incidents.forEach((incident, idx) => {
+    logger.debug(`   Incident ${idx + 1}: Zone="${incident.zone}", Desc="${incident.description.substring(0, 40)}..."`);
+  });
+  
   return incidents;
 }
 
@@ -294,11 +384,13 @@ function processPatrolEvents(reportData) {
       
       // Only include patrol arrivals in activity log
       if (alarmCode === 'V04') {
+        const zoneName = getZoneName(event);
+        
         patrolEvents.push({
-          Date: event.Date || 'N/A',
-          Time: event.Time || 'N/A',
-          Event: 'Vigicontrol Arrival',
-          Zone: event.Zone || 'Unknown Post'
+          Date: event.Date || formatDate(event.rec_tfechahora) || 'N/A',
+          Time: event.Time || (event.rec_tfechahora ? dayjs(event.rec_tfechahora).format('HH:mm:ss') : 'N/A'),
+          Event: 'VigiControl Arrival',
+          Zone: zoneName
         });
       }
     });
@@ -346,8 +438,8 @@ export async function generateDashboardPDF(clientData) {
 
     // Process data correctly
     const posts = Array.isArray(reportData.posts) ? reportData.posts : [];
-    const incidents = processGuardReports(reportData);  // Incident reports only
-    const patrolEvents = processPatrolEvents(reportData);  // Patrol logs only
+    const incidents = processGuardReports(reportData);
+    const patrolEvents = processPatrolEvents(reportData);
     
     logger.info(`✅ Data processed:`);
     logger.info(`   - Security Posts: ${posts.length}`);
@@ -368,15 +460,23 @@ export async function generateDashboardPDF(clientData) {
     // Calculate actual days for display
     const actualDays = calculateActualDays(startDate, endDate);
     
+    const totalIncidents = incidents.length;
+    const highPriorityIncidents = incidents.filter(i => i.priority === 'HIGH').length;
+    
     logger.info(`📊 Performance Metrics:`);
     logger.info(`   - Overall: ${overallPerformance}%`);
     logger.info(`   - Completed Patrols: ${totalCompleted}`);
     logger.info(`   - Expected Patrols: ${totalExpectedPatrols}`);
-    logger.info(`   - Incidents Reported: ${incidents.length}`);
+    logger.info(`   - Incidents Reported: ${totalIncidents}`);
     logger.info(`   - Period: ${actualDays} days`);
+    
+    // Log all incident zones for debugging
+    incidents.forEach((incident, idx) => {
+      logger.info(`   Incident ${idx + 1}: Zone="${incident.zone}"`);
+    });
 
     // Warn if no data
-    if (posts.length === 0 && patrolEvents.length === 0 && incidents.length === 0) {
+    if (posts.length === 0 && patrolEvents.length === 0 && totalIncidents === 0) {
       logger.warn('⚠️ WARNING: No data found for this report!');
     }
 
@@ -460,7 +560,7 @@ export async function generateDashboardPDF(clientData) {
          .text('BM SECURITY', logoX, logoY + 10);
     }
 
-    // Header text content - REMOVED PATROL WINDOW STATEMENT
+    // Header text content
     const headerTextX = logoX + logoWidth + 15;
     const headerTextY = logoY + 15;
     
@@ -493,11 +593,7 @@ export async function generateDashboardPDF(clientData) {
                            overallPerformance >= 80 ? 'GOOD' : 
                            overallPerformance >= 70 ? 'SATISFACTORY' : 'NEEDS IMPROVEMENT';
 
-    // Calculate high-priority incidents
-    const highPriorityIncidents = incidents.filter(i => i.priority === 'HIGH').length;
-    const totalIncidents = incidents.length;
-
-    // Metrics with client-friendly language - NO TECHNICAL TERMS
+    // Metrics with client-friendly language
     const metrics = [
       { 
         label: 'Overall Performance', 
@@ -510,10 +606,10 @@ export async function generateDashboardPDF(clientData) {
         subtext: `${dataQuality.excellentZones || 0} excellent, ${dataQuality.underperformingZones || 0} needs attention`
       },
       { 
-        label: 'Incident Reports', 
+        label: 'Security Incidents', 
         value: totalIncidents, 
         subtext: totalIncidents === 0 ? 'All clear - no incidents' : 
-                 `${highPriorityIncidents} high priority incidents`
+                 `${highPriorityIncidents} high priority incidents reported`
       },
       { 
         label: 'Patrol Activities', 
@@ -547,20 +643,20 @@ export async function generateDashboardPDF(clientData) {
 
     yPos += 125;
 
-    // ==================== INCIDENT REPORTS SECTION ====================
-    logger.info(`📋 Rendering incident reports section (${totalIncidents} incidents)...`);
+    // ==================== INCIDENT REPORTS SECTION - DETAILED WITH ZONES ====================
+    logger.info(`📋 Rendering detailed incident reports section (${totalIncidents} incidents)...`);
     
     checkPageBreak(120);
     
     doc.fillColor(COLORS.primary)
        .fontSize(16)
        .font('Helvetica-Bold')
-       .text('INCIDENT REPORTS', 40, yPos);
+       .text('SECURITY INCIDENTS REPORTED', 40, yPos);
     
     yPos += 30;
 
     if (totalIncidents === 0) {
-      // Show positive message instead of technical "no V03 reports"
+      // Show positive message
       doc.strokeColor(COLORS.gray[300])
          .lineWidth(1)
          .rect(40, yPos, pageWidth, 50)
@@ -582,91 +678,98 @@ export async function generateDashboardPDF(clientData) {
       
       yPos += 65;
     } else {
-      // Show incident count summary
-      doc.fillColor(COLORS.gray[600])
-         .fontSize(10)
-         .font('Helvetica')
-         .text(`Total: ${totalIncidents} incident${totalIncidents !== 1 ? 's' : ''} reported`, 40, yPos);
+      // Show total count
+      doc.fillColor(COLORS.black)
+         .fontSize(11)
+         .font('Helvetica-Bold')
+         .text(`Total Security Incidents Reported: ${totalIncidents}`, 40, yPos);
       
-      yPos += 25;
+      yPos += 30;
 
-      // Display each incident report with full details
+      // Table header
+      doc.fillColor(COLORS.primary)
+         .rect(40, yPos, pageWidth, 24)
+         .fill();
+      
+      doc.fillColor(COLORS.white)
+         .fontSize(9)
+         .font('Helvetica-Bold')
+         .text('#', 45, yPos + 8, { width: 25 })
+         .text('DATE', 75, yPos + 8, { width: 80 })
+         .text('TIME', 160, yPos + 8, { width: 60 })
+         .text('LOCATION/ZONE', 225, yPos + 8, { width: 120 })
+         .text('INCIDENT DESCRIPTION', 350, yPos + 8, { width: 195 });
+      
+      yPos += 24;
+
+      // Display each incident with full details including zone
       incidents.forEach((incident, index) => {
-        logger.debug(`   Rendering incident #${index + 1}: ${incident.category}`);
+        // Calculate row height based on description and zone length
+        const descriptionLines = wrapText(doc, incident.description, 195, 8);
+        const zoneLines = wrapText(doc, incident.zone, 120, 8);
+        const maxLines = Math.max(descriptionLines.length, zoneLines.length);
+        const rowHeight = Math.max(30, maxLines * 11 + 15);
         
-        const reportLines = wrapText(doc, incident.report, 450, 9);
-        const reportHeight = 95 + (reportLines.length * 12);
+        checkPageBreak(rowHeight + 5);
         
-        checkPageBreak(reportHeight + 25);
-        
-        // Incident card with border
-        const cardColor = incident.priority === 'HIGH' ? '#fef2f2' : '#f0f9ff';
-        const borderColor = incident.priority === 'HIGH' ? '#dc2626' : COLORS.primary;
-        
-        doc.strokeColor(borderColor)
-           .lineWidth(1.5)
-           .rect(40, yPos, pageWidth, reportHeight)
-           .stroke();
-        
-        doc.fillColor(cardColor)
-           .rect(40, yPos, pageWidth, reportHeight)
-           .fill();
-        
-        // Incident header with category
-        doc.fillColor(borderColor)
-           .fontSize(12)
-           .font('Helvetica-Bold')
-           .text(`INCIDENT #${index + 1} - ${incident.category}`, 50, yPos + 12);
-        
-        // Priority badge
-        if (incident.priority === 'HIGH') {
-          doc.fillColor('#dc2626')
-             .fontSize(8)
-             .font('Helvetica-Bold')
-             .text('HIGH PRIORITY', 400, yPos + 14);
+        // Alternating row colors
+        if (index % 2 === 0) {
+          doc.fillColor(COLORS.gray[100])
+             .rect(40, yPos, pageWidth, rowHeight)
+             .fill();
         }
         
-        yPos += 32;
-        
-        // Description label
+        // Row number
         doc.fillColor(COLORS.black)
            .fontSize(9)
            .font('Helvetica-Bold')
-           .text('Description:', 50, yPos);
+           .text(String(index + 1), 45, yPos + 10, { width: 25 });
         
-        yPos += 16;
-        
-        // Description text
-        doc.fillColor(COLORS.gray[800])
-           .fontSize(9)
-           .font('Helvetica');
-        
-        reportLines.forEach((line, lineIndex) => {
-          doc.text(line, 50, yPos + (lineIndex * 12), { width: 450 });
-        });
-        
-        yPos += (reportLines.length * 12) + 14;
-        
-        // Metadata (Date and Location)
-        doc.strokeColor(COLORS.gray[300])
-           .lineWidth(0.5)
-           .moveTo(50, yPos)
-           .lineTo(pageWidth + 15, yPos)
-           .stroke();
-        
-        yPos += 10;
-        
-        doc.fillColor(COLORS.gray[600])
+        // Date
+        doc.fillColor(COLORS.black)
            .fontSize(8)
            .font('Helvetica')
-           .text(`Date: ${incident.date || 'N/A'}`, 50, yPos)
-           .text(`Location: ${cleanPostName(incident.zone || 'Unknown')}`, 250, yPos);
+           .text(incident.date || 'N/A', 75, yPos + 10, { width: 80 });
         
-        yPos += 30;
+        // Time
+        doc.text(incident.time || 'N/A', 160, yPos + 10, { width: 60 });
+        
+        // Zone/Location - Display with proper wrapping
+        zoneLines.forEach((line, lineIndex) => {
+          doc.text(line, 225, yPos + 10 + (lineIndex * 11), { width: 120 });
+        });
+        
+        // Incident description - FULL TEXT
+        descriptionLines.forEach((line, lineIndex) => {
+          doc.text(line, 350, yPos + 10 + (lineIndex * 11), { width: 195 });
+        });
+        
+        yPos += rowHeight + 2;
       });
+      
+      yPos += 15;
+      
+      // Summary box
+      doc.strokeColor(COLORS.gray[300])
+         .lineWidth(1)
+         .rect(40, yPos, pageWidth, 35)
+         .stroke();
+      
+      doc.fillColor(COLORS.gray[100])
+         .rect(40, yPos, pageWidth, 35)
+         .fill();
+      
+      doc.fillColor(COLORS.black)
+         .fontSize(10)
+         .font('Helvetica-Bold')
+         .text('Total Incidents', 50, yPos + 12);
+      
+      doc.fillColor(COLORS.primary)
+         .fontSize(14)
+         .text(String(totalIncidents), 480, yPos + 10);
     }
 
-    yPos += 20;
+    yPos += 50;
 
     // ==================== PATROL PERFORMANCE TABLE ====================
     if (posts.length > 0) {
@@ -689,10 +792,10 @@ export async function generateDashboardPDF(clientData) {
       doc.fillColor(COLORS.white)
          .fontSize(9)
          .font('Helvetica-Bold')
-         .text('SECURITY POST', 45, yPos + 8, { width: 250 })
-         .text('COMPLETED', 310, yPos + 8, { width: 80 })
-         .text('EXPECTED', 400, yPos + 8, { width: 80 })
-         .text('PERFORMANCE', 490, yPos + 8, { width: 60 });
+         .text('SECURITY POST / ZONE', 45, yPos + 8, { width: 200 })
+         .text('COMPLETED', 255, yPos + 8, { width: 70 })
+         .text('EXPECTED', 335, yPos + 8, { width: 70 })
+         .text('PERFORMANCE', 415, yPos + 8, { width: 80 });
       
       yPos += 22;
 
@@ -708,13 +811,16 @@ export async function generateDashboardPDF(clientData) {
              .fill();
         }
         
+        const performance = post.Percentage || '0%';
+        const performanceText = performance.toString();
+        
         doc.fillColor(COLORS.black)
            .fontSize(8)
            .font('Helvetica')
-           .text(cleanPostName(post.SecurityPost || 'Unknown'), 45, yPos + 6, { width: 250 })
-           .text(String(post.Completed || 0), 310, yPos + 6)
-           .text(String(post.Expected || 0), 400, yPos + 6)
-           .text(post.Percentage || '0%', 490, yPos + 6);
+           .text(cleanPostName(post.SecurityPost || post.Zone || 'Unknown'), 45, yPos + 6, { width: 200 })
+           .text(String(post.Completed || 0), 255, yPos + 6)
+           .text(String(post.Expected || 0), 335, yPos + 6)
+           .text(performanceText, 415, yPos + 6, { width: 80 });
         
         yPos += 18;
       });
@@ -730,9 +836,9 @@ export async function generateDashboardPDF(clientData) {
          .fontSize(10)
          .font('Helvetica-Bold')
          .text('TOTAL PATROLS', 45, yPos + 9)
-         .text(String(totalCompleted), 310, yPos + 9)
-         .text(String(totalExpectedPatrols), 400, yPos + 9)
-         .text(`${overallPerformance}%`, 490, yPos + 9);
+         .text(String(totalCompleted), 255, yPos + 9)
+         .text(String(totalExpectedPatrols), 335, yPos + 9)
+         .text(`${overallPerformance}%`, 415, yPos + 9, { width: 80 });
       
       yPos += 40;
     } else {
@@ -769,18 +875,17 @@ export async function generateDashboardPDF(clientData) {
          .font('Helvetica-Bold')
          .text('DATE', 45, yPos + 10, { width: 75 })
          .text('TIME', 125, yPos + 10, { width: 60 })
-         .text('EVENT', 195, yPos + 10, { width: 180 })
-         .text('LOCATION', 375, yPos + 10, { width: 175 });
+         .text('EVENT', 195, yPos + 10, { width: 150 })
+         .text('LOCATION', 355, yPos + 10, { width: 155 });
       
       yPos += 32;
 
-      // ✅ FIXED: Display ALL events (removed the 50-event limit)
-      // Event rows - Show ALL patrol events
+      // Event rows
       patrolEvents.forEach((event, index) => {
         const eventText = event.Event || 'Patrol Arrival';
         
-        const eventLines = wrapText(doc, eventText, 175, 9);
-        const zoneLines = wrapText(doc, event.Zone || 'Unknown', 170, 9);
+        const eventLines = wrapText(doc, eventText, 150, 9);
+        const zoneLines = wrapText(doc, event.Zone || 'Unknown', 150, 9);
         const maxLines = Math.max(eventLines.length, zoneLines.length);
         const rowHeight = Math.max(20, maxLines * 12);
         
@@ -799,11 +904,11 @@ export async function generateDashboardPDF(clientData) {
            .text(event.Time || 'N/A', 125, yPos + 7, { width: 60 });
         
         eventLines.forEach((line, lineIndex) => {
-          doc.text(line, 195, yPos + 7 + (lineIndex * 12), { width: 175 });
+          doc.text(line, 195, yPos + 7 + (lineIndex * 12), { width: 150 });
         });
         
         zoneLines.forEach((line, lineIndex) => {
-          doc.text(line, 375, yPos + 7 + (lineIndex * 12), { width: 170 });
+          doc.text(line, 355, yPos + 7 + (lineIndex * 12), { width: 150 });
         });
         
         yPos += rowHeight + 3;
@@ -877,7 +982,7 @@ export async function generateDashboardPDF(clientData) {
     logger.info(`   - Pages: ${pageCount}`);
     logger.info(`   - Security Posts: ${posts.length}`);
     logger.info(`   - Patrol Events: ${patrolEvents.length}`);
-    logger.info(`   - Incident Reports: ${totalIncidents}`);
+    logger.info(`   - Incident Reports: ${totalIncidents} (all with zone names)`);
     logger.info(`   - Reporting Period: ${actualDays} days`);
     logger.info('='.repeat(60));
     
