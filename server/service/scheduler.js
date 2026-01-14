@@ -12,9 +12,6 @@ import { sql, poolPromise } from "../config/database.js";
 import * as pdfService from './pdfService.js';
 import * as emailService from './emailService.js';
 
-// Import the optimized report model
-import { fetchWeeklyReport } from '../models/reportModel.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -52,6 +49,37 @@ const SCHEDULER_CONFIG = {
   PROCESS_PAST_DUE_UP_TO_HOURS: parseInt(process.env.PROCESS_PAST_DUE_UP_TO_HOURS) || 1, // Reduced from 24
   GRACE_PERIOD_MINUTES: parseInt(process.env.GRACE_PERIOD_MINUTES) || 10 // New: 10-minute grace period
 };
+
+/**
+ * Get database connection with retry logic
+ */
+async function getDatabaseConnection(maxRetries = 3, retryDelay = 1000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const pool = await poolPromise;
+      
+      // Test the connection
+      if (pool && pool.connected !== false) {
+        // Try a simple query to verify connection
+        await pool.request().query('SELECT 1 as test');
+        console.log(`[DB] ✅ Database connection successful (attempt ${attempt})`);
+        return pool;
+      }
+    } catch (error) {
+      console.warn(`[DB] ⚠️ Database connection attempt ${attempt} failed: ${error.message}`);
+      
+      if (attempt < maxRetries) {
+        console.log(`[DB] 🔄 Retrying in ${retryDelay}ms...`);
+        await delay(retryDelay);
+        retryDelay *= 2; // Exponential backoff
+      } else {
+        console.error('[DB] ❌ All database connection attempts failed');
+        throw error;
+      }
+    }
+  }
+  throw new Error('Unable to establish database connection');
+}
 
 /**
  * Delay utility
@@ -177,7 +205,6 @@ async function generatePDF(pdfData) {
   }
 }
 
-
 /**
  * Send email with timeout
  */
@@ -216,14 +243,17 @@ async function sendEmail(emailData) {
 }
 
 /**
- * ✅ OPTIMIZED: Get schedules with 10-minute grace period
+ * ✅ FIXED: Get schedules with proper database connection handling
  */
 async function getDueSchedules() {
+  let pool;
   try {
-    const pool = await poolPromise;
+    pool = await getDatabaseConnection();
+    if (!pool) {
+      throw new Error('Database connection pool is null');
+    }
+
     const now = dayjs().tz(TZ);
-    
-    // Only process schedules from the last 10 minutes (reduced from 24 hours)
     const gracePeriodStart = now.subtract(SCHEDULER_CONFIG.GRACE_PERIOD_MINUTES, 'minute');
     
     console.log(`[SCHEDULER] ⏱️ Checking schedules due by ${now.format('YYYY-MM-DD HH:mm:ss')}`);
@@ -312,16 +342,16 @@ function getDateRangeForFrequency(frequency, intervalDays = 1, runTime = null) {
       };
       
     case 2: // Weekly - Last 7 days up to TODAY
-  const weeklyEnd = runDate.endOf('day');           // TODAY
-  const weeklyStart = weeklyEnd.subtract(6, 'day'); // TODAY - 7 days
+      const weeklyEnd = runDate.endOf('day');           // TODAY
+      const weeklyStart = weeklyEnd.subtract(6, 'day'); // TODAY - 7 days
 
-  return {
-    startDate: weeklyStart.format('YYYY-MM-DD'),
-    endDate: weeklyEnd.format('YYYY-MM-DD'),
-    rangeLabel: `Weekly Report: ${weeklyStart.format('MMM D')} - ${weeklyEnd.format('MMM D, YYYY')}`,
-    frequency: 'weekly',
-    reportDate: weeklyEnd.format('YYYY-MM-DD')
-  };
+      return {
+        startDate: weeklyStart.format('YYYY-MM-DD'),
+        endDate: weeklyEnd.format('YYYY-MM-DD'),
+        rangeLabel: `Weekly Report: ${weeklyStart.format('MMM D')} - ${weeklyEnd.format('MMM D, YYYY')}`,
+        frequency: 'weekly',
+        reportDate: weeklyEnd.format('YYYY-MM-DD')
+      };
 
     case 3: // Monthly - Previous completed month
       const previousMonthStart = runDate.subtract(1, 'month').startOf('month');
@@ -349,11 +379,15 @@ function getDateRangeForFrequency(frequency, intervalDays = 1, runTime = null) {
 }
 
 /**
- * ✅ Update next run time
+ * ✅ FIXED: Update next run time with proper connection handling
  */
 async function updateNextRunTime(schedule) {
+  let pool;
   try {
-    const pool = await poolPromise;
+    pool = await getDatabaseConnection();
+    if (!pool) {
+      throw new Error('Database connection pool is null');
+    }
     
     const lastScheduledRun = dayjs(schedule.NextRun).tz(TZ);
     let newNextRun = lastScheduledRun;
@@ -667,7 +701,7 @@ async function processSchedulesWithConcurrency(schedules, customDateRange = null
 }
 
 /**
- * ✅ MAIN SCHEDULER - CHECKING EVERY 60 SECONDS
+ * ✅ FIXED: MAIN SCHEDULER with database connection recovery
  */
 export async function runDynamicReportScheduler(options = {}) {
   const { 
@@ -687,6 +721,19 @@ export async function runDynamicReportScheduler(options = {}) {
   const startTime = Date.now();
 
   try {
+    // First verify database connection
+    try {
+      await getDatabaseConnection();
+      console.log('[SCHEDULER] ✅ Database connection verified');
+    } catch (dbError) {
+      console.error('[SCHEDULER] ❌ Database connection failed:', dbError.message);
+      return { 
+        success: false, 
+        error: 'Database connection failed', 
+        message: 'Cannot connect to database. Check your database configuration.' 
+      };
+    }
+
     const dueSchedules = await getDueSchedules();
 
     if (dueSchedules.length === 0) {
@@ -791,9 +838,8 @@ async function warmAPICache() {
     
     for (const clientId of commonClients) {
       try {
-        // This would trigger cache warming if your API supports it
         console.log(`[SCHEDULER]   Warming client ${clientId}...`);
-        // If you have a cache warming function, call it here
+        // Cache warming logic here
       } catch (err) {
         console.log(`[SCHEDULER]   Cache warm for client ${clientId} failed: ${err.message}`);
       }
@@ -803,10 +849,17 @@ async function warmAPICache() {
   }
 }
 
-// Export all manual triggers and utilities
+/**
+ * ✅ FIXED: Get upcoming schedules with proper connection
+ */
 export async function getUpcomingSchedules(hoursAhead = 24) {
+  let pool;
   try {
-    const pool = await poolPromise;
+    pool = await getDatabaseConnection();
+    if (!pool) {
+      throw new Error('Database connection pool is null');
+    }
+    
     const now = dayjs().tz(TZ);
     const futureTime = now.add(hoursAhead, 'hour');
     
@@ -844,37 +897,54 @@ export async function getUpcomingSchedules(hoursAhead = 24) {
 }
 
 // Initialize with optimizations
-console.log("\n" + "🚀".repeat(35));
-console.log("🚀 OPTIMIZED SCHEDULER INITIALIZED");
-console.log("🚀".repeat(35));
-console.log("📊 Configuration:");
-console.log(`   - Check Interval: Every 60 seconds (1 minute)`);
-console.log(`   - Timezone: ${TZ}`);
-console.log(`   - Test Mode: ${TEST_MODE}`);
-console.log(`   - Email: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
-console.log(`   - Max Concurrent: ${SCHEDULER_CONFIG.MAX_CONCURRENT_PDFS}`);
-console.log(`   - Grace Period: ${SCHEDULER_CONFIG.GRACE_PERIOD_MINUTES} minutes`);
-console.log(`   - Current Time: ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}`);
-console.log("🚀".repeat(35) + "\n");
+async function initializeScheduler() {
+  console.log("\n" + "🚀".repeat(35));
+  console.log("🚀 OPTIMIZED SCHEDULER INITIALIZING");
+  console.log("🚀".repeat(35));
+  
+  // Test database connection first
+  try {
+    await getDatabaseConnection();
+    console.log(`[SCHEDULER] ✅ Database connection successful`);
+  } catch (error) {
+    console.error(`[SCHEDULER] ❌ Database connection failed: ${error.message}`);
+    console.log(`[SCHEDULER] ⚠️ Scheduler may not work without database connection`);
+  }
+  
+  console.log("📊 Configuration:");
+  console.log(`   - Check Interval: Every 60 seconds (1 minute)`);
+  console.log(`   - Timezone: ${TZ}`);
+  console.log(`   - Test Mode: ${TEST_MODE}`);
+  console.log(`   - Email: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
+  console.log(`   - Max Concurrent: ${SCHEDULER_CONFIG.MAX_CONCURRENT_PDFS}`);
+  console.log(`   - Grace Period: ${SCHEDULER_CONFIG.GRACE_PERIOD_MINUTES} minutes`);
+  console.log(`   - Current Time: ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}`);
+  console.log("🚀".repeat(35) + "\n");
 
-// Start cron job with 60-second checks
-if (!TEST_MODE) {
-  cron.schedule(SCHEDULER_CONFIG.SCHEDULER_CHECK_INTERVAL, () => {
-    const triggerTime = dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss');
-    console.log(`\n⏰ SCHEDULER CHECK TRIGGERED: ${triggerTime}`);
-    runDynamicReportScheduler();
-  });
-  console.log(`✅ Scheduler active: Checking every 60 seconds for due schedules`);
-} else {
-  console.log("🛑 TEST MODE: Scheduler disabled");
+  // Start cron job with 60-second checks
+  if (!TEST_MODE) {
+    cron.schedule(SCHEDULER_CONFIG.SCHEDULER_CHECK_INTERVAL, () => {
+      const triggerTime = dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss');
+      console.log(`\n⏰ SCHEDULER CHECK TRIGGERED: ${triggerTime}`);
+      runDynamicReportScheduler();
+    });
+    console.log(`✅ Scheduler active: Checking every 60 seconds for due schedules`);
+  } else {
+    console.log("🛑 TEST MODE: Scheduler disabled");
+  }
+
+  // Optional: Warm cache 5 seconds after startup
+  setTimeout(() => {
+    if (process.env.WARM_CACHE_AT_STARTUP === 'true') {
+      warmAPICache();
+    }
+  }, 5000);
 }
 
-// Optional: Warm cache 5 seconds after startup
-setTimeout(() => {
-  if (process.env.WARM_CACHE_AT_STARTUP === 'true') {
-    warmAPICache();
-  }
-}, 5000);
+// Initialize the scheduler
+initializeScheduler().catch(error => {
+  console.error('[SCHEDULER] ❌ Failed to initialize scheduler:', error.message);
+});
 
 // Manual trigger exports
 export async function triggerDynamicReportsNow() {
