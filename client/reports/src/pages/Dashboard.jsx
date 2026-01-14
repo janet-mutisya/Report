@@ -33,14 +33,15 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [events, setEvents] = useState([]);
   const [loadingStatus, setLoadingStatus] = useState(true);
-  const [loadingSummary, setLoadingSummary] = useState(false);
-  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingData, setLoadingData] = useState(false);
   const [dateRange, setDateRange] = useState('week');
   const [customDates, setCustomDates] = useState({ startDate: '', endDate: '' });
   const [error, setError] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [exportingPDF, setExportingPDF] = useState(false);
   const rowsPerPage = 50;
+
+  const API_BASE_URL = 'https://report-patrol.onrender.com';
 
   const normalizeEvents = useCallback((events = []) => {
     return events.map(e => ({
@@ -53,9 +54,9 @@ export default function Dashboard() {
     }));
   }, []);
 
-  const loadDashboardSummary = useCallback(async (range) => {
+  const loadRenderAPI = useCallback(async (range) => {
     try {
-      setLoadingSummary(true);
+      setLoadingData(true);
       setError(null);
       const token = localStorage.getItem('token');
       const today = new Date().toISOString().split('T')[0];
@@ -76,61 +77,20 @@ export default function Dashboard() {
       }
 
       const response = await fetch(
-        `http://localhost:5000/api/dashboard/summary?startDate=${startDate}&endDate=${endDate}`,
+        `${API_BASE_URL}/api/dashboard/render?startDate=${startDate}&endDate=${endDate}`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const data = await response.json();
-      setSummary(data.data);
+
+      setSummary(data.summary || {});
+      setEvents(normalizeEvents(data.events || []));
     } catch (err) {
-      console.error('Failed to load summary:', err);
-      setError('Could not load summary data. Please try again.');
+      console.error('Failed to load dashboard data:', err);
+      setError('Could not load dashboard data. Please try again.');
     } finally {
-      setLoadingSummary(false);
-    }
-  }, [customDates.startDate, customDates.endDate]);
-
-  const loadDashboardEvents = useCallback(async (range) => {
-    setLoadingEvents(true);
-    setError(null);
-    setCurrentPage(1);
-    
-    try {
-      const token = localStorage.getItem('token');
-      const today = new Date().toISOString().split('T')[0];
-      let startDate = today;
-      let endDate = today;
-
-      if (range === 'week') {
-        const weekAgo = new Date();
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        startDate = weekAgo.toISOString().split('T')[0];
-      } else if (range === 'month') {
-        const monthAgo = new Date();
-        monthAgo.setDate(monthAgo.getDate() - 30);
-        startDate = monthAgo.toISOString().split('T')[0];
-      } else if (range === 'custom' && customDates.startDate && customDates.endDate) {
-        startDate = customDates.startDate;
-        endDate = customDates.endDate;
-      }
-
-      const response = await fetch(
-        `http://localhost:5000/api/dashboard/patrol-events?startDate=${startDate}&endDate=${endDate}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
-      );
-
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const data = await response.json();
-      
-      if (data.success && data.data) {
-        setEvents(normalizeEvents(data.data));
-      }
-    } catch (err) {
-      console.error('Failed to load events:', err);
-      setError('Could not load patrol data. Please check your connection and try again.');
-    } finally {
-      setLoadingEvents(false);
+      setLoadingData(false);
     }
   }, [customDates.startDate, customDates.endDate, normalizeEvents]);
 
@@ -141,7 +101,7 @@ export default function Dashboard() {
       const userData = JSON.parse(localStorage.getItem('user') || '{}');
       setUser(userData);
 
-      const response = await fetch('http://localhost:5000/api/dashboard/status', {
+      const response = await fetch(`${API_BASE_URL}/api/dashboard/status`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 
@@ -162,17 +122,16 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (status?.hasAccess) {
-      loadDashboardSummary('week');
-      loadDashboardEvents('week');
+      loadRenderAPI('week');
     }
-  }, [status?.hasAccess, loadDashboardSummary, loadDashboardEvents]);
+  }, [status?.hasAccess, loadRenderAPI]);
 
   useEffect(() => {
     if (status?.hasAccess) {
       const warmupCache = async () => {
         try {
           const token = localStorage.getItem('token');
-          fetch('http://localhost:5000/api/dashboard/warmup', {
+          fetch(`${API_BASE_URL}/api/dashboard/warmup`, {
             method: 'POST',
             headers: { 
               'Authorization': `Bearer ${token}`,
@@ -198,19 +157,13 @@ export default function Dashboard() {
 
   const handleDateRangeChange = async (range) => {
     setDateRange(range);
-    await Promise.all([
-      loadDashboardSummary(range),
-      loadDashboardEvents(range)
-    ]);
+    await loadRenderAPI(range);
   };
 
   const handleCustomDateSearch = async () => {
     if (customDates.startDate && customDates.endDate) {
       setDateRange('custom');
-      await Promise.all([
-        loadDashboardSummary('custom'),
-        loadDashboardEvents('custom')
-      ]);
+      await loadRenderAPI('custom');
     }
   };
 
@@ -291,7 +244,7 @@ export default function Dashboard() {
       }
 
       const response = await fetch(
-        `http://localhost:5000/api/dashboard/pdf?startDate=${startDate}&endDate=${endDate}`,
+        `${API_BASE_URL}/api/dashboard/pdf?startDate=${startDate}&endDate=${endDate}`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
 
@@ -450,9 +403,9 @@ export default function Dashboard() {
               <div className="p-3 bg-gradient-to-br from-blue-400 to-blue-600 rounded-xl shadow-md">
                 <CheckSquare className="w-6 h-6 text-white" />
               </div>
-              {loadingEvents ? <Loader className="w-5 h-5 text-blue-400 animate-spin" /> : <TrendingUp className="w-5 h-5 text-green-500" />}
+              {loadingData ? <Loader className="w-5 h-5 text-blue-400 animate-spin" /> : <TrendingUp className="w-5 h-5 text-green-500" />}
             </div>
-            {loadingSummary || loadingEvents ? (
+            {loadingData ? (
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-blue-400 mx-auto" /></div>
             ) : (
               <>
@@ -468,13 +421,13 @@ export default function Dashboard() {
               <div className="p-3 bg-gradient-to-br from-green-400 to-green-600 rounded-xl shadow-md">
                 <TrendingUp className="w-6 h-6 text-white" />
               </div>
-              {loadingSummary ? <Loader className="w-5 h-5 text-green-400 animate-spin" /> : <Activity className="w-5 h-5 text-green-400" />}
+              {loadingData ? <Loader className="w-5 h-5 text-green-400 animate-spin" /> : <Activity className="w-5 h-5 text-green-400" />}
             </div>
-            {loadingSummary ? (
+            {loadingData ? (
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-green-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold text-green-600 mb-2">{summary?.summary?.performanceScore || 0}%</p>
+                <p className="text-4xl font-bold text-green-600 mb-2">{summary?.performanceScore || 0}%</p>
                 <p className="text-sm font-medium text-gray-600">Performance Score</p>
                 <p className="text-xs text-gray-500 mt-1">Overall Completion Rate</p>
               </>
@@ -486,13 +439,13 @@ export default function Dashboard() {
               <div className="p-3 bg-gradient-to-br from-purple-400 to-purple-600 rounded-xl shadow-md">
                 <MapPin className="w-6 h-6 text-white" />
               </div>
-              {loadingSummary ? <Loader className="w-5 h-5 text-purple-400 animate-spin" /> : <Users className="w-5 h-5 text-purple-400" />}
+              {loadingData ? <Loader className="w-5 h-5 text-purple-400 animate-spin" /> : <Users className="w-5 h-5 text-purple-400" />}
             </div>
-            {loadingSummary ? (
+            {loadingData ? (
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-purple-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">{summary?.summary?.totalPosts || 0}</p>
+                <p className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">{summary?.totalPosts || 0}</p>
                 <p className="text-sm font-medium text-gray-600">Security Posts</p>
                 <p className="text-xs text-gray-500 mt-1">Total Locations</p>
               </>
@@ -504,15 +457,15 @@ export default function Dashboard() {
               <div className="p-3 bg-gradient-to-br from-orange-400 to-orange-600 rounded-xl shadow-md">
                 <BarChart3 className="w-6 h-6 text-white" />
               </div>
-              {loadingSummary ? <Loader className="w-5 h-5 text-orange-400 animate-spin" /> : <Calendar className="w-5 h-5 text-orange-400" />}
+              {loadingData ? <Loader className="w-5 h-5 text-orange-400 animate-spin" /> : <Calendar className="w-5 h-5 text-orange-400" />}
             </div>
-            {loadingSummary ? (
+            {loadingData ? (
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-orange-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent mb-2">{summary?.summary?.avgPerDay || 0}</p>
+                <p className="text-4xl font-bold bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent mb-2">{summary?.avgPerDay || 0}</p>
                 <p className="text-sm font-medium text-gray-600">Avg Per Day</p>
-                <p className="text-xs text-gray-500 mt-1">{summary?.summary?.daysCovered || 0} days in range</p>
+                <p className="text-xs text-gray-500 mt-1">{summary?.daysCovered || 0} days in range</p>
               </>
             )}
           </div>
@@ -525,9 +478,9 @@ export default function Dashboard() {
                 <BarChart3 className="w-5 h-5 text-blue-600" />
                 Daily Arrivals Trend
               </h3>
-              <span className="text-sm text-gray-500">{loadingEvents ? 'Loading...' : `${chartData.dailyData.length} days`}</span>
+              <span className="text-sm text-gray-500">{loadingData ? 'Loading...' : `${chartData.dailyData.length} days`}</span>
             </div>
-            {loadingEvents ? (
+            {loadingData ? (
               <div className="h-64 flex items-center justify-center bg-gray-50 rounded-xl">
                 <div className="text-center">
                   <Loader className="w-12 h-12 animate-spin text-blue-400 mx-auto mb-2" />
@@ -561,9 +514,9 @@ export default function Dashboard() {
                 <PieChart className="w-5 h-5 text-purple-600" />
                 Zone Distribution
               </h3>
-              <span className="text-sm text-gray-500">{loadingEvents ? 'Loading...' : `${chartData.zoneData.length} zones`}</span>
+              <span className="text-sm text-gray-500">{loadingData ? 'Loading...' : `${chartData.zoneData.length} zones`}</span>
             </div>
-            {loadingEvents ? (
+            {loadingData ? (
               <div className="h-64 flex items-center justify-center bg-gray-50 rounded-xl">
                 <div className="text-center">
                   <Loader className="w-12 h-12 animate-spin text-purple-400 mx-auto mb-2" />
@@ -611,34 +564,34 @@ export default function Dashboard() {
           <div className="flex flex-wrap gap-3 mb-4">
             <button
               onClick={() => handleDateRangeChange('week')}
-              disabled={loadingEvents || loadingSummary}
+              disabled={loadingData}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'week'
                   ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
+              } ${loadingData ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               Last 7 Days
             </button>
             <button
               onClick={() => handleDateRangeChange('month')}
-              disabled={loadingEvents || loadingSummary}
+              disabled={loadingData}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'month'
                   ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
+              } ${loadingData ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               Last 30 Days
             </button>
             <button
               onClick={() => setDateRange('custom')}
-              disabled={loadingEvents || loadingSummary}
+              disabled={loadingData}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'custom'
                   ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
+              } ${loadingData ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               Custom Range
             </button>
@@ -666,7 +619,7 @@ export default function Dashboard() {
               </div>
               <button
                 onClick={handleCustomDateSearch}
-                disabled={!customDates.startDate || !customDates.endDate || loadingEvents || loadingSummary}
+                disabled={!customDates.startDate || !customDates.endDate || loadingData}
                 className="px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-indigo-700 transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Apply Filter
@@ -685,7 +638,7 @@ export default function Dashboard() {
                 </h3>
                 <p className="text-blue-100 text-sm mt-1">
                   {getDateRangeLabel()} • {events.length} arrivals
-                  {summary?.metadata?.dataSource && <span className="ml-2">• Source: {summary.metadata.dataSource}</span>}
+                  {summary?.dataSource && <span className="ml-2">• Source: {summary.dataSource}</span>}
                 </p>
               </div>
               <div className="flex gap-3">
@@ -719,7 +672,7 @@ export default function Dashboard() {
           </div>
 
           <div className="overflow-x-auto">
-            {loadingEvents ? (
+            {loadingData ? (
               <div className="p-16 text-center">
                 <Loader className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
                 <p className="text-gray-600 font-medium text-lg">Loading VigiControl arrivals...</p>

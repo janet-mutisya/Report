@@ -54,7 +54,8 @@ export default function SecurityDashboard() {
   const [clientScheduleInfo, setClientScheduleInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
 
-  const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+  // Use deployed backend URL
+  const API_BASE = "https://report-patrol.onrender.com/api";
 
   // ✅ MOVED UP: getShiftLabel function - defined before it's used
   const getShiftLabel = useCallback((shiftValue) => {

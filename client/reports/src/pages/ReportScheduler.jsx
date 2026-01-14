@@ -6,8 +6,8 @@ import {
   Shield, AlertCircle
 } from 'lucide-react';
 
-// API Configuration - FIXED TO MATCH BACKEND
-const API_BASE_URL = 'http://localhost:5000/api';
+// API Configuration - UPDATED TO DEPLOYED BACKEND
+const API_BASE_URL = 'https://report-patrol.onrender.com/api';
 
 const SecurityReportsPage = () => {
   // State Management
@@ -85,13 +85,13 @@ const SecurityReportsPage = () => {
     } catch (fetchError) {
       console.error('❌ API Error:', fetchError);
       if (fetchError.message.includes('Failed to fetch')) {
-        throw new Error('Cannot connect to backend server. Please check if the server is running on port 5000.');
+        throw new Error('Cannot connect to backend server. Please check your internet connection.');
       }
       throw fetchError;
     }
   }, []);
 
-  // Data Fetching - FIXED TO USE CORRECT ENDPOINTS
+  // Data Fetching - UPDATED TO DEPLOYED BACKEND
   const fetchSchedules = useCallback(async () => {
     try {
       setLoading(true);
@@ -115,7 +115,7 @@ const SecurityReportsPage = () => {
     }
   }, [fetchAPI]);
 
-  // Schedule Management - FIXED
+  // Schedule Management - UPDATED TO DEPLOYED BACKEND
   const createSchedule = useCallback(async () => {
     try {
       if (!formData.clientId || !formData.email || !formData.nextRun) {
@@ -192,7 +192,7 @@ const SecurityReportsPage = () => {
     }
   }, [fetchAPI, fetchSchedules]);
 
-  // Report Functions - SEND MANUAL REPORT (UPDATED WITH LOADING STATE)
+  // Report Functions - SEND MANUAL REPORT (UPDATED TO DEPLOYED BACKEND)
   const sendReport = useCallback(async () => {
     try {
       setIsSendingReport(true);
@@ -268,7 +268,7 @@ const SecurityReportsPage = () => {
     }
   }, []);
 
-  // Health Check - FIXED
+  // Health Check - UPDATED TO DEPLOYED BACKEND
   const checkBackendHealth = useCallback(async () => {
     try {
       const health = await fetchAPI(`${API_BASE_URL}/scheduler/health`);
@@ -276,7 +276,7 @@ const SecurityReportsPage = () => {
       return true;
     } catch (healthError) {
       console.error('❌ Backend health check failed:', healthError);
-      setError('Backend server is not responding. Please ensure the server is running on port 5000.');
+      setError('Backend server is not responding. Please try again later.');
       return false;
     }
   }, [fetchAPI]);
@@ -519,7 +519,7 @@ const SecurityReportsPage = () => {
               <div>
                 <p className="text-sm text-gray-600">Due Reports</p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {schedules.filter(s => new Date(s.nextRun) <= new Date()).length}
+                  {schedules.filter(s => s.nextRun && new Date(s.nextRun) <= new Date()).length}
                 </p>
               </div>
               <div className="p-3 bg-orange-100 rounded-lg">

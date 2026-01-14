@@ -16,6 +16,8 @@ import {
   Shield
 } from 'lucide-react';
 
+const API_BASE = import.meta.env.VITE_API_URL;
+
 export default function AdminDashboard() {
   const [clients, setClients] = useState([]);
   const [bmAccounts, setBMAccounts] = useState([]);
@@ -37,9 +39,10 @@ export default function AdminDashboard() {
     try {
       const token = localStorage.getItem('token');
 
-      const clientsResponse = await fetch('http://localhost:5000/api/admin/clients', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const clientsResponse = await fetch(`${API_BASE}/admin/clients`, {
+  headers: { 'Authorization': `Bearer ${token}` }
+});
+;
       const clientsData = await clientsResponse.json();
       setClients(clientsData.clients || []);
 
@@ -56,9 +59,9 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('http://localhost:5000/api/admin/bm-accounts', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+   const response = await fetch(`${API_BASE}/admin/bm-accounts`, {
+  headers: { 'Authorization': `Bearer ${token}` }
+});
       const data = await response.json();
       setBMAccounts(data.accounts || []);
     } catch (err) {
@@ -76,7 +79,8 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('http://localhost:5000/api/admin/link-account', {
+    const response = await fetch(`${API_BASE}/admin/link-account`, {
+
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -109,7 +113,8 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('http://localhost:5000/api/admin/unlink-account', {
+   const response = await fetch(`${API_BASE}/admin/unlink-account`, {
+
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,

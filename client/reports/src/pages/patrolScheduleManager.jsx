@@ -1,378 +1,701 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Calendar, Clock, Users, TrendingUp, Edit2, Save, X, Search, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+import { useState, useEffect, useCallback } from "react";
+import { 
+  Upload, Database, CheckCircle, XCircle, AlertCircle, 
+  Loader, FileUp, Clock, Activity, Server, Trash2, Lock 
+} from "lucide-react";
 
-const API_BASE = 'http://localhost:5000/api/patrol-schedules';
-
-export default function PatrolScheduleManager() {
-  const [clients, setClients] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [editingClient, setEditingClient] = useState(null);
-  const [editForm, setEditForm] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [notification, setNotification] = useState(null);
-
-  const fetchClients = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE}/all`);
-      const data = await response.json();
-      
-      if (data.success) {
-        setClients(data.data.clients);
-      } else {
-        showNotification('Failed to fetch clients', 'error');
+// Helper function for consistent API calls
+const createApiHelper = (baseUrl) => {
+  const apiFetch = async (endpoint, options = {}) => {
+    const url = `${baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage;
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.message || `HTTP ${response.status}`;
+      } catch {
+        errorMessage = `HTTP ${response.status}: ${errorText}`;
       }
-    } catch (error) {
-      showNotification('Failed to fetch clients', 'error');
-      console.error('Error fetching clients:', error);
+      throw new Error(errorMessage);
     }
+    
+    const responseData = await response.json();
+    if (!responseData.success) {
+      throw new Error(responseData.message || "API request failed");
+    }
+    
+    return responseData;
+  };
+
+  const apiFetchFormData = async (endpoint, formData) => {
+    const url = `${baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+      method: "POST",
+      body: formData,
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage;
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.message || `HTTP ${response.status}`;
+      } catch {
+        errorMessage = `HTTP ${response.status}: ${errorText}`;
+      }
+      throw new Error(errorMessage);
+    }
+    
+    const responseData = await response.json();
+    if (!responseData.success) {
+      throw new Error(responseData.message || "API request failed");
+    }
+    
+    return responseData;
+  };
+
+  return { apiFetch, apiFetchFormData };
+};
+
+export default function BackupSyncDashboard() {
+  // Get API base URL from environment
+  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+  
+  // State Management
+  const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [error, setError] = useState("");
+  const [uploadHistory, setUploadHistory] = useState([]);
+  const [dragActive, setDragActive] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const [canUpload, setCanUpload] = useState(true);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [serverReachable, setServerReachable] = useState(null);
+  const [configError, setConfigError] = useState(null);
+
+  // Initialize API helper
+  const { apiFetch, apiFetchFormData } = createApiHelper(API_BASE);
+
+  // Check configuration on mount
+  useEffect(() => {
+    if (!API_BASE) {
+      setConfigError("VITE_API_URL is not defined in environment variables");
+    }
+  }, [API_BASE]);
+
+  // Format file size helper
+  const formatFileSize = useCallback((bytes) => {
+    if (!bytes) return "0 Bytes";
+    const k = 1024;
+    const sizes = ["Bytes", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + " " + sizes[i];
   }, []);
 
-  useEffect(() => {
-    fetchClients();
-  }, [fetchClients]);
+  // Fetch upload history
+  const fetchUploadHistory = useCallback(async () => {
+    if (!navigator.onLine || !API_BASE) {
+      return;
+    }
 
-  const showNotification = (message, type = 'success') => {
-    setNotification({ message, type });
-    setTimeout(() => setNotification(null), 4000);
-  };
-
-  const startEdit = (client) => {
-    setEditingClient(client.ClientID);
-    setEditForm({
-      patrolsPerDay: client.PatrolsPerDay,
-      patrolDays: client.PatrolDays,
-      weekendPatrols: client.WeekendPatrols,
-      shiftType: client.ShiftType,
-      scheduleType: client.ScheduleType || 'daily',
-      customIntervalDays: client.CustomIntervalDays || null
-    });
-  };
-
-  const cancelEdit = () => {
-    setEditingClient(null);
-    setEditForm({});
-  };
-
-  const saveSchedule = async (clientId) => {
     try {
-      setSaving(true);
-      const response = await fetch(`${API_BASE}/${clientId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editForm)
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        showNotification('Schedule updated successfully!', 'success');
-        await fetchClients();
-        cancelEdit();
-      } else {
-        showNotification(data.message || 'Failed to update schedule', 'error');
+      const responseData = await apiFetch("/api/backup/history");
+      setUploadHistory(responseData.history || []);
+      setCanUpload(responseData.history?.length === 0);
+      setServerReachable(true);
+    } catch (err) {
+      console.error("Failed to fetch upload history:", err.message);
+      setServerReachable(false);
+      if (err.message.includes("fetch") || err.message.includes("Network")) {
+        setServerReachable(false);
       }
-    } catch (error) {
-      showNotification('Error saving schedule', 'error');
-      console.error('Error saving schedule:', error);
+    }
+  }, [API_BASE, apiFetch]);
+
+  // Handle delete backup
+  const handleDelete = async (id, filename) => {
+    if (!confirm(`Are you sure you want to delete backup "${filename}"? This action cannot be undone.`)) {
+      return;
+    }
+
+    setDeleting(id);
+    try {
+      await apiFetch(`/api/backup/history/${id}`, {
+        method: "DELETE",
+      });
+
+      setUploadHistory((prev) => prev.filter((item) => item.id !== id));
+      setCanUpload(true);
+      setServerReachable(true);
+      setUploadResult({
+        success: true,
+        message: `Backup "${filename}" deleted successfully. You can now upload a new backup.`,
+        isDelete: true,
+      });
+      setError("");
+    } catch (err) {
+      console.error("Delete error:", err.message);
+      setError(err.message || "Failed to delete backup");
+      setServerReachable(false);
     } finally {
-      setSaving(false);
+      setDeleting(null);
     }
   };
 
-  const filteredClients = clients.filter(client => {
-    return client.ClientName.toLowerCase().includes(searchTerm.toLowerCase());
-  });
-
-  const stats = {
-    total: clients.length,
-    avgPatrols: clients.length > 0 
-      ? (clients.reduce((sum, c) => sum + c.WeeklyTotal, 0) / clients.length).toFixed(0)
-      : 0,
-    totalWeekly: clients.reduce((sum, c) => sum + c.WeeklyTotal, 0)
+  // Handle file change
+  const handleFileChange = (e) => {
+    const selectedFile = e.target.files[0];
+    if (selectedFile) {
+      if (selectedFile.name.endsWith(".bak")) {
+        setFile(selectedFile);
+        setError("");
+        setUploadResult(null);
+      } else {
+        setError("Please select a valid .bak file");
+        setFile(null);
+      }
+    }
   };
 
-  const dayOptions = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-  const toggleDay = (day) => {
-    const currentDays = editForm.patrolDays.split(',').map(d => d.trim());
-    const newDays = currentDays.includes(day)
-      ? currentDays.filter(d => d !== day)
-      : [...currentDays, day];
-    
-    setEditForm({ ...editForm, patrolDays: newDays.join(',') });
+  // Handle drag events
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
   };
+
+  // Handle drop event
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFile = e.dataTransfer.files[0];
+      if (droppedFile.name.endsWith(".bak")) {
+        setFile(droppedFile);
+        setError("");
+        setUploadResult(null);
+      } else {
+        setError("Please drop a valid .bak file");
+      }
+    }
+  };
+
+  // Handle upload
+  const handleUpload = async () => {
+    if (!file) {
+      setError("Please select a backup file first");
+      return;
+    }
+
+    if (!canUpload) {
+      setError("You must delete the existing backup before uploading a new one");
+      return;
+    }
+
+    if (!API_BASE) {
+      setError("Server configuration error. Please contact support.");
+      return;
+    }
+
+    setUploading(true);
+    setError("");
+    setUploadResult(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const responseData = await apiFetchFormData("/api/backup/sync", formData);
+      
+      setUploadResult({
+        success: true,
+        message: responseData.message,
+        details: responseData.details,
+      });
+      setFile(null);
+      setServerReachable(true);
+      
+      // Refresh history
+      await fetchUploadHistory();
+    } catch (err) {
+      setError(err.message || "Backup sync failed");
+      setServerReachable(false);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // Network status effects
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (API_BASE) {
+        fetchUploadHistory();
+      }
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [API_BASE, fetchUploadHistory]);
+
+  // Initial data fetch
+  useEffect(() => {
+    if (navigator.onLine && API_BASE) {
+      fetchUploadHistory();
+    }
+  }, [API_BASE, fetchUploadHistory]);
+
+  // Auto-clear messages
+  useEffect(() => {
+    if (uploadResult?.success) {
+      const timer = setTimeout(() => setUploadResult(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [uploadResult]);
+
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  const isSystemAvailable = isOnline && serverReachable && !configError;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">Patrol Schedule Manager</h1>
-          <p className="text-gray-600">Manage client patrol schedules and monitoring</p>
-        </div>
-
-        {/* Notification */}
-        {notification && (
-          <div className={`mb-6 p-4 rounded-lg flex items-center gap-3 ${
-            notification.type === 'success' 
-              ? 'bg-green-100 text-green-800 border border-green-200' 
-              : 'bg-red-100 text-red-800 border border-red-200'
-          }`}>
-            {notification.type === 'success' ? (
-              <CheckCircle className="w-5 h-5" />
-            ) : (
-              <AlertCircle className="w-5 h-5" />
-            )}
-            <span>{notification.message}</span>
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-4 md:p-8">
+      <div className="max-w-6xl mx-auto">
+        {/* Configuration Error */}
+        {configError && (
+          <div className="bg-red-900 border-l-4 border-red-600 rounded-xl p-6 mb-6 shadow-lg">
+            <div className="flex items-start gap-4">
+              <AlertCircle className="w-8 h-8 text-red-300 flex-shrink-0 mt-1" />
+              <div className="flex-1">
+                <h3 className="text-xl font-bold text-white mb-2">Configuration Error</h3>
+                <p className="text-red-100 mb-2">{configError}</p>
+                <p className="text-sm text-red-200">
+                  Please check your environment configuration or contact your system administrator.
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-blue-500">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-gray-500 text-sm mb-1">Scheduled Patrol Clients</p>
-                <p className="text-3xl font-bold text-gray-800">{stats.total}</p>
+        {/* Header */}
+        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl shadow-2xl p-8 mb-8 text-white">
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-4">
+              <div className="bg-white/20 backdrop-blur-sm rounded-xl p-4">
+                <Database className="w-10 h-10" />
               </div>
-              <Users className="w-12 h-12 text-blue-500 opacity-20" />
+              <div>
+                <h1 className="text-4xl font-bold mb-2">Database Backup Sync</h1>
+                <p className="text-blue-100 text-lg">Upload and restore SQL Server backup files</p>
+              </div>
             </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-orange-500">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-gray-500 text-sm mb-1">Avg Weekly Patrols</p>
-                <p className="text-3xl font-bold text-gray-800">{stats.avgPatrols}</p>
+            <div className="flex flex-col gap-2">
+              <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
+                isSystemAvailable
+                  ? 'bg-green-500/20' 
+                  : 'bg-red-500/20'
+              }`}>
+                <Server className="w-5 h-5" />
+                <div>
+                  <p className="font-semibold">
+                    {isSystemAvailable ? 'System Online' : 
+                     !API_BASE ? 'Configuration Error' :
+                     !isOnline ? 'Offline' : 'Server Unreachable'}
+                  </p>
+                  {!API_BASE && (
+                    <p className="text-xs opacity-90">Check environment variables</p>
+                  )}
+                  {!isOnline && (
+                    <p className="text-xs opacity-90">No internet connection</p>
+                  )}
+                  {isOnline && !serverReachable && API_BASE && (
+                    <p className="text-xs opacity-90">Cannot connect to server</p>
+                  )}
+                </div>
               </div>
-              <TrendingUp className="w-12 h-12 text-orange-500 opacity-20" />
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow-lg p-6 border-l-4 border-purple-500">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-gray-500 text-sm mb-1">Total Weekly Patrols</p>
-                <p className="text-3xl font-bold text-gray-800">{stats.totalWeekly}</p>
-              </div>
-              <Calendar className="w-12 h-12 text-purple-500 opacity-20" />
+              {uploadHistory.length > 0 && isSystemAvailable && (
+                <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20">
+                  <Lock className="w-5 h-5" />
+                  <span className="font-semibold text-sm">
+                    {uploadHistory.length} Active Backup
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Controls */}
-        <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
-          <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
-            <div className="flex gap-4 items-center w-full md:w-auto">
-              <div className="relative flex-1 md:flex-initial">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
-                <input
-                  type="text"
-                  placeholder="Search clients..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-full md:w-64"
-                />
+        {/* Offline Warning */}
+        {!isOnline && (
+          <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-6 mb-6 shadow-lg">
+            <div className="flex items-start gap-4">
+              <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-red-900 mb-2">No Internet Connection</h3>
+                <p className="text-red-800 mb-2">
+                  You are currently offline. Please check your internet connection to use the backup sync service.
+                </p>
+                <p className="text-sm text-red-700">
+                  The system will automatically reconnect when your internet connection is restored.
+                </p>
               </div>
-              <button
-                onClick={fetchClients}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
-              >
-                <RefreshCw className="w-4 h-4" />
-                Refresh
-              </button>
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Clients Table */}
-        <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                    Client
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                    Schedule
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                    Patrol Days
-                  </th>
-                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                    Weekly Total
-                  </th>
-                  <th className="px-6 py-4 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {filteredClients.map((client) => (
-                  <React.Fragment key={client.ClientID}>
-                    <tr className="hover:bg-gray-50 transition-colors">
-                      <td className="px-6 py-4">
-                        <div>
-                          <p className="font-semibold text-gray-800">{client.ClientName}</p>
-                          <p className="text-sm text-gray-500">ID: {client.ClientID}</p>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2">
-                          <Clock className="w-4 h-4 text-gray-400" />
-                          <span className="text-sm text-gray-700">
-                            {client.PatrolsPerDay} per day
-                            {client.WeekendPatrols !== client.PatrolsPerDay && (
-                              <span className="text-gray-500"> / {client.WeekendPatrols} weekend</span>
-                            )}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-gray-700">{client.PatrolDays}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="font-semibold text-blue-600">{client.WeeklyTotal}</span>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        {editingClient !== client.ClientID && (
-                          <button
-                            onClick={() => startEdit(client)}
-                            className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                    {editingClient === client.ClientID && (
-                      <tr>
-                        <td colSpan="5" className="px-6 py-6 bg-gray-50">
-                          <div className="space-y-4">
-                            <div className="flex items-center justify-between mb-4">
-                              <h4 className="font-semibold text-gray-800">Edit Schedule for {client.ClientName}</h4>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={() => saveSchedule(client.ClientID)}
-                                  disabled={saving}
-                                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                                >
-                                  <Save className="w-4 h-4" />
-                                  {saving ? 'Saving...' : 'Save Changes'}
-                                </button>
-                                <button
-                                  onClick={cancelEdit}
-                                  disabled={saving}
-                                  className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-2"
-                                >
-                                  <X className="w-4 h-4" />
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                            
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                  Patrols Per Day (Weekday)
-                                </label>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="50"
-                                  value={editForm.patrolsPerDay}
-                                  onChange={(e) => setEditForm({ ...editForm, patrolsPerDay: parseInt(e.target.value) })}
-                                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                />
-                              </div>
+        {/* Server Unreachable Warning */}
+        {isOnline && !serverReachable && API_BASE && (
+          <div className="bg-orange-50 border-l-4 border-orange-500 rounded-xl p-6 mb-6 shadow-lg">
+            <div className="flex items-start gap-4">
+              <AlertCircle className="w-6 h-6 text-orange-600 flex-shrink-0 mt-1" />
+              <div className="flex-1">
+                <h3 className="text-lg font-bold text-orange-900 mb-2">Server Unreachable</h3>
+                <p className="text-orange-800 mb-2">
+                  Unable to connect to the backup server. The server may be down or experiencing issues.
+                </p>
+                <p className="text-sm text-orange-700">
+                  Please contact your system administrator or try again later.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                  Weekend Patrols Per Day
-                                </label>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="50"
-                                  value={editForm.weekendPatrols}
-                                  onChange={(e) => setEditForm({ ...editForm, weekendPatrols: parseInt(e.target.value) })}
-                                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                />
-                              </div>
+        {/* Upload Restriction Warning */}
+        {!canUpload && isSystemAvailable && (
+          <div className="bg-amber-50 border-l-4 border-amber-500 rounded-xl p-6 mb-6 shadow-lg">
+            <div className="flex items-start gap-4">
+              <Lock className="w-6 h-6 text-amber-600 flex-shrink-0 mt-1" />
+              <div>
+                <h3 className="text-lg font-bold text-amber-900 mb-2">Upload Restricted</h3>
+                <p className="text-amber-800 mb-2">
+                  You must delete the existing backup before uploading a new one. Only one active backup is allowed at a time.
+                </p>
+                <p className="text-sm text-amber-700">
+                  Scroll down to the backup history section and delete the current backup to enable new uploads.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                  Shift Type
-                                </label>
-                                <select
-                                  value={editForm.shiftType}
-                                  onChange={(e) => setEditForm({ ...editForm, shiftType: e.target.value })}
-                                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                >
-                                  <option value="Day/Night">Day/Night</option>
-                                  <option value="Day Only">Day Only</option>
-                                  <option value="Night Only">Night Only</option>
-                                  <option value="24/7">24/7</option>
-                                </select>
-                              </div>
+        {/* Upload Section */}
+        <div className="bg-white rounded-2xl shadow-2xl p-8 mb-6">
+          <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+            <FileUp className="w-6 h-6 text-blue-600" />
+            Upload Backup File
+          </h2>
 
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                  Schedule Type
-                                </label>
-                                <select
-                                  value={editForm.scheduleType}
-                                  onChange={(e) => setEditForm({ ...editForm, scheduleType: e.target.value })}
-                                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                                >
-                                  <option value="daily">Daily</option>
-                                  <option value="custom">Custom Interval</option>
-                                </select>
-                              </div>
-                            </div>
+          {/* Drag & Drop Zone */}
+          <div
+            className={`relative border-3 border-dashed rounded-xl p-12 text-center transition-all ${
+              !canUpload || !isSystemAvailable || !API_BASE
+                ? "border-gray-200 bg-gray-100 cursor-not-allowed opacity-50"
+                : dragActive
+                ? "border-blue-500 bg-blue-50"
+                : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50"
+            }`}
+            onDragEnter={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
+            onDragLeave={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
+            onDragOver={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
+            onDrop={canUpload && isSystemAvailable && API_BASE ? handleDrop : undefined}
+          >
+            <input
+              type="file"
+              accept=".bak"
+              onChange={handleFileChange}
+              className="hidden"
+              id="file-upload"
+              disabled={uploading || !canUpload || !isSystemAvailable || !API_BASE}
+            />
 
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-2">
-                                Patrol Days
-                              </label>
-                              <div className="flex gap-2 flex-wrap">
-                                {dayOptions.map((day) => (
-                                  <button
-                                    key={day}
-                                    onClick={() => toggleDay(day)}
-                                    className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                                      editForm.patrolDays.split(',').map(d => d.trim()).includes(day)
-                                        ? 'bg-blue-600 text-white'
-                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                                    }`}
-                                  >
-                                    {day}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
+            <label
+              htmlFor="file-upload"
+              className={`flex flex-col items-center ${canUpload && isSystemAvailable && API_BASE ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+            >
+              {(!canUpload || !isSystemAvailable || !API_BASE) && <Lock className="w-16 h-16 text-gray-400 mb-4" />}
+              {canUpload && isSystemAvailable && API_BASE && <Upload className="w-16 h-16 text-gray-400 mb-4" />}
+              <p className="text-xl font-semibold text-gray-700 mb-2">
+                {!API_BASE
+                  ? "Upload Disabled - Configuration error"
+                  : !isOnline
+                  ? "Upload Disabled - No internet connection"
+                  : !serverReachable
+                  ? "Upload Disabled - Server unreachable"
+                  : !canUpload 
+                  ? "Upload Disabled - Delete existing backup first"
+                  : file 
+                  ? file.name 
+                  : "Choose a backup file or drag it here"}
+              </p>
+              <p className="text-sm text-gray-500 mb-4">
+                Supports .bak files only • Max size: 500MB
+              </p>
+              {file && canUpload && isSystemAvailable && API_BASE && (
+                <div className="bg-blue-100 text-blue-800 px-4 py-2 rounded-lg font-medium">
+                  {formatFileSize(file.size)}
+                </div>
+              )}
+            </label>
           </div>
 
-          {filteredClients.length === 0 && (
-            <div className="text-center py-12">
-              <Users className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-              <p className="text-gray-500">No clients found matching your criteria</p>
+          {/* Upload Button */}
+          <div className="mt-6">
+            <button
+              onClick={handleUpload}
+              disabled={!file || uploading || !canUpload || !isSystemAvailable || !API_BASE}
+              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl p-4 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
+            >
+              {uploading ? (
+                <>
+                  <Loader className="w-5 h-5 animate-spin" />
+                  Syncing Backup...
+                </>
+              ) : !API_BASE ? (
+                <>
+                  <XCircle className="w-5 h-5" />
+                  Configuration Error
+                </>
+              ) : !isSystemAvailable ? (
+                <>
+                  <XCircle className="w-5 h-5" />
+                  {!isOnline ? "No Connection" : "Server Unreachable"}
+                </>
+              ) : !canUpload ? (
+                <>
+                  <Lock className="w-5 h-5" />
+                  Upload Locked
+                </>
+              ) : (
+                <>
+                  <Database className="w-5 h-5" />
+                  Sync Backup to Database
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Progress Info */}
+          {uploading && (
+            <div className="mt-6 bg-blue-50 border border-blue-200 rounded-xl p-4">
+              <div className="flex items-center gap-3 mb-3">
+                <Activity className="w-5 h-5 text-blue-600 animate-pulse" />
+                <div>
+                  <p className="font-semibold text-blue-900">Processing backup file...</p>
+                  <p className="text-sm text-blue-700">This may take a few minutes depending on file size</p>
+                </div>
+              </div>
+              <div className="space-y-2 text-sm text-blue-800 ml-8">
+                <p>• Restoring backup to staging database</p>
+                <p>• Checking for duplicate records</p>
+                <p>• Merging data into main database</p>
+                <p>• Cleaning up temporary files</p>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Footer Stats */}
-        <div className="mt-6 text-center text-sm text-gray-600">
-          Showing {filteredClients.length} of {clients.length} clients
+        {/* Success Message with Details */}
+        {uploadResult && uploadResult.success && (
+          <div className={`border-l-4 rounded-xl p-6 mb-6 shadow-lg ${
+            uploadResult.isDelete 
+              ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-500'
+              : 'bg-gradient-to-r from-green-50 to-emerald-50 border-green-500'
+          }`}>
+            <div className="flex items-start gap-4">
+              <CheckCircle className={`w-6 h-6 flex-shrink-0 mt-1 ${
+                uploadResult.isDelete ? 'text-blue-600' : 'text-green-600'
+              }`} />
+              <div className="flex-1">
+                <h3 className={`text-lg font-bold mb-2 ${
+                  uploadResult.isDelete ? 'text-blue-900' : 'text-green-900'
+                }`}>
+                  {uploadResult.isDelete ? 'Backup Deleted!' : 'Backup Synced Successfully!'}
+                </h3>
+                <p className={uploadResult.isDelete ? 'text-blue-800' : 'text-green-800'}>
+                  {uploadResult.message}
+                </p>
+                
+                {uploadResult.details && (
+                  <>
+                    {/* Stats Grid */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+                      <div className="bg-white/60 rounded-lg p-3">
+                        <p className="text-xs text-gray-600 mb-1">File Size</p>
+                        <p className="text-lg font-bold text-gray-900">{uploadResult.details.fileSize}</p>
+                      </div>
+                      <div className="bg-white/60 rounded-lg p-3">
+                        <p className="text-xs text-gray-600 mb-1">Records Found</p>
+                        <p className="text-lg font-bold text-gray-900">{uploadResult.details.recordsFound}</p>
+                      </div>
+                      <div className="bg-white/60 rounded-lg p-3">
+                        <p className="text-xs text-gray-600 mb-1">Records Merged</p>
+                        <p className="text-lg font-bold text-green-600">{uploadResult.details.recordsMerged}</p>
+                      </div>
+                      <div className="bg-white/60 rounded-lg p-3">
+                        <p className="text-xs text-gray-600 mb-1">Duplicates Skipped</p>
+                        <p className="text-lg font-bold text-amber-600">{uploadResult.details.duplicatesSkipped}</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 text-sm text-green-700 space-y-1">
+                      <p>📁 File: <span className="font-semibold">{uploadResult.details.filename}</span></p>
+                      <p>🕐 Time: <span className="font-semibold">{new Date(uploadResult.details.timestamp).toLocaleString()}</span></p>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Error Message */}
+        {error && (
+          <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-6 mb-6 shadow-lg">
+            <div className="flex items-start gap-4">
+              <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
+              <div>
+                <h3 className="text-lg font-bold text-red-900 mb-2">Sync Failed</h3>
+                <p className="text-red-800">{error}</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Upload History */}
+        {uploadHistory.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-2xl p-8">
+            <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+              <Clock className="w-6 h-6 text-blue-600" />
+              Backup History
+            </h2>
+            <div className="space-y-4">
+              {uploadHistory.map((item) => (
+                <div
+                  key={item.id}
+                  className="p-5 rounded-xl border-l-4 bg-green-50 border-green-500 transition-all hover:shadow-md"
+                >
+                  <div className="flex items-start justify-between flex-wrap gap-4">
+                    <div className="flex items-start gap-3 flex-1">
+                      <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="font-semibold text-gray-900 mb-1">{item.filename}</p>
+                        <p className="text-sm text-gray-600 mb-2">
+                          {new Date(item.uploadedAt).toLocaleString()}
+                        </p>
+                        
+                        <div className="flex flex-wrap gap-3 text-xs mt-2">
+                          <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                            📊 {item.recordsMerged} merged
+                          </span>
+                          <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded">
+                            ⏭️ {item.duplicatesSkipped} skipped
+                          </span>
+                          <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
+                            💾 {item.fileSize}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-3 py-1 rounded-full text-xs font-bold uppercase bg-green-100 text-green-800">
+                        {item.status}
+                      </span>
+                      <button
+                        onClick={() => handleDelete(item.id, item.filename)}
+                        disabled={deleting === item.id || !isSystemAvailable || !API_BASE}
+                        className="flex items-center gap-2 bg-red-600 text-white rounded-lg px-4 py-2 hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {deleting === item.id ? (
+                          <>
+                            <Loader className="w-4 h-4 animate-spin" />
+                            Deleting...
+                          </>
+                        ) : (
+                          <>
+                            <Trash2 className="w-4 h-4" />
+                            Delete
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Info Section */}
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-6 mt-6">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-blue-800">
+              <p className="font-semibold mb-3 text-base">How the Backup Sync Works:</p>
+              <ol className="list-decimal list-inside space-y-2">
+                <li className="pl-2">
+                  <span className="font-semibold">Upload:</span> Your SQL Server .bak backup file is securely uploaded
+                </li>
+                <li className="pl-2">
+                  <span className="font-semibold">Restore:</span> System restores backup to a temporary staging database
+                </li>
+                <li className="pl-2">
+                  <span className="font-semibold">Validate:</span> Checks for duplicate records using timestamp and terminal ID
+                </li>
+                <li className="pl-2">
+                  <span className="font-semibold">Merge:</span> Only new records are inserted into the main database (_Datos)
+                </li>
+                <li className="pl-2">
+                  <span className="font-semibold">Cleanup:</span> Staging database and temporary files are automatically removed
+                </li>
+              </ol>
+              <div className="mt-4 p-3 bg-blue-100 rounded-lg">
+                <p className="font-semibold mb-2">✅ Features:</p>
+                <ul className="list-disc list-inside space-y-1 text-xs">
+                  <li>Automatic duplicate prevention</li>
+                  <li>Safe merge without data loss</li>
+                  <li>Detailed statistics on every sync</li>
+                  <li>Automatic cleanup of temporary resources</li>
+                  <li><strong>One backup at a time policy</strong> - Delete old backup before uploading new</li>
+                </ul>
+              </div>
+              <div className="mt-4 p-3 bg-amber-100 rounded-lg border border-amber-300">
+                <p className="font-semibold mb-1 text-amber-900">⚠️ Important:</p>
+                <p className="text-xs text-amber-800">
+                  Only one backup can be active at a time. You must delete the existing backup before uploading a new one. This ensures data integrity and prevents conflicts.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

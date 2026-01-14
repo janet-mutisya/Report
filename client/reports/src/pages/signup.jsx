@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Shield, Mail, Lock, Building, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 
+const API_BASE = import.meta.env.VITE_API_URL;
+
 export default function Signup() {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
@@ -46,7 +48,7 @@ export default function Signup() {
     setLoading(true);
 
     try {
-      const response = await fetch('http://localhost:5000/api/auth/signup', {
+      const response = await fetch(`${API_BASE}/auth/signup`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -242,4 +244,4 @@ export default function Signup() {
       </div>
     </div>
   );
-} 
+}
