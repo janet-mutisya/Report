@@ -21,10 +21,11 @@ export default function AdminDashboard() {
   const [bmAccounts, setBMAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all'); // all, pending, active, inactive
+  const [statusFilter, setStatusFilter] = useState('all');
   const [selectedClient, setSelectedClient] = useState(null);
   const [linking, setLinking] = useState(false);
   const [loadingBMAccounts, setLoadingBMAccounts] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -32,18 +33,19 @@ export default function AdminDashboard() {
 
   const loadData = async () => {
     setLoading(true);
+    setError(null);
     try {
       const token = localStorage.getItem('token');
 
-      // Load all clients
       const clientsResponse = await fetch('http://localhost:5000/api/admin/clients', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const clientsData = await clientsResponse.json();
       setClients(clientsData.clients || []);
 
-    } catch (error) {
-      console.error('Failed to load admin data:', error);
+    } catch (err) {
+      console.error('Failed to load admin data:', err);
+      setError('Failed to load data. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -51,6 +53,7 @@ export default function AdminDashboard() {
 
   const loadBMAccounts = async () => {
     setLoadingBMAccounts(true);
+    setError(null);
     try {
       const token = localStorage.getItem('token');
       const response = await fetch('http://localhost:5000/api/admin/bm-accounts', {
@@ -58,8 +61,9 @@ export default function AdminDashboard() {
       });
       const data = await response.json();
       setBMAccounts(data.accounts || []);
-    } catch (error) {
-      console.error('Failed to load BM accounts:', error);
+    } catch (err) {
+      console.error('Failed to load BM accounts:', err);
+      setError('Failed to load BM accounts. Please try again.');
     } finally {
       setLoadingBMAccounts(false);
     }
@@ -69,6 +73,7 @@ export default function AdminDashboard() {
     if (!window.confirm(`Link client to account ${accountNumber}?`)) return;
 
     setLinking(true);
+    setError(null);
     try {
       const token = localStorage.getItem('token');
       const response = await fetch('http://localhost:5000/api/admin/link-account', {
@@ -84,13 +89,14 @@ export default function AdminDashboard() {
 
       if (data.success) {
         alert('Account linked successfully!');
-        loadData(); // Reload data
+        loadData();
         setSelectedClient(null);
       } else {
         alert(data.message || 'Failed to link account');
       }
 
-    } catch (error) {
+    } catch (err) {
+      console.error('Link error:', err);
       alert('Failed to link account. Please try again.');
     } finally {
       setLinking(false);
@@ -100,6 +106,7 @@ export default function AdminDashboard() {
   const handleUnlink = async (clientId) => {
     if (!window.confirm('Unlink this account? The client will lose access to their dashboard.')) return;
 
+    setError(null);
     try {
       const token = localStorage.getItem('token');
       const response = await fetch('http://localhost:5000/api/admin/unlink-account', {
@@ -120,7 +127,8 @@ export default function AdminDashboard() {
         alert(data.message || 'Failed to unlink account');
       }
 
-    } catch (error) {
+    } catch (err) {
+      console.error('Unlink error:', err);
       alert('Failed to unlink account');
     }
   };
@@ -151,7 +159,6 @@ export default function AdminDashboard() {
     window.URL.revokeObjectURL(url);
   };
 
-  // Filter clients
   const filteredClients = clients.filter(client => {
     const matchesSearch = 
       client.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -164,7 +171,6 @@ export default function AdminDashboard() {
     return matchesSearch && matchesStatus;
   });
 
-  // Stats
   const stats = {
     total: clients.length,
     active: clients.filter(c => c.status === 'active').length,
@@ -183,8 +189,7 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen bg-gray-50 py-8 px-4">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
+        <div className="mb-6">
           <div className="flex items-center gap-3 mb-2">
             <Shield className="w-8 h-8 text-blue-600" />
             <h1 className="text-3xl font-bold text-gray-900">Admin Dashboard</h1>
@@ -192,7 +197,67 @@ export default function AdminDashboard() {
           <p className="text-gray-600">Manage client accounts and manual linking</p>
         </div>
 
-        {/* Stats Cards */}
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            <p className="text-red-800">{error}</p>
+            <button 
+              onClick={() => setError(null)}
+              className="ml-auto text-red-600 hover:text-red-800"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        <div className="bg-white rounded-xl shadow-sm p-6 mb-8 border border-gray-100">
+          <div className="flex flex-wrap gap-4 items-end">
+            <div className="flex-1 min-w-64">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Search</label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search by email, company, or account..."
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="all">All Status</option>
+                <option value="active">Active</option>
+                <option value="pending_link">Pending Link</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+
+            <button
+              onClick={loadData}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Refresh
+            </button>
+
+            <button
+              onClick={exportToCSV}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              Export
+            </button>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
             <div className="flex items-center justify-between mb-4">
@@ -235,60 +300,7 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        {/* Filters and Search */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-8 border border-gray-100">
-          <div className="flex flex-wrap gap-4 items-end">
-            {/* Search */}
-            <div className="flex-1 min-w-64">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Search</label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search by email, company, or account..."
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-            </div>
-
-            {/* Status Filter */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Status</option>
-                <option value="active">Active</option>
-                <option value="pending_link">Pending Link</option>
-                <option value="inactive">Inactive</option>
-              </select>
-            </div>
-
-            {/* Actions */}
-            <button
-              onClick={loadData}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Refresh
-            </button>
-
-            <button
-              onClick={exportToCSV}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center gap-2"
-            >
-              <Download className="w-4 h-4" />
-              Export
-            </button>
-          </div>
-        </div>
-
-        {/* Clients Table */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-8">
           <div className="p-6 border-b border-gray-100">
             <h3 className="font-semibold text-gray-900 text-lg">Client Accounts</h3>
             <p className="text-sm text-gray-600 mt-1">
@@ -379,7 +391,6 @@ export default function AdminDashboard() {
         </div>
       </div>
 
-      {/* Manual Link Modal */}
       {selectedClient && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden">
@@ -391,7 +402,6 @@ export default function AdminDashboard() {
             </div>
 
             <div className="p-6 overflow-y-auto max-h-[60vh]">
-              {/* Client Info */}
               <div className="bg-blue-50 rounded-lg p-4 mb-6">
                 <h4 className="font-semibold text-gray-900 mb-2">Client Information</h4>
                 <div className="space-y-1 text-sm">
@@ -401,7 +411,6 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Load BM Accounts */}
               {!loadingBMAccounts && bmAccounts.length === 0 && (
                 <button
                   onClick={loadBMAccounts}
@@ -419,7 +428,6 @@ export default function AdminDashboard() {
                 </div>
               )}
 
-              {/* BM Accounts List */}
               {bmAccounts.length > 0 && (
                 <div className="space-y-2">
                   <h4 className="font-semibold text-gray-900 mb-3">

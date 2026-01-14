@@ -44,5 +44,17 @@
     "createdAt": "2025-12-30T07:44:09.663Z",
     "updatedAt": "2025-12-30T07:44:09.663Z",
     "isActive": true
+  },
+  {
+    "id": "1768308127824",
+    "email": "janetymutisya@gmail.com",
+    "passwordHash": "$2b$10$hDcfgvw5H9hlGCpwqsVx.efGkTOMjXdn3jtUSgNyGku6/6aJ1jO1K",
+    "accountNumber": null,
+    "companyName": "sarit",
+    "status": "pending_link",
+    "role": "client",
+    "createdAt": "2026-01-13T12:42:07.824Z",
+    "updatedAt": "2026-01-13T12:46:16.153Z",
+    "isActive": true
   }
 ]

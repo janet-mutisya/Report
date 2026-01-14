@@ -570,7 +570,7 @@ app.use((err, req, res, next) => {
 // =============================================
 
 if (!IS_PRODUCTION || cluster.isWorker) {
-  const server = app.listen(PORT, () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log("===============================================");
     console.log(`🚀 Server ${process.pid} running on port ${PORT}`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
