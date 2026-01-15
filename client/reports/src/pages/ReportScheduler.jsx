@@ -6,8 +6,8 @@ import {
   Shield, AlertCircle
 } from 'lucide-react';
 
-// API Configuration - UPDATED TO DEPLOYED BACKEND
-const API_BASE_URL = 'https://report-patrol.onrender.com/api';
+// API Configuration - UPDATED TO LOCALHOST
+const API_BASE_URL = 'http://localhost:5000/api';
 
 const SecurityReportsPage = () => {
   // State Management
@@ -85,13 +85,13 @@ const SecurityReportsPage = () => {
     } catch (fetchError) {
       console.error('❌ API Error:', fetchError);
       if (fetchError.message.includes('Failed to fetch')) {
-        throw new Error('Cannot connect to backend server. Please check your internet connection.');
+        throw new Error('Cannot connect to backend server. Make sure backend is running on http://localhost:5000');
       }
       throw fetchError;
     }
   }, []);
 
-  // Data Fetching - UPDATED TO DEPLOYED BACKEND
+  // Data Fetching - UPDATED TO LOCALHOST
   const fetchSchedules = useCallback(async () => {
     try {
       setLoading(true);
@@ -115,7 +115,7 @@ const SecurityReportsPage = () => {
     }
   }, [fetchAPI]);
 
-  // Schedule Management - UPDATED TO DEPLOYED BACKEND
+  // Schedule Management - UPDATED TO LOCALHOST
   const createSchedule = useCallback(async () => {
     try {
       if (!formData.clientId || !formData.email || !formData.nextRun) {
@@ -132,10 +132,14 @@ const SecurityReportsPage = () => {
         type: 1
       };
       
-      await fetchAPI(`${API_BASE_URL}/scheduler`, {
+      console.log('📤 Creating schedule:', requestBody);
+      
+      const response = await fetchAPI(`${API_BASE_URL}/scheduler`, {
         method: 'POST',
         body: JSON.stringify(requestBody)
       });
+      
+      console.log('✅ Create schedule response:', response);
       
       setSuccess('Schedule created successfully');
       setShowModal(false);
@@ -143,7 +147,7 @@ const SecurityReportsPage = () => {
       fetchSchedules();
     } catch (createError) {
       console.error('❌ Create schedule error:', createError);
-      setError(createError.message);
+      setError(createError.message || 'Failed to create schedule');
     }
   }, [formData, fetchAPI, fetchSchedules]);
 
@@ -161,10 +165,14 @@ const SecurityReportsPage = () => {
         nextRun: formData.nextRun
       };
       
-      await fetchAPI(`${API_BASE_URL}/scheduler/${currentSchedule.id}`, {
+      console.log('📤 Updating schedule:', requestBody);
+      
+      const response = await fetchAPI(`${API_BASE_URL}/scheduler/${currentSchedule.id}`, {
         method: 'PUT',
         body: JSON.stringify(requestBody)
       });
+      
+      console.log('✅ Update schedule response:', response);
       
       setSuccess('Schedule updated successfully');
       setShowModal(false);
@@ -173,7 +181,7 @@ const SecurityReportsPage = () => {
       fetchSchedules();
     } catch (updateError) {
       console.error('❌ Update failed:', updateError);
-      setError(updateError.message);
+      setError(updateError.message || 'Failed to update schedule');
     }
   }, [currentSchedule, formData, fetchAPI, fetchSchedules]);
 
@@ -181,6 +189,8 @@ const SecurityReportsPage = () => {
     if (!window.confirm(`Are you sure you want to delete the schedule for ${schedule.clientName}?`)) return;
     
     try {
+      console.log(`🗑️ Deleting schedule ${schedule.id}`);
+      
       await fetchAPI(`${API_BASE_URL}/scheduler/${schedule.id}`, {
         method: 'DELETE'
       });
@@ -188,11 +198,11 @@ const SecurityReportsPage = () => {
       setSuccess('Schedule deleted successfully');
       fetchSchedules();
     } catch (deleteError) {
-      setError(deleteError.message);
+      setError(deleteError.message || 'Failed to delete schedule');
     }
   }, [fetchAPI, fetchSchedules]);
 
-  // Report Functions - SEND MANUAL REPORT (UPDATED TO DEPLOYED BACKEND)
+  // Report Functions - SEND MANUAL REPORT (UPDATED TO LOCALHOST)
   const sendReport = useCallback(async () => {
     try {
       setIsSendingReport(true);
@@ -205,8 +215,10 @@ const SecurityReportsPage = () => {
 
       console.log('📤 Sending manual report for client:', reportForm.clientId);
       
+      // Prepare request body according to schedulerRoutes.js
       const requestBody = {
-        reportPeriod: reportForm.reportPeriod,
+        clientId: parseInt(reportForm.clientId),
+        period: reportForm.reportPeriod === 'custom' ? 'custom' : 'previousWeek',
         recipientEmail: reportForm.recipientEmail || ''
       };
 
@@ -221,14 +233,13 @@ const SecurityReportsPage = () => {
       
       console.log('📤 Report request body:', requestBody);
       
-      // Using the correct endpoint from your schedulerRoutes
+      // Using the correct endpoint from schedulerRoutes.js
       const responseData = await fetchAPI(`${API_BASE_URL}/scheduler/trigger/patrol-reports`, {
         method: 'POST',
-        body: JSON.stringify({
-          clientId: parseInt(reportForm.clientId),
-          ...requestBody
-        })
+        body: JSON.stringify(requestBody)
       });
+      
+      console.log('✅ Report sent response:', responseData);
       
       setSuccess(responseData.message || 'Report sent successfully! Check your email.');
       setReportForm({
@@ -241,7 +252,7 @@ const SecurityReportsPage = () => {
       setShowManualReport(false);
     } catch (reportError) {
       console.error('❌ Send report error:', reportError);
-      setError(reportError.message);
+      setError(reportError.message || 'Failed to send report');
     } finally {
       setIsSendingReport(false);
     }
@@ -250,25 +261,28 @@ const SecurityReportsPage = () => {
   const sendQuickReport = useCallback(async (clientId) => {
     try {
       console.log('🚀 Sending quick report for client:', clientId);
+      // This would call a different endpoint - you might need to implement this
       setSuccess('Quick report feature coming soon!');
     } catch (quickError) {
       console.error('❌ Quick report error:', quickError);
-      setError(quickError.message);
+      setError(quickError.message || 'Failed to send quick report');
     }
   }, []);
 
   const viewPreview = useCallback(async (clientId) => {
     try {
       console.log('👁️ Fetching preview for client:', clientId);
-      setPreviewData({ summary: { totalPatrols: 0, complianceRate: 'N/A' } });
+      // Fetch preview data from /api/scheduler/analytics/client/:clientId
+      const previewData = await fetchAPI(`${API_BASE_URL}/scheduler/analytics/client/${clientId}?days=7`);
+      setPreviewData(previewData);
       setShowPreview(true);
     } catch (previewError) {
       console.error('❌ Preview error:', previewError);
-      setError(previewError.message);
+      setError(previewError.message || 'Failed to load preview');
     }
-  }, []);
+  }, [fetchAPI]);
 
-  // Health Check - UPDATED TO DEPLOYED BACKEND
+  // Health Check - UPDATED TO LOCALHOST
   const checkBackendHealth = useCallback(async () => {
     try {
       const health = await fetchAPI(`${API_BASE_URL}/scheduler/health`);
@@ -276,7 +290,7 @@ const SecurityReportsPage = () => {
       return true;
     } catch (healthError) {
       console.error('❌ Backend health check failed:', healthError);
-      setError('Backend server is not responding. Please try again later.');
+      setError('Backend server is not responding. Make sure the backend is running on http://localhost:5000');
       return false;
     }
   }, [fetchAPI]);
@@ -902,15 +916,15 @@ const SecurityReportsPage = () => {
                 <h4 className="font-semibold text-blue-900 mb-3">Summary</h4>
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div>
-                    <p className="text-blue-600">Total Patrols</p>
+                    <p className="text-blue-600">Overall Performance</p>
                     <p className="text-2xl font-bold text-blue-900">
-                      {previewData.summary?.totalPatrols || 0}
+                      {previewData.analytics?.overallPerformance || 0}%
                     </p>
                   </div>
                   <div>
-                    <p className="text-blue-600">Compliance</p>
+                    <p className="text-blue-600">Patrols Completed</p>
                     <p className="text-2xl font-bold text-blue-900">
-                      {previewData.summary?.complianceRate || 'N/A'}
+                      {previewData.analytics?.totalCompleted || 0}
                     </p>
                   </div>
                 </div>

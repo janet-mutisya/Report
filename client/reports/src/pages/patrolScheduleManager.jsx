@@ -4,94 +4,93 @@ import {
   Loader, FileUp, Clock, Activity, Server, Trash2, Lock 
 } from "lucide-react";
 
+// API Configuration
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+
 // Helper function for consistent API calls
-const createApiHelper = (baseUrl) => {
+const createApiHelper = () => {
   const apiFetch = async (endpoint, options = {}) => {
-    const url = `${baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
-    });
+    const url = `${API_BASE}${endpoint}`;
     
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage;
-      try {
-        const errorData = JSON.parse(errorText);
-        errorMessage = errorData.message || `HTTP ${response.status}`;
-      } catch {
-        errorMessage = `HTTP ${response.status}: ${errorText}`;
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage;
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.message || `HTTP ${response.status}`;
+        } catch {
+          errorMessage = `HTTP ${response.status}: ${errorText}`;
+        }
+        throw new Error(errorMessage);
       }
-      throw new Error(errorMessage);
+      
+      return await response.json();
+    } catch (error) {
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        throw new Error('Cannot connect to server. Please check if the server is running.');
+      }
+      throw error;
     }
-    
-    const responseData = await response.json();
-    if (!responseData.success) {
-      throw new Error(responseData.message || "API request failed");
-    }
-    
-    return responseData;
   };
 
   const apiFetchFormData = async (endpoint, formData) => {
-    const url = `${baseUrl}${endpoint}`;
-    const response = await fetch(url, {
-      method: "POST",
-      body: formData,
-    });
+    const url = `${API_BASE}${endpoint}`;
     
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage;
-      try {
-        const errorData = JSON.parse(errorText);
-        errorMessage = errorData.message || `HTTP ${response.status}`;
-      } catch {
-        errorMessage = `HTTP ${response.status}: ${errorText}`;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage;
+        try {
+          const errorData = JSON.parse(errorText);
+          errorMessage = errorData.message || `HTTP ${response.status}`;
+        } catch {
+          errorMessage = `HTTP ${response.status}: ${errorText}`;
+        }
+        throw new Error(errorMessage);
       }
-      throw new Error(errorMessage);
+      
+      return await response.json();
+    } catch (error) {
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        throw new Error('Cannot connect to server. Please check if the server is running.');
+      }
+      throw error;
     }
-    
-    const responseData = await response.json();
-    if (!responseData.success) {
-      throw new Error(responseData.message || "API request failed");
-    }
-    
-    return responseData;
   };
 
   return { apiFetch, apiFetchFormData };
 };
 
 export default function BackupSyncDashboard() {
-  // Get API base URL from environment
-  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000';
-  
   // State Management
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [error, setError] = useState("");
   const [uploadHistory, setUploadHistory] = useState([]);
-  const [dragActive, setDragActive] = useState(false);
   const [deleting, setDeleting] = useState(null);
   const [canUpload, setCanUpload] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [serverReachable, setServerReachable] = useState(null);
+  const [serverReachable, setServerReachable] = useState(true);
   const [configError, setConfigError] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
 
   // Initialize API helper
-  const { apiFetch, apiFetchFormData } = createApiHelper(API_BASE);
-
-  // Check configuration on mount
-  useEffect(() => {
-    if (!API_BASE) {
-      setConfigError("VITE_API_URL is not defined in environment variables");
-    }
-  }, [API_BASE]);
+  const { apiFetch, apiFetchFormData } = createApiHelper();
 
   // Format file size helper
   const formatFileSize = useCallback((bytes) => {
@@ -102,25 +101,49 @@ export default function BackupSyncDashboard() {
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + " " + sizes[i];
   }, []);
 
+  // Check server health
+  const checkServerHealth = useCallback(async () => {
+    if (!isOnline) return false;
+    
+    try {
+      const response = await fetch(`${API_BASE}/health`);
+      return response.ok;
+    } catch (error) {
+      console.error("Server health check failed:", error);
+      return false;
+    }
+  }, [isOnline]);
+
   // Fetch upload history
   const fetchUploadHistory = useCallback(async () => {
-    if (!navigator.onLine || !API_BASE) {
+    if (!isOnline) {
+      setServerReachable(false);
       return;
     }
 
     try {
-      const responseData = await apiFetch("/api/backup/history");
-      setUploadHistory(responseData.history || []);
-      setCanUpload(responseData.history?.length === 0);
+      const isServerHealthy = await checkServerHealth();
+      if (!isServerHealthy) {
+        setServerReachable(false);
+        return;
+      }
+
+      const responseData = await apiFetch("/backup/history");
+      if (responseData.success) {
+        setUploadHistory(responseData.history || []);
+        setCanUpload(responseData.history?.length === 0);
+      } else {
+        setError(responseData.message || "Failed to fetch history");
+      }
       setServerReachable(true);
     } catch (err) {
       console.error("Failed to fetch upload history:", err.message);
       setServerReachable(false);
-      if (err.message.includes("fetch") || err.message.includes("Network")) {
-        setServerReachable(false);
+      if (err.message.includes('Cannot connect to server')) {
+        setError("Cannot connect to backend server. Make sure it's running on http://localhost:5000");
       }
     }
-  }, [API_BASE, apiFetch]);
+  }, [isOnline, apiFetch, checkServerHealth]);
 
   // Handle delete backup
   const handleDelete = async (id, filename) => {
@@ -130,23 +153,25 @@ export default function BackupSyncDashboard() {
 
     setDeleting(id);
     try {
-      await apiFetch(`/api/backup/history/${id}`, {
+      const response = await apiFetch(`/backup/history/${id}`, {
         method: "DELETE",
       });
 
-      setUploadHistory((prev) => prev.filter((item) => item.id !== id));
-      setCanUpload(true);
-      setServerReachable(true);
-      setUploadResult({
-        success: true,
-        message: `Backup "${filename}" deleted successfully. You can now upload a new backup.`,
-        isDelete: true,
-      });
-      setError("");
+      if (response.success) {
+        setUploadHistory((prev) => prev.filter((item) => item.id !== id));
+        setCanUpload(true);
+        setUploadResult({
+          success: true,
+          message: `Backup "${filename}" deleted successfully. You can now upload a new backup.`,
+          isDelete: true,
+        });
+        setError("");
+      } else {
+        throw new Error(response.message || "Delete failed");
+      }
     } catch (err) {
       console.error("Delete error:", err.message);
       setError(err.message || "Failed to delete backup");
-      setServerReachable(false);
     } finally {
       setDeleting(null);
     }
@@ -157,9 +182,14 @@ export default function BackupSyncDashboard() {
     const selectedFile = e.target.files[0];
     if (selectedFile) {
       if (selectedFile.name.endsWith(".bak")) {
-        setFile(selectedFile);
-        setError("");
-        setUploadResult(null);
+        if (selectedFile.size > 500 * 1024 * 1024) { // 500MB limit
+          setError("File size exceeds 500MB limit");
+          setFile(null);
+        } else {
+          setFile(selectedFile);
+          setError("");
+          setUploadResult(null);
+        }
       } else {
         setError("Please select a valid .bak file");
         setFile(null);
@@ -187,9 +217,14 @@ export default function BackupSyncDashboard() {
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       const droppedFile = e.dataTransfer.files[0];
       if (droppedFile.name.endsWith(".bak")) {
-        setFile(droppedFile);
-        setError("");
-        setUploadResult(null);
+        if (droppedFile.size > 500 * 1024 * 1024) {
+          setError("File size exceeds 500MB limit");
+          setFile(null);
+        } else {
+          setFile(droppedFile);
+          setError("");
+          setUploadResult(null);
+        }
       } else {
         setError("Please drop a valid .bak file");
       }
@@ -208,11 +243,6 @@ export default function BackupSyncDashboard() {
       return;
     }
 
-    if (!API_BASE) {
-      setError("Server configuration error. Please contact support.");
-      return;
-    }
-
     setUploading(true);
     setError("");
     setUploadResult(null);
@@ -221,21 +251,23 @@ export default function BackupSyncDashboard() {
     formData.append("file", file);
 
     try {
-      const responseData = await apiFetchFormData("/api/backup/sync", formData);
+      const response = await apiFetchFormData("/backup/sync", formData);
       
-      setUploadResult({
-        success: true,
-        message: responseData.message,
-        details: responseData.details,
-      });
-      setFile(null);
-      setServerReachable(true);
-      
-      // Refresh history
-      await fetchUploadHistory();
+      if (response.success) {
+        setUploadResult({
+          success: true,
+          message: response.message,
+          details: response.details,
+        });
+        setFile(null);
+        
+        // Refresh history
+        await fetchUploadHistory();
+      } else {
+        throw new Error(response.message || "Upload failed");
+      }
     } catch (err) {
       setError(err.message || "Backup sync failed");
-      setServerReachable(false);
     } finally {
       setUploading(false);
     }
@@ -245,13 +277,12 @@ export default function BackupSyncDashboard() {
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      if (API_BASE) {
-        fetchUploadHistory();
-      }
+      fetchUploadHistory();
     };
 
     const handleOffline = () => {
       setIsOnline(false);
+      setServerReachable(false);
     };
 
     window.addEventListener('online', handleOnline);
@@ -261,14 +292,14 @@ export default function BackupSyncDashboard() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [API_BASE, fetchUploadHistory]);
+  }, [fetchUploadHistory]);
 
   // Initial data fetch
   useEffect(() => {
-    if (navigator.onLine && API_BASE) {
+    if (navigator.onLine) {
       fetchUploadHistory();
     }
-  }, [API_BASE, fetchUploadHistory]);
+  }, [fetchUploadHistory]);
 
   // Auto-clear messages
   useEffect(() => {
@@ -280,7 +311,7 @@ export default function BackupSyncDashboard() {
 
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => setError(null), 8000);
+      const timer = setTimeout(() => setError(""), 8000);
       return () => clearTimeout(timer);
     }
   }, [error]);
@@ -291,15 +322,15 @@ export default function BackupSyncDashboard() {
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
         {/* Configuration Error */}
-        {configError && (
+        {!API_BASE && (
           <div className="bg-red-900 border-l-4 border-red-600 rounded-xl p-6 mb-6 shadow-lg">
             <div className="flex items-start gap-4">
               <AlertCircle className="w-8 h-8 text-red-300 flex-shrink-0 mt-1" />
               <div className="flex-1">
                 <h3 className="text-xl font-bold text-white mb-2">Configuration Error</h3>
-                <p className="text-red-100 mb-2">{configError}</p>
+                <p className="text-red-100 mb-2">VITE_API_URL is not configured</p>
                 <p className="text-sm text-red-200">
-                  Please check your environment configuration or contact your system administrator.
+                  Using default: http://localhost:5000/api
                 </p>
               </div>
             </div>
@@ -316,6 +347,7 @@ export default function BackupSyncDashboard() {
               <div>
                 <h1 className="text-4xl font-bold mb-2">Database Backup Sync</h1>
                 <p className="text-blue-100 text-lg">Upload and restore SQL Server backup files</p>
+                <p className="text-blue-200 text-sm mt-1">API Base: {API_BASE}</p>
               </div>
             </div>
             <div className="flex flex-col gap-2">
@@ -364,9 +396,6 @@ export default function BackupSyncDashboard() {
                 <p className="text-red-800 mb-2">
                   You are currently offline. Please check your internet connection to use the backup sync service.
                 </p>
-                <p className="text-sm text-red-700">
-                  The system will automatically reconnect when your internet connection is restored.
-                </p>
               </div>
             </div>
           </div>
@@ -380,10 +409,10 @@ export default function BackupSyncDashboard() {
               <div className="flex-1">
                 <h3 className="text-lg font-bold text-orange-900 mb-2">Server Unreachable</h3>
                 <p className="text-orange-800 mb-2">
-                  Unable to connect to the backup server. The server may be down or experiencing issues.
+                  Unable to connect to the backup server at {API_BASE}. The server may be down or experiencing issues.
                 </p>
                 <p className="text-sm text-orange-700">
-                  Please contact your system administrator or try again later.
+                  Please make sure the backend server is running on http://localhost:5000
                 </p>
               </div>
             </div>
@@ -400,9 +429,6 @@ export default function BackupSyncDashboard() {
                 <p className="text-amber-800 mb-2">
                   You must delete the existing backup before uploading a new one. Only one active backup is allowed at a time.
                 </p>
-                <p className="text-sm text-amber-700">
-                  Scroll down to the backup history section and delete the current backup to enable new uploads.
-                </p>
               </div>
             </div>
           </div>
@@ -418,16 +444,16 @@ export default function BackupSyncDashboard() {
           {/* Drag & Drop Zone */}
           <div
             className={`relative border-3 border-dashed rounded-xl p-12 text-center transition-all ${
-              !canUpload || !isSystemAvailable || !API_BASE
+              !canUpload || !isSystemAvailable
                 ? "border-gray-200 bg-gray-100 cursor-not-allowed opacity-50"
                 : dragActive
                 ? "border-blue-500 bg-blue-50"
                 : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50"
             }`}
-            onDragEnter={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
-            onDragLeave={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
-            onDragOver={canUpload && isSystemAvailable && API_BASE ? handleDrag : undefined}
-            onDrop={canUpload && isSystemAvailable && API_BASE ? handleDrop : undefined}
+            onDragEnter={canUpload && isSystemAvailable ? handleDrag : undefined}
+            onDragLeave={canUpload && isSystemAvailable ? handleDrag : undefined}
+            onDragOver={canUpload && isSystemAvailable ? handleDrag : undefined}
+            onDrop={canUpload && isSystemAvailable ? handleDrop : undefined}
           >
             <input
               type="file"
@@ -435,19 +461,17 @@ export default function BackupSyncDashboard() {
               onChange={handleFileChange}
               className="hidden"
               id="file-upload"
-              disabled={uploading || !canUpload || !isSystemAvailable || !API_BASE}
+              disabled={uploading || !canUpload || !isSystemAvailable}
             />
 
             <label
               htmlFor="file-upload"
-              className={`flex flex-col items-center ${canUpload && isSystemAvailable && API_BASE ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+              className={`flex flex-col items-center ${canUpload && isSystemAvailable ? 'cursor-pointer' : 'cursor-not-allowed'}`}
             >
-              {(!canUpload || !isSystemAvailable || !API_BASE) && <Lock className="w-16 h-16 text-gray-400 mb-4" />}
-              {canUpload && isSystemAvailable && API_BASE && <Upload className="w-16 h-16 text-gray-400 mb-4" />}
+              {(!canUpload || !isSystemAvailable) && <Lock className="w-16 h-16 text-gray-400 mb-4" />}
+              {canUpload && isSystemAvailable && <Upload className="w-16 h-16 text-gray-400 mb-4" />}
               <p className="text-xl font-semibold text-gray-700 mb-2">
-                {!API_BASE
-                  ? "Upload Disabled - Configuration error"
-                  : !isOnline
+                {!isOnline
                   ? "Upload Disabled - No internet connection"
                   : !serverReachable
                   ? "Upload Disabled - Server unreachable"
@@ -460,7 +484,7 @@ export default function BackupSyncDashboard() {
               <p className="text-sm text-gray-500 mb-4">
                 Supports .bak files only • Max size: 500MB
               </p>
-              {file && canUpload && isSystemAvailable && API_BASE && (
+              {file && canUpload && isSystemAvailable && (
                 <div className="bg-blue-100 text-blue-800 px-4 py-2 rounded-lg font-medium">
                   {formatFileSize(file.size)}
                 </div>
@@ -472,18 +496,13 @@ export default function BackupSyncDashboard() {
           <div className="mt-6">
             <button
               onClick={handleUpload}
-              disabled={!file || uploading || !canUpload || !isSystemAvailable || !API_BASE}
+              disabled={!file || uploading || !canUpload || !isSystemAvailable}
               className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl p-4 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
             >
               {uploading ? (
                 <>
                   <Loader className="w-5 h-5 animate-spin" />
                   Syncing Backup...
-                </>
-              ) : !API_BASE ? (
-                <>
-                  <XCircle className="w-5 h-5" />
-                  Configuration Error
                 </>
               ) : !isSystemAvailable ? (
                 <>
@@ -515,16 +534,16 @@ export default function BackupSyncDashboard() {
                 </div>
               </div>
               <div className="space-y-2 text-sm text-blue-800 ml-8">
+                <p>• Uploading file to server</p>
                 <p>• Restoring backup to staging database</p>
                 <p>• Checking for duplicate records</p>
                 <p>• Merging data into main database</p>
-                <p>• Cleaning up temporary files</p>
               </div>
             </div>
           )}
         </div>
 
-        {/* Success Message with Details */}
+        {/* Success Message */}
         {uploadResult && uploadResult.success && (
           <div className={`border-l-4 rounded-xl p-6 mb-6 shadow-lg ${
             uploadResult.isDelete 
@@ -547,7 +566,6 @@ export default function BackupSyncDashboard() {
                 
                 {uploadResult.details && (
                   <>
-                    {/* Stats Grid */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
                       <div className="bg-white/60 rounded-lg p-3">
                         <p className="text-xs text-gray-600 mb-1">File Size</p>
@@ -584,7 +602,7 @@ export default function BackupSyncDashboard() {
             <div className="flex items-start gap-4">
               <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
               <div>
-                <h3 className="text-lg font-bold text-red-900 mb-2">Sync Failed</h3>
+                <h3 className="text-lg font-bold text-red-900 mb-2">Error</h3>
                 <p className="text-red-800">{error}</p>
               </div>
             </div>
@@ -632,7 +650,7 @@ export default function BackupSyncDashboard() {
                       </span>
                       <button
                         onClick={() => handleDelete(item.id, item.filename)}
-                        disabled={deleting === item.id || !isSystemAvailable || !API_BASE}
+                        disabled={deleting === item.id || !isSystemAvailable}
                         className="flex items-center gap-2 bg-red-600 text-white rounded-lg px-4 py-2 hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
                       >
                         {deleting === item.id ? (
@@ -672,10 +690,7 @@ export default function BackupSyncDashboard() {
                   <span className="font-semibold">Validate:</span> Checks for duplicate records using timestamp and terminal ID
                 </li>
                 <li className="pl-2">
-                  <span className="font-semibold">Merge:</span> Only new records are inserted into the main database (_Datos)
-                </li>
-                <li className="pl-2">
-                  <span className="font-semibold">Cleanup:</span> Staging database and temporary files are automatically removed
+                  <span className="font-semibold">Merge:</span> Only new records are inserted into the main database
                 </li>
               </ol>
               <div className="mt-4 p-3 bg-blue-100 rounded-lg">
@@ -684,15 +699,8 @@ export default function BackupSyncDashboard() {
                   <li>Automatic duplicate prevention</li>
                   <li>Safe merge without data loss</li>
                   <li>Detailed statistics on every sync</li>
-                  <li>Automatic cleanup of temporary resources</li>
-                  <li><strong>One backup at a time policy</strong> - Delete old backup before uploading new</li>
+                  <li><strong>One backup at a time policy</strong></li>
                 </ul>
-              </div>
-              <div className="mt-4 p-3 bg-amber-100 rounded-lg border border-amber-300">
-                <p className="font-semibold mb-1 text-amber-900">⚠️ Important:</p>
-                <p className="text-xs text-amber-800">
-                  Only one backup can be active at a time. You must delete the existing backup before uploading a new one. This ensures data integrity and prevents conflicts.
-                </p>
               </div>
             </div>
           </div>

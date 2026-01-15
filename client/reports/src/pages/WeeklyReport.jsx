@@ -54,8 +54,8 @@ export default function SecurityDashboard() {
   const [clientScheduleInfo, setClientScheduleInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Use deployed backend URL
-  const API_BASE = "https://report-patrol.onrender.com/api";
+  // Use localhost backend URL
+  const API_BASE = "http://localhost:5000/api";
 
   // ✅ MOVED UP: getShiftLabel function - defined before it's used
   const getShiftLabel = useCallback((shiftValue) => {
@@ -383,7 +383,7 @@ export default function SecurityDashboard() {
       .trim();
   }, []);
 
-  // Main report fetch function - SYNCED WITH BACKEND PARAMETERS
+  // Main report fetch function
   const handleFetchReport = useCallback(async () => {
     setErrorMessage("");
 
@@ -392,7 +392,6 @@ export default function SecurityDashboard() {
       return;
     }
 
-    // ✅ SYNCED: Use correct parameter names for patrol endpoint
     const startDateTime = combineDateTime(startDate, startTime || "00:00");
     const endDateTime = combineDateTime(endDate, endTime || "23:59");
 
@@ -413,7 +412,6 @@ export default function SecurityDashboard() {
     setReport(null);
 
     try {
-      // ✅ SYNCED: Correct parameter names for patrol endpoint
       const url = `${API_BASE}/reports/patrol?client=${encodeURIComponent(
         client
       )}&startDateTime=${encodeURIComponent(startDateTime)}&endDateTime=${encodeURIComponent(
@@ -439,7 +437,6 @@ export default function SecurityDashboard() {
           calculationMethod: data.calculations?.method
         });
 
-        // Process the data with proper filtering - TRUST BACKEND CALCULATIONS
         const processedData = processReportData(data);
         
         console.log('🔄 Processed report data:', {
@@ -462,7 +459,7 @@ export default function SecurityDashboard() {
     }
   }, [API_BASE, client, startDate, startTime, endDate, endTime, shiftType, processReportData]);
 
-  // ✅ MOVED UP: Calculate dashboard metrics - defined before PDF export
+  // Calculate dashboard metrics
   const calculateDashboardMetrics = useCallback(() => {
     if (!report?.summary || !report?.calculations) return null;
 
@@ -474,17 +471,15 @@ export default function SecurityDashboard() {
     const performanceRating = report.calculations.performanceRating || 'N/A';
     const expectedPerZone = report.calculations.expectedPerZone || 0;
 
-    // Calculate performance data properly - FIXED
     const performanceData = validSummary.map((row) => {
       const completed = parseInt(row.ChecksCompleted) || 0;
       const expected = parseInt(row.ExpectedChecks) || 0;
       let performanceRate = 0;
       
-      // Calculate performance rate correctly
       if (expected > 0) {
         performanceRate = (completed / expected) * 100;
       } else if (completed > 0) {
-        performanceRate = 100; // If no expected but completed, treat as 100%
+        performanceRate = 100;
       }
       
       return {
@@ -513,7 +508,6 @@ export default function SecurityDashboard() {
       target: 90
     }));
 
-    // Properly handle guard reports data
     const guardReportsData = report.guardReports || [];
     const totalIncidents = guardReportsData.length;
 
@@ -521,7 +515,7 @@ export default function SecurityDashboard() {
       totalIncidents,
       guardReportsData,
       totalMissedPatrols,
-      performanceData: performanceData.filter(p => p.name && p.name.trim().length > 0), // Filter out empty names
+      performanceData: performanceData.filter(p => p.name && p.name.trim().length > 0),
       totalCompleted,
       totalExpected,
       overallRate: Math.round(overallRate),
@@ -535,7 +529,7 @@ export default function SecurityDashboard() {
     };
   }, [report]);
 
-  // Enhanced text wrapping for PDF with proper width calculation
+  // Enhanced text wrapping for PDF
   const wrapText = (pdf, text, maxWidth, fontSize = 9) => {
     if (!text) return [''];
     const textStr = String(text).trim();
@@ -576,8 +570,8 @@ export default function SecurityDashboard() {
     const completed = metricsData.totalCompleted;
     const missed = metricsData.totalMissedPatrols;
     const total = completed + missed;
-    const completedPercent = total > 0 ? Math.round((completed / total * 100)) : 0; // Whole number
-    const missedPercent = total > 0 ? Math.round((missed / total * 100)) : 0; // Whole number
+    const completedPercent = total > 0 ? Math.round((completed / total * 100)) : 0;
+    const missedPercent = total > 0 ? Math.round((missed / total * 100)) : 0;
 
     const centerX = canvas.width / 2;
     const centerY = canvas.height / 2;
@@ -648,7 +642,7 @@ export default function SecurityDashboard() {
     return canvas.toDataURL('image/png');
   };
 
-  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS - CLIENT-SIDE GENERATION
+  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS
   const exportToPDF = useCallback(async () => {
     if (!report) return;
 
@@ -680,32 +674,26 @@ export default function SecurityDashboard() {
 
       const addHeader = (isFirstPage = false) => {
         if (isFirstPage) {
-          // Blue header background
           pdf.setFillColor(30, 64, 175);
           pdf.rect(0, 0, pageWidth, 40, 'F');
           
-          // White box for title
           pdf.setFillColor(255, 255, 255);
           pdf.rect(margin, 10, pageWidth - 2 * margin, 25, 'F');
           
-          // Red accent line
           pdf.setFillColor(220, 38, 38);
           pdf.rect(margin, 33, pageWidth - 2 * margin, 2, 'F');
           
-          // Main title in blue
           pdf.setTextColor(30, 64, 175);
           pdf.setFontSize(18);
           pdf.setFont(undefined, 'bold');
           pdf.text(COMPANY_NAME, pageWidth / 2, 20, { align: 'center' });
           
-          // Client name in red
           pdf.setTextColor(220, 38, 38);
           pdf.setFontSize(14);
           pdf.text(`FOR: ${CLIENT_NAME}`, pageWidth / 2, 28, { align: 'center' });
           
           yPos = 45;
         } else {
-          // Continuation header
           pdf.setFillColor(30, 64, 175);
           pdf.rect(0, 0, pageWidth, 15, 'F');
           
@@ -721,7 +709,6 @@ export default function SecurityDashboard() {
       const addFooter = () => {
         const footerY = pageHeight - 15;
         
-        // Red separator line
         pdf.setDrawColor(220, 38, 38);
         pdf.line(margin, footerY - 5, pageWidth - margin, footerY - 5);
         
@@ -747,7 +734,6 @@ export default function SecurityDashboard() {
       const addSectionTitle = (title, subtitle = '') => {
         checkSpace(12);
         
-        // Blue background for section titles
         pdf.setFillColor(30, 64, 175);
         pdf.rect(margin, yPos, pageWidth - 2 * margin, 8, 'F');
         
@@ -766,7 +752,6 @@ export default function SecurityDashboard() {
         yPos += 10;
       };
 
-      // Simple table row for headers and summary data
       const addTableRow = (columns, isHeader = false, columnWidths = []) => {
         const rowHeight = 7;
         
@@ -777,14 +762,12 @@ export default function SecurityDashboard() {
         }
         
         if (isHeader) {
-          // Red header for tables
           pdf.setFillColor(220, 38, 38);
           pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
           pdf.setTextColor(255, 255, 255);
           pdf.setFontSize(8);
           pdf.setFont(undefined, 'bold');
         } else {
-          // Alternating row colors
           if ((yPos / rowHeight) % 2 === 0) {
             pdf.setFillColor(248, 250, 252);
           } else {
@@ -818,40 +801,33 @@ export default function SecurityDashboard() {
         return rowHeight;
       };
 
-      // Multi-line table row function for events with proper text wrapping
       const addMultiLineTableRow = (columns, isHeader = false, columnWidths = []) => {
         const minRowHeight = 7;
         const lineHeight = 4;
         const padding = 2;
         
-        // Calculate wrapped text for each column
         const wrappedColumns = columns.map((text, index) => {
           const colWidth = columnWidths[index];
           const maxWidth = colWidth - (padding * 2);
           return wrapText(pdf, String(text || ''), maxWidth, 7);
         });
         
-        // Find the maximum number of lines needed
         const maxLines = Math.max(...wrappedColumns.map(lines => lines.length));
         const rowHeight = Math.max(minRowHeight, maxLines * lineHeight + 2);
         
-        // Check if we need a new page
         if (checkSpace(rowHeight)) {
           if (isHeader) {
             return addMultiLineTableRow(columns, true, columnWidths);
           }
         }
         
-        // Set background and text colors
         if (isHeader) {
-          // Red header for event tables
           pdf.setFillColor(220, 38, 38);
           pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
           pdf.setTextColor(255, 255, 255);
           pdf.setFontSize(8);
           pdf.setFont(undefined, 'bold');
         } else {
-          // Alternating row colors for events
           if ((yPos / rowHeight) % 2 === 0) {
             pdf.setFillColor(248, 250, 252);
           } else {
@@ -863,7 +839,6 @@ export default function SecurityDashboard() {
           pdf.setFont(undefined, 'normal');
         }
 
-        // Draw text for each column with wrapping
         let currentX = margin;
         
         wrappedColumns.forEach((lines, index) => {
@@ -926,7 +901,7 @@ export default function SecurityDashboard() {
       
       yPos += infoBoxHeight + 5;
 
-      // INCIDENT REPORT SECTION - SEPARATE FROM EVENTS
+      // INCIDENT REPORT SECTION
       addSectionTitle('SECURITY INCIDENTS', 'Critical Events');
       
       if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.guardReports && report.guardReports.length > 0) {
@@ -943,7 +918,6 @@ export default function SecurityDashboard() {
         
         yPos += 12;
 
-        // Display individual incidents
         const incidentColumnWidths = [25, 175];
         addMultiLineTableRow(['#', 'INCIDENT DESCRIPTION'], true, incidentColumnWidths);
 
@@ -992,7 +966,6 @@ export default function SecurityDashboard() {
           pdf.setDrawColor(229, 231, 235);
           pdf.rect(xPos, yPos, boxWidth, boxHeight, 'FD');
           
-          // Red accent bar for headers
           pdf.setFillColor(220, 38, 38);
           pdf.rect(xPos, yPos, boxWidth, 3, 'F');
           
@@ -1047,7 +1020,7 @@ export default function SecurityDashboard() {
           const completed = parseInt(row.ChecksCompleted) || 0;
           const expected = parseInt(row.ExpectedChecks) || 0;
           const performanceRate = parseFloat(row.PerformanceRate) || 0;
-          const performanceText = isNaN(performanceRate) ? 'N/A' : `${Math.round(performanceRate)}%`; // Whole number
+          const performanceText = isNaN(performanceRate) ? 'N/A' : `${Math.round(performanceRate)}%`;
           
           addTableRow([
             String(row.SitePosts || 'Unknown'),
@@ -1060,11 +1033,10 @@ export default function SecurityDashboard() {
         yPos += 3;
       }
 
-      // PATROL EVENTS LOG (SEPARATE FROM INCIDENTS)
+      // PATROL EVENTS LOG
       if (report.events && report.events.length > 0) {
         addSectionTitle('PATROL EVENTS LOG', 'Routine Activity Timeline');
 
-        // Adjusted column widths with more space for Event and Zone
         const eventColumnWidths = [22, 18, 70, 70];
         
         addMultiLineTableRow(['DATE', 'TIME', 'EVENT DESCRIPTION', 'ZONE'], true, eventColumnWidths);
@@ -1454,7 +1426,7 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* GUARD REPORTS SECTION - SEPARATE FROM EVENTS */}
+            {/* GUARD REPORTS SECTION */}
             <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
               <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 text-red-600" />
@@ -1720,7 +1692,7 @@ export default function SecurityDashboard() {
               )}
             </div>
 
-            {/* Patrol Events Log (SEPARATE FROM INCIDENTS) */}
+            {/* Patrol Events Log */}
             {report.events?.length > 0 && (
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">

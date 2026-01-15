@@ -16,7 +16,9 @@ import {
   Shield
 } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_URL;
+// Read environment variable ONCE at the top
+const API_URL = import.meta.env.VITE_API_URL;
+console.log("API URL:", API_URL); // Debugging line
 
 export default function AdminDashboard() {
   const [clients, setClients] = useState([]);
@@ -39,10 +41,9 @@ export default function AdminDashboard() {
     try {
       const token = localStorage.getItem('token');
 
-      const clientsResponse = await fetch(`${API_BASE}/admin/clients`, {
-  headers: { 'Authorization': `Bearer ${token}` }
-});
-;
+      const clientsResponse = await fetch(`${API_URL}/admin/clients`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const clientsData = await clientsResponse.json();
       setClients(clientsData.clients || []);
 
@@ -59,9 +60,9 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-   const response = await fetch(`${API_BASE}/admin/bm-accounts`, {
-  headers: { 'Authorization': `Bearer ${token}` }
-});
+      const response = await fetch(`${API_URL}/admin/bm-accounts`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       const data = await response.json();
       setBMAccounts(data.accounts || []);
     } catch (err) {
@@ -79,8 +80,7 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-    const response = await fetch(`${API_BASE}/admin/link-account`, {
-
+      const response = await fetch(`${API_URL}/admin/link-account`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -113,8 +113,7 @@ export default function AdminDashboard() {
     setError(null);
     try {
       const token = localStorage.getItem('token');
-   const response = await fetch(`${API_BASE}/admin/unlink-account`, {
-
+      const response = await fetch(`${API_URL}/admin/unlink-account`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
