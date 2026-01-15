@@ -1,18 +1,24 @@
 {
-  "name": "server",
+  "name": "guard-report-server",
   "version": "1.0.0",
   "description": "BM Security Reports Backend",
+  "private": true,
   "type": "module",
   "main": "server.js",
+  "bin": "server.js",
+
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "nodemon server.js",
+
+    "build:frontend": "pnpm --dir ../client/reports run build",
+
+    "build:exe": "pnpm run build:frontend && pkg .",
+    "build:exe:windows": "pnpm run build:frontend && pkg . --targets node18-win-x64 --output release/guard-report-windows.exe",
+    "build:exe:linux": "pnpm run build:frontend && pkg . --targets node18-linux-x64 --output release/guard-report-linux",
+    "build:exe:all": "pnpm run build:frontend && pkg . --targets node18-win-x64,node18-linux-x64"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "packageManager": "pnpm@10.18.3",
+
   "dependencies": {
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
@@ -23,7 +29,6 @@
     "express": "^5.1.0",
     "express-mongo-sanitize": "^2.1.0",
     "express-rate-limit": "^8.2.1",
-    "fs": "0.0.1-security",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "mssql": "^12.0.0",
@@ -35,5 +40,35 @@
     "p-limit": "^7.2.0",
     "pdfkit": "^0.17.2",
     "stream-buffers": "^3.0.3"
+  },
+
+  "devDependencies": {
+    "pkg": "^5.8.1",
+    "nodemon": "^3.0.2"
+  },
+
+  "pkg": {
+    "assets": [
+      "../client/reports/dist/**/*",
+      "node_modules/mssql/**/*",
+      "node_modules/mysql2/**/*",
+      "node_modules/bcrypt/**/*"
+    ],
+    "scripts": [
+      "server.js",
+      "routes/**/*.js",
+      "models/**/*.js",
+      "service/**/*.js",
+      "utils/**/*.js",
+      "middleware/**/*.js"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "release"
+  },
+
+  "engines": {
+    "node": ">=18"
   }
 }

@@ -1,4 +1,4 @@
-// server.js - FULLY OPTIMIZED VERSION WITH INCIDENT ROUTES - FIXED ROUTE ORDER
+// server.js - FULLY OPTIMIZED VERSION WITH INCIDENT ROUTES + FRONTEND SERVING - FIXED ROUTE ORDER
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -8,6 +8,12 @@ import rateLimit from "express-rate-limit";
 import { createConnection } from 'net';
 import cluster from 'cluster';
 import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// ES Module dirname workaround
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables
 dotenv.config();
@@ -257,7 +263,7 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://reports-97dm.onrender.com";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5000";
 const allowedOrigins = IS_PRODUCTION 
   ? [FRONTEND_URL]
   : [FRONTEND_URL, "http://localhost:5173", "http://localhost:3000"];
@@ -376,10 +382,24 @@ createIncidentAPI(app);
 console.log('✅ Incident routes registered: /api/incidents/*');
 
 // =============================================
+// 🎨 SERVE FRONTEND (For standalone executable)
+// =============================================
+
+const frontendDistPath = path.join(__dirname, 'client', 'reports', 'dist');
+console.log(`📁 Serving frontend from: ${frontendDistPath}`);
+
+// Serve static files from the built frontend
+app.use(express.static(frontendDistPath, {
+  maxAge: IS_PRODUCTION ? '1d' : '0',
+  etag: true,
+  lastModified: true
+}));
+
+// =============================================
 // 🏠 ROOT ENDPOINTS - MUST BE AFTER ALL API ROUTES
 // =============================================
 
-app.get("/", (req, res) => {
+app.get("/api", (req, res) => {
   res.json({
     message: "📊 Guard Report API is running",
     version: "3.0.0",
@@ -480,67 +500,24 @@ app.get('/api/network/status', (req, res) => {
   });
 });
 
-app.get('/api', (req, res) => {
-  res.json({
-    message: "Guard Report API - Available Endpoints",
-    version: "3.0.0",
-    production: IS_PRODUCTION,
-    worker: process.pid,
-    emailSending: EMAIL_ENABLED ? "ENABLED" : "DISABLED",
-    endpoints: {
-      authentication: {
-        signup: "POST /api/auth/signup",
-        login: "POST /api/auth/login",
-        verify: "POST /api/auth/verify",
-        me: "GET /api/auth/me",
-        changePassword: "POST /api/auth/change-password",
-        logout: "POST /api/auth/logout"
-      },
-      dashboard: {
-        status: "GET /api/dashboard/status",
-        patrolEvents: "GET /api/dashboard/patrol-events",
-        summary: "GET /api/dashboard/summary",
-        monthlySummary: "GET /api/dashboard/monthly-summary"
-      },
-      admin: {
-        users: "GET /api/admin/users",
-        clients: "GET /api/admin/clients",
-        reports: "GET /api/admin/reports",
-        system: "GET /api/admin/system"
-      },
-      incidents: {
-        count: "GET /api/incidents/count?clientId=X&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
-        details: "GET /api/incidents/details?clientId=X&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
-        period: "GET /api/incidents/:period?clientId=X (periods: daily, weekly, monthly, yesterday, last7days, last30days)"
-      },
-      scheduler: {
-        base: "/api/scheduler",
-        health: "/api/scheduler/health"
-      },
-      clients: "/api/clients",
-      reports: "/api/reports",
-      sync: "/api/sync",
-      backup: "/api/backup",
-      patrolSchedules: "/api/patrol-schedules",
-      network: "/api/network/status",
-      emailStatus: "/api/email/status"
-    }
-  });
+// Fallback for client-side routing - MUST BE LAST
+// This catches all non-API routes and serves the frontend
+app.get('/', (req, res) => {
+  // Double-check it's not an API route
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ 
+      success: false,
+      error: "API endpoint not found",
+      requested: req.originalUrl
+    });
+  }
+  
+  res.sendFile(path.join(frontendDistPath, 'index.html'));
 });
 
 // =============================================
 // 🚨 ERROR HANDLERS - MUST BE LAST
 // =============================================
-
-app.use((req, res) => {
-  res.status(404).json({ 
-    success: false,
-    error: "Endpoint not found",
-    requested: req.originalUrl,
-    requestId: req.requestId,
-    timestamp: new Date().toISOString()
-  });
-});
 
 app.use((err, req, res, next) => {
   const requestId = req.requestId || 'unknown';
@@ -583,8 +560,10 @@ if (!IS_PRODUCTION || cluster.isWorker) {
     console.log(`🔐 Authentication: ✅ ACTIVE`);
     console.log(`👑 Admin Routes: ✅ ACTIVE (/api/admin)`);
     console.log(`📊 Incident Tracking: ✅ ACTIVE (/api/incidents)`);
+    console.log(`🎨 Frontend: ✅ SERVING from ${frontendDistPath}`);
     console.log(`🔗 Allowed origins: ${allowedOrigins.join(', ')}`);
     console.log(`📊 API base URL: http://localhost:${PORT}/api`);
+    console.log(`🌐 Web UI: http://localhost:${PORT}`);
     console.log("===============================================");
     console.log("⏰ Scheduler loaded and waiting for cron triggers.");
     console.log("===============================================");
