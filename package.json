@@ -1,5 +1,11 @@
 {
 	"dependencies": {
 		"pdf-parse": "^2.4.5"
+	},
+	"scripts": {
+		"build": "vite build"
+	},
+	"devDependencies": {
+		"pkg": "^5.8.1"
 	}
 }
