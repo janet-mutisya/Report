@@ -6,19 +6,15 @@
   "type": "module",
   "main": "server.js",
   "bin": "server.js",
-
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-
     "build:frontend": "pnpm --dir ../client/reports run build",
-
     "build:exe": "pnpm run build:frontend && pkg .",
     "build:exe:windows": "pnpm run build:frontend && pkg . --targets node18-win-x64 --output release/guard-report-windows.exe",
     "build:exe:linux": "pnpm run build:frontend && pkg . --targets node18-linux-x64 --output release/guard-report-linux",
     "build:exe:all": "pnpm run build:frontend && pkg . --targets node18-win-x64,node18-linux-x64"
   },
-
   "dependencies": {
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
@@ -34,6 +30,7 @@
     "mssql": "^12.0.0",
     "multer": "^2.0.2",
     "mysql2": "^3.15.2",
+    "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.9",
@@ -41,12 +38,10 @@
     "pdfkit": "^0.17.2",
     "stream-buffers": "^3.0.3"
   },
-
   "devDependencies": {
-    "pkg": "^5.8.1",
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "pkg": "^5.8.1"
   },
-
   "pkg": {
     "assets": [
       "../client/reports/dist/**/*",
@@ -67,7 +62,6 @@
     ],
     "outputPath": "release"
   },
-
   "engines": {
     "node": ">=18"
   }

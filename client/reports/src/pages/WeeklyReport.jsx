@@ -1,3 +1,4 @@
+// SecurityDashboard.jsx - SIMPLIFIED VERSION WITH BACKEND PDF SERVICES
 import { useEffect, useState, useCallback } from "react";
 import {
   AlertCircle,
@@ -19,7 +20,8 @@ import {
   Info,
   Target,
   BarChart3,
-  Search
+  Search,
+  Printer
 } from "lucide-react";
 import {
   BarChart,
@@ -57,13 +59,13 @@ export default function SecurityDashboard() {
   // Use localhost backend URL
   const API_BASE = "http://localhost:5000/api";
 
-  // ✅ MOVED UP: getShiftLabel function - defined before it's used
+  // getShiftLabel function
   const getShiftLabel = useCallback((shiftValue) => {
     const shift = availableShifts.find(shiftItem => shiftItem.value === shiftValue);
     return shift?.label || shiftValue;
   }, [availableShifts]);
 
-  // ✅ MOVED UP: getShiftIcon function
+  // getShiftIcon function
   const getShiftIcon = (shiftTypeValue) => {
     if (!shiftTypeValue) return <Shield className="w-4 h-4" />;
     const normalized = shiftTypeValue.toLowerCase();
@@ -75,13 +77,12 @@ export default function SecurityDashboard() {
     return <Shield className="w-4 h-4 text-green-500" />;
   };
 
-  // Enhanced helper function to check if a zone name is valid
+  // Helper function to check if a zone name is valid
   const isValidZoneName = useCallback((zoneName) => {
     if (!zoneName || typeof zoneName !== 'string') return false;
     
     const normalized = zoneName.trim().toLowerCase();
     
-    // Filter out invalid zone names more strictly
     const invalidPatterns = [
       'unknown',
       'unknown zone',
@@ -90,12 +91,12 @@ export default function SecurityDashboard() {
       'null',
       'n/a',
       'none',
-      /^[0-9]+$/,  // Just numbers
-      /^[a-z]$/i,  // Single letter
-      /^\s*$/,     // Empty or whitespace only
-      /^test/i,    // Test entries
-      /^demo/i,    // Demo entries
-      /^temp/i     // Temporary entries
+      /^[0-9]+$/,
+      /^[a-z]$/i,
+      /^\s*$/,
+      /^test/i,
+      /^demo/i,
+      /^temp/i
     ];
     
     for (const pattern of invalidPatterns) {
@@ -106,11 +107,10 @@ export default function SecurityDashboard() {
       }
     }
     
-    // Must be at least 2 characters for a valid zone name
     return zoneName.trim().length >= 2;
   }, []);
 
-  // Performance rating function - SYNCED WITH BACKEND
+  // Performance rating function
   const getPerformanceRating = (rate) => {
     const numericRate = typeof rate === 'string' ? parseFloat(rate) : rate;
     if (numericRate >= 90) return 'Excellent';
@@ -119,53 +119,34 @@ export default function SecurityDashboard() {
     return 'Poor';
   };
 
-  // Process report data - TRUST THE BACKEND CALCULATIONS
+  // Process report data
   const processReportData = useCallback((data) => {
     if (!data.summary || !data.calculations) return data;
 
-    console.log('🔍 Processing report data:', {
-      rawSummary: data.summary.length,
-      calculations: data.calculations,
-      schedule: data.schedule,
-      guardReports: data.guardReports,
-      events: data.events?.length,
-      expectedPerZone: data.calculations.expectedPerZone,
-      validZoneCount: data.calculations.validZoneCount,
-      calculationMethod: data.calculations.method
-    });
-
     // Filter out invalid zones first
     const validSummary = data.summary.filter(zone => {
-      const isValid = isValidZoneName(zone.SitePosts);
-      if (!isValid) {
-        console.log('❌ Filtering out invalid zone:', zone.SitePosts);
-      }
-      return isValid;
+      return isValidZoneName(zone.SitePosts);
     });
 
-    console.log(`✅ Valid zones after filtering: ${validSummary.length} / ${data.summary.length}`);
-
-    // Process zones - USE BACKEND CALCULATED VALUES DIRECTLY
+    // Process zones
     const processedSummary = validSummary.map(zone => {
       const completed = parseInt(zone.ChecksCompleted) || 0;
       const expected = parseInt(zone.ExpectedChecks) || 0;
       
-      // Calculate performance rate correctly
       let performanceRate = 0;
       if (expected > 0) {
         performanceRate = (completed / expected) * 100;
       } else if (completed > 0) {
-        performanceRate = 100; // If no expected but completed, treat as 100%
+        performanceRate = 100;
       }
       
-      // Calculate if exceeded expectations
       const exceeded = completed > expected;
       
       return {
         ...zone,
         ChecksCompleted: completed,
         ExpectedChecks: expected,
-        PerformanceRate: `${Math.round(performanceRate)}%`, // Whole number percentage
+        PerformanceRate: `${Math.round(performanceRate)}%`,
         actualPerformance: performanceRate,
         exceeded: exceeded
       };
@@ -176,23 +157,12 @@ export default function SecurityDashboard() {
       (parseInt(b.ChecksCompleted) || 0) - (parseInt(a.ChecksCompleted) || 0)
     );
 
-    console.log('✅ Processed report data:', {
-      totalExpected: data.calculations.totalExpectedPatrols,
-      totalCompleted: data.calculations.totalCompleted,
-      completionRate: data.calculations.completionRate,
-      performanceRating: data.calculations.performanceRating,
-      validZones: processedSummary.length,
-      guardReports: data.guardReports,
-      calculationMethod: data.calculations.method
-    });
-
     return {
       ...data,
       summary: processedSummary,
       calculations: {
         ...data.calculations,
         validZonesCount: validSummary.length,
-        // Ensure overall rate is also a whole number
         completionRate: Math.round(parseFloat(data.calculations.completionRate) || 0)
       }
     };
@@ -418,8 +388,6 @@ export default function SecurityDashboard() {
         endDateTime
       )}&shiftType=${encodeURIComponent(shiftType)}`;
 
-      console.log('📊 Fetching report from:', url);
-
       const response = await fetch(url);
       const data = await response.json();
 
@@ -428,24 +396,7 @@ export default function SecurityDashboard() {
       }
 
       if (data && data.success) {
-        console.log('✅ Raw report data received:', {
-          summaryLength: data.summary?.length,
-          calculations: data.calculations,
-          guardReports: data.guardReports,
-          events: data.events?.length,
-          expectedPerZone: data.calculations?.expectedPerZone,
-          calculationMethod: data.calculations?.method
-        });
-
         const processedData = processReportData(data);
-        
-        console.log('🔄 Processed report data:', {
-          validZones: processedData.calculations?.validZonesCount,
-          completionRate: processedData.calculations?.completionRate,
-          guardReports: processedData.guardReports,
-          calculationMethod: processedData.calculations?.method
-        });
-
         setReport(processedData);
         setErrorMessage("");
       } else {
@@ -458,6 +409,67 @@ export default function SecurityDashboard() {
       setLoading(false);
     }
   }, [API_BASE, client, startDate, startTime, endDate, endTime, shiftType, processReportData]);
+
+  // 📄 DOWNLOAD PDF FROM BACKEND
+  const downloadPDF = async () => {
+    if (!client || !startDate || !endDate) {
+      setPdfError("Please select client, start date, and end date first.");
+      return;
+    }
+
+    setPdfLoading(true);
+    setPdfError("");
+
+    try {
+      const params = new URLSearchParams({
+        clientName: client,
+        startDate,
+        endDate,
+        shiftType
+      });
+
+      const endpoint = `${API_BASE}/reports/dashboard-pdf`;
+      const url = `${endpoint}?${params.toString()}`;
+
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`PDF generation failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      // Check if it's a PDF
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/pdf')) {
+        const errorData = await response.json();
+        throw new Error(errorData?.message || 'Server returned non-PDF response');
+      }
+
+      // Create blob and download
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      
+      const safeClientName = client.replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `Security_Report_${safeClientName}_${startDate}_to_${endDate}.pdf`;
+      
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      // Clean up
+      window.URL.revokeObjectURL(downloadUrl);
+      
+      setPdfError("");
+    } catch (error) {
+      console.error('PDF download error:', error);
+      setPdfError(`Failed to download PDF: ${error.message}`);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
 
   // Calculate dashboard metrics
   const calculateDashboardMetrics = useCallback(() => {
@@ -529,580 +541,6 @@ export default function SecurityDashboard() {
     };
   }, [report]);
 
-  // Enhanced text wrapping for PDF
-  const wrapText = (pdf, text, maxWidth, fontSize = 9) => {
-    if (!text) return [''];
-    const textStr = String(text).trim();
-    const words = textStr.split(' ');
-    let currentLine = '';
-    const lines = [];
-    
-    pdf.setFontSize(fontSize);
-    
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      const testWidth = pdf.getStringUnitWidth(testLine) * fontSize / pdf.internal.scaleFactor;
-      
-      if (testWidth <= maxWidth) {
-        currentLine = testLine;
-      } else {
-        if (currentLine) {
-          lines.push(currentLine);
-        }
-        currentLine = word;
-      }
-    }
-    
-    if (currentLine) {
-      lines.push(currentLine);
-    }
-    
-    return lines.length > 0 ? lines : [''];
-  };
-
-  // Create optimized pie chart for PDF
-  const createPieChartImage = async (metricsData) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 500;
-    canvas.height = 280;
-    const ctx = canvas.getContext('2d');
-    
-    const completed = metricsData.totalCompleted;
-    const missed = metricsData.totalMissedPatrols;
-    const total = completed + missed;
-    const completedPercent = total > 0 ? Math.round((completed / total * 100)) : 0;
-    const missedPercent = total > 0 ? Math.round((missed / total * 100)) : 0;
-
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
-    const radius = 85;
-
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    if (completed > 0) {
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, radius, 0, (completed / total) * 2 * Math.PI);
-      ctx.closePath();
-      ctx.fillStyle = '#10b981';
-      ctx.fill();
-    }
-
-    if (missed > 0) {
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.arc(centerX, centerY, radius, (completed / total) * 2 * Math.PI, 2 * Math.PI);
-      ctx.closePath();
-      ctx.fillStyle = '#ef4444';
-      ctx.fill();
-    }
-
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 18px Arial';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    
-    if (completed > 0) {
-      const angle = (completed / total / 2) * 2 * Math.PI;
-      const x = centerX + Math.cos(angle) * (radius * 0.6);
-      const y = centerY + Math.sin(angle) * (radius * 0.6);
-      ctx.fillText(`${completedPercent}%`, x, y - 8);
-      ctx.font = '14px Arial';
-      ctx.fillText('Completed', x, y + 10);
-    }
-
-    if (missed > 0) {
-      const angle = (completed / total) * 2 * Math.PI + (missed / total / 2) * 2 * Math.PI;
-      const x = centerX + Math.cos(angle) * (radius * 0.6);
-      const y = centerY + Math.sin(angle) * (radius * 0.6);
-      ctx.font = 'bold 18px Arial';
-      ctx.fillText(`${missedPercent}%`, x, y - 8);
-      ctx.font = '14px Arial';
-      ctx.fillText('Missed', x, y + 10);
-    }
-
-    ctx.fillStyle = '#1e40af';
-    ctx.font = 'bold 20px Arial';
-    ctx.fillText('Performance Overview', centerX, 22);
-    
-    const legendY = centerY + radius + 40;
-    ctx.fillStyle = '#10b981';
-    ctx.fillRect(centerX - 90, legendY, 18, 18);
-    ctx.fillStyle = '#000000';
-    ctx.font = '16px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Completed: ${completed}`, centerX - 65, legendY + 13);
-
-    ctx.fillStyle = '#ef4444';
-    ctx.fillRect(centerX - 90, legendY + 25, 18, 18);
-    ctx.fillStyle = '#000000';
-    ctx.fillText(`Missed: ${missed}`, centerX - 65, legendY + 38);
-    
-    return canvas.toDataURL('image/png');
-  };
-
-  // PDF EXPORT WITH SEPARATE INCIDENTS AND EVENTS
-  const exportToPDF = useCallback(async () => {
-    if (!report) return;
-
-    setPdfLoading(true);
-    setPdfError("");
-
-    try {
-      if (!window.jspdf) {
-        const script = document.createElement('script');
-        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
-        await new Promise((resolve, reject) => {
-          script.onload = resolve;
-          script.onerror = () => reject(new Error('Failed to load jsPDF'));
-          document.head.appendChild(script);
-        });
-      }
-
-      const { jsPDF } = window.jspdf;
-      const pdf = new jsPDF('p', 'mm', 'a4');
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      const margin = 15;
-      let yPos = margin;
-      let currentPage = 1;
-      let totalPages = 1;
-
-      const COMPANY_NAME = "BOB-MORGAN GUARD REPORT";
-      const CLIENT_NAME = client || "Unknown Client";
-
-      const addHeader = (isFirstPage = false) => {
-        if (isFirstPage) {
-          pdf.setFillColor(30, 64, 175);
-          pdf.rect(0, 0, pageWidth, 40, 'F');
-          
-          pdf.setFillColor(255, 255, 255);
-          pdf.rect(margin, 10, pageWidth - 2 * margin, 25, 'F');
-          
-          pdf.setFillColor(220, 38, 38);
-          pdf.rect(margin, 33, pageWidth - 2 * margin, 2, 'F');
-          
-          pdf.setTextColor(30, 64, 175);
-          pdf.setFontSize(18);
-          pdf.setFont(undefined, 'bold');
-          pdf.text(COMPANY_NAME, pageWidth / 2, 20, { align: 'center' });
-          
-          pdf.setTextColor(220, 38, 38);
-          pdf.setFontSize(14);
-          pdf.text(`FOR: ${CLIENT_NAME}`, pageWidth / 2, 28, { align: 'center' });
-          
-          yPos = 45;
-        } else {
-          pdf.setFillColor(30, 64, 175);
-          pdf.rect(0, 0, pageWidth, 15, 'F');
-          
-          pdf.setTextColor(255, 255, 255);
-          pdf.setFontSize(10);
-          pdf.setFont(undefined, 'bold');
-          pdf.text(`${COMPANY_NAME} - ${CLIENT_NAME} - Report Continuation`, pageWidth / 2, 10, { align: 'center' });
-          
-          yPos = 20;
-        }
-      };
-
-      const addFooter = () => {
-        const footerY = pageHeight - 15;
-        
-        pdf.setDrawColor(220, 38, 38);
-        pdf.line(margin, footerY - 5, pageWidth - margin, footerY - 5);
-        
-        pdf.setTextColor(100, 116, 139);
-        pdf.setFontSize(8);
-        pdf.text('Confidential Security Report - For Authorized Personnel Only', margin, footerY);
-        pdf.text(`Page ${currentPage} of ${totalPages}`, pageWidth - margin, footerY, { align: 'right' });
-        
-        currentPage++;
-      };
-
-      const checkSpace = (neededHeight) => {
-        if (yPos + neededHeight > pageHeight - 20) {
-          addFooter();
-          pdf.addPage();
-          addHeader(false);
-          totalPages++;
-          return true;
-        }
-        return false;
-      };
-
-      const addSectionTitle = (title, subtitle = '') => {
-        checkSpace(12);
-        
-        pdf.setFillColor(30, 64, 175);
-        pdf.rect(margin, yPos, pageWidth - 2 * margin, 8, 'F');
-        
-        pdf.setFontSize(10);
-        pdf.setFont(undefined, 'bold');
-        pdf.setTextColor(255, 255, 255);
-        pdf.text(title.toUpperCase(), margin + 3, yPos + 5);
-        
-        if (subtitle) {
-          pdf.setFontSize(8);
-          pdf.setFont(undefined, 'normal');
-          pdf.setTextColor(255, 255, 255);
-          pdf.text(subtitle, pageWidth - margin - 3, yPos + 5, { align: 'right' });
-        }
-        
-        yPos += 10;
-      };
-
-      const addTableRow = (columns, isHeader = false, columnWidths = []) => {
-        const rowHeight = 7;
-        
-        if (checkSpace(rowHeight)) {
-          if (isHeader) {
-            return addTableRow(columns, true, columnWidths);
-          }
-        }
-        
-        if (isHeader) {
-          pdf.setFillColor(220, 38, 38);
-          pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
-          pdf.setTextColor(255, 255, 255);
-          pdf.setFontSize(8);
-          pdf.setFont(undefined, 'bold');
-        } else {
-          if ((yPos / rowHeight) % 2 === 0) {
-            pdf.setFillColor(248, 250, 252);
-          } else {
-            pdf.setFillColor(255, 255, 255);
-          }
-          pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
-          pdf.setTextColor(0, 0, 0);
-          pdf.setFontSize(8);
-          pdf.setFont(undefined, 'normal');
-        }
-
-        let currentX = margin;
-        
-        columns.forEach((text, index) => {
-          const colWidth = columnWidths[index];
-          const padding = 2;
-          const textX = currentX + padding;
-          const maxWidth = colWidth - (padding * 2);
-          
-          const textStr = String(text || '');
-          
-          pdf.text(textStr, textX, yPos + 5, { 
-            maxWidth: maxWidth,
-            align: 'left'
-          });
-          
-          currentX += colWidth;
-        });
-
-        yPos += rowHeight;
-        return rowHeight;
-      };
-
-      const addMultiLineTableRow = (columns, isHeader = false, columnWidths = []) => {
-        const minRowHeight = 7;
-        const lineHeight = 4;
-        const padding = 2;
-        
-        const wrappedColumns = columns.map((text, index) => {
-          const colWidth = columnWidths[index];
-          const maxWidth = colWidth - (padding * 2);
-          return wrapText(pdf, String(text || ''), maxWidth, 7);
-        });
-        
-        const maxLines = Math.max(...wrappedColumns.map(lines => lines.length));
-        const rowHeight = Math.max(minRowHeight, maxLines * lineHeight + 2);
-        
-        if (checkSpace(rowHeight)) {
-          if (isHeader) {
-            return addMultiLineTableRow(columns, true, columnWidths);
-          }
-        }
-        
-        if (isHeader) {
-          pdf.setFillColor(220, 38, 38);
-          pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
-          pdf.setTextColor(255, 255, 255);
-          pdf.setFontSize(8);
-          pdf.setFont(undefined, 'bold');
-        } else {
-          if ((yPos / rowHeight) % 2 === 0) {
-            pdf.setFillColor(248, 250, 252);
-          } else {
-            pdf.setFillColor(255, 255, 255);
-          }
-          pdf.rect(margin, yPos, pageWidth - 2 * margin, rowHeight, 'F');
-          pdf.setTextColor(0, 0, 0);
-          pdf.setFontSize(7);
-          pdf.setFont(undefined, 'normal');
-        }
-
-        let currentX = margin;
-        
-        wrappedColumns.forEach((lines, index) => {
-          const colWidth = columnWidths[index];
-          const textX = currentX + padding;
-          
-          lines.forEach((line, lineIndex) => {
-            const textY = yPos + 4 + (lineIndex * lineHeight);
-            pdf.text(line, textX, textY);
-          });
-          
-          currentX += colWidth;
-        });
-
-        yPos += rowHeight;
-        return rowHeight;
-      };
-
-      const pdfMetrics = calculateDashboardMetrics();
-
-      addHeader(true);
-
-      // CLIENT INFORMATION
-      addSectionTitle('CLIENT INFORMATION', 'Report Details');
-      
-      const infoBoxHeight = 25;
-      checkSpace(infoBoxHeight);
-      
-      pdf.setDrawColor(30, 64, 175);
-      pdf.setFillColor(255, 255, 255);
-      pdf.rect(margin, yPos, pageWidth - 2 * margin, infoBoxHeight, 'S');
-      
-      const col1 = margin + 5;
-      const col2 = pageWidth / 2;
-      
-      pdf.setFontSize(9);
-      pdf.setFont(undefined, 'bold');
-      pdf.setTextColor(30, 64, 175);
-      pdf.text('CLIENT:', col1, yPos + 7);
-      pdf.text('REPORT PERIOD:', col1, yPos + 13);
-      pdf.text('SHIFT TYPE:', col1, yPos + 19);
-      
-      pdf.setFont(undefined, 'normal');
-      pdf.setTextColor(0, 0, 0);
-      pdf.text(client || 'Not specified', col1 + 15, yPos + 7);
-      pdf.text(`${startDate} ${startTime || '00:00'} to ${endDate} ${endTime || '23:59'}`, col1 + 30, yPos + 13);
-      pdf.text(getShiftLabel(shiftType), col1 + 20, yPos + 19);
-      
-      pdf.setFont(undefined, 'bold');
-      pdf.setTextColor(30, 64, 175);
-      pdf.text('GENERATED:', col2, yPos + 7);
-      pdf.text('TOTAL POSTS:', col2, yPos + 13);
-      pdf.text('PERFORMANCE:', col2, yPos + 19);
-      
-      pdf.setFont(undefined, 'normal');
-      pdf.setTextColor(0, 0, 0);
-      pdf.text(new Date().toLocaleDateString(), col2 + 20, yPos + 7);
-      pdf.text(String(report.summary?.length || 0), col2 + 25, yPos + 13);
-      pdf.text(`${pdfMetrics?.overallRate || 0}%`, col2 + 25, yPos + 19);
-      
-      yPos += infoBoxHeight + 5;
-
-      // INCIDENT REPORT SECTION
-      addSectionTitle('SECURITY INCIDENTS', 'Critical Events');
-      
-      if (pdfMetrics && pdfMetrics.totalIncidents > 0 && report.guardReports && report.guardReports.length > 0) {
-        pdf.setFillColor(254, 226, 226);
-        pdf.setDrawColor(220, 38, 38);
-        pdf.rect(margin, yPos, pageWidth - 2 * margin, 15, 'FD');
-        
-        pdf.setFontSize(10);
-        pdf.setFont(undefined, 'bold');
-        pdf.setTextColor(220, 38, 38);
-        
-        const incidentText = `TOTAL SECURITY INCIDENTS: ${pdfMetrics.totalIncidents}`;
-        pdf.text(incidentText, margin + 3, yPos + 6);
-        
-        yPos += 12;
-
-        const incidentColumnWidths = [25, 175];
-        addMultiLineTableRow(['#', 'INCIDENT DESCRIPTION'], true, incidentColumnWidths);
-
-        report.guardReports.forEach((incident, index) => {
-          const incidentDesc = formatIncidentDescription(incident.report);
-          addMultiLineTableRow([
-            String(index + 1),
-            incidentDesc
-          ], false, incidentColumnWidths);
-        });
-
-        yPos += 5;
-      } else {
-        pdf.setFillColor(240, 253, 244);
-        pdf.setDrawColor(34, 197, 94);
-        pdf.rect(margin, yPos, pageWidth - 2 * margin, 10, 'FD');
-        
-        pdf.setFontSize(9);
-        pdf.setFont(undefined, 'bold');
-        pdf.setTextColor(22, 163, 74);
-        pdf.text('✓ NO SECURITY INCIDENTS REPORTED DURING THIS PERIOD', margin + 3, yPos + 6);
-        
-        yPos += 12;
-      }
-
-      // KEY PERFORMANCE METRICS
-      if (pdfMetrics) {
-        addSectionTitle('KEY PERFORMANCE METRICS', 'Overview');
-        
-        checkSpace(25);
-        
-        const metrics = [
-          { label: 'TOTAL INCIDENTS', value: pdfMetrics.totalIncidents, color: '#dc2626' },
-          { label: 'COMPLETED CHECKS', value: pdfMetrics.totalCompleted, color: '#16a34a' },
-          { label: 'MISSED PATROLS', value: pdfMetrics.totalMissedPatrols, color: '#ea580c' },
-          { label: 'PERFORMANCE RATE', value: `${pdfMetrics.overallRate}%`, color: '#2563eb' }
-        ];
-        
-        const boxWidth = (pageWidth - 2 * margin - 15) / 4;
-        const boxHeight = 20;
-        
-        metrics.forEach((metric, index) => {
-          const xPos = margin + (index * (boxWidth + 5));
-          
-          pdf.setFillColor(255, 255, 255);
-          pdf.setDrawColor(229, 231, 235);
-          pdf.rect(xPos, yPos, boxWidth, boxHeight, 'FD');
-          
-          pdf.setFillColor(220, 38, 38);
-          pdf.rect(xPos, yPos, boxWidth, 3, 'F');
-          
-          pdf.setFontSize(12);
-          pdf.setFont(undefined, 'bold');
-          pdf.setTextColor(metric.color);
-          pdf.text(metric.value.toString(), xPos + (boxWidth / 2), yPos + 10, { align: 'center' });
-          
-          pdf.setFontSize(7);
-          pdf.setTextColor(75, 85, 99);
-          pdf.text(metric.label, xPos + (boxWidth / 2), yPos + 16, { align: 'center' });
-        });
-        
-        yPos += boxHeight + 8;
-      }
-
-      // PERFORMANCE PIE CHART
-      if (pdfMetrics) {
-        addSectionTitle('PERFORMANCE DISTRIBUTION', 'Visual Analytics');
-        
-        try {
-          const pieChartImage = await createPieChartImage(pdfMetrics);
-          const chartWidth = 120;
-          const chartHeight = 80;
-          const chartX = (pageWidth - chartWidth) / 2;
-          
-          checkSpace(chartHeight + 10);
-          pdf.addImage(pieChartImage, 'PNG', chartX, yPos, chartWidth, chartHeight);
-          yPos += chartHeight + 5;
-        } catch (chartError) {
-          console.warn('Chart generation failed:', chartError);
-          checkSpace(20);
-          pdf.setFontSize(9);
-          pdf.setTextColor(0, 0, 0);
-          pdf.text(`Performance Overview: ${pdfMetrics.overallRate}% Completion Rate`, margin, yPos);
-          yPos += 5;
-          pdf.text(`Completed Checks: ${pdfMetrics.totalCompleted} | Missed Patrols: ${pdfMetrics.totalMissedPatrols}`, margin, yPos);
-          yPos += 8;
-        }
-      }
-
-      // PERFORMANCE SUMMARY TABLE
-      if (report.summary && report.summary.length > 0) {
-        addSectionTitle('PERFORMANCE SUMMARY BY POST', 'Detailed Analysis');
-
-        const summaryColumnWidths = [90, 30, 30, 30];
-        
-        addTableRow(['SECURITY POST', 'COMPLETED', 'EXPECTED', 'PERFORMANCE %'], true, summaryColumnWidths);
-
-        pdf.setFont(undefined, 'normal');
-        report.summary.forEach((row) => {
-          const completed = parseInt(row.ChecksCompleted) || 0;
-          const expected = parseInt(row.ExpectedChecks) || 0;
-          const performanceRate = parseFloat(row.PerformanceRate) || 0;
-          const performanceText = isNaN(performanceRate) ? 'N/A' : `${Math.round(performanceRate)}%`;
-          
-          addTableRow([
-            String(row.SitePosts || 'Unknown'),
-            String(completed),
-            String(expected),
-            performanceText
-          ], false, summaryColumnWidths);
-        });
-        
-        yPos += 3;
-      }
-
-      // PATROL EVENTS LOG
-      if (report.events && report.events.length > 0) {
-        addSectionTitle('PATROL EVENTS LOG', 'Routine Activity Timeline');
-
-        const eventColumnWidths = [22, 18, 70, 70];
-        
-        addMultiLineTableRow(['DATE', 'TIME', 'EVENT DESCRIPTION', 'ZONE'], true, eventColumnWidths);
-
-        pdf.setFont(undefined, 'normal');
-        
-        report.events.forEach((event) => {
-          const eventDesc = event.formattedEvent || formatEventDescription(event.Event);
-          const eventTime = event.Time || 'N/A';
-          const eventZone = event.Zone || 'N/A';
-          const eventDate = event.Date || 'N/A';
-          
-          addMultiLineTableRow([
-            eventDate,
-            eventTime,
-            eventDesc,
-            eventZone
-          ], false, eventColumnWidths);
-        });
-
-        yPos += 5;
-        pdf.setFontSize(8);
-        pdf.setTextColor(100, 116, 139);
-        pdf.text(`Total Patrol Events: ${report.events.length}`, margin, yPos);
-        yPos += 5;
-      }
-
-      // EXECUTIVE SUMMARY
-      addSectionTitle('EXECUTIVE SUMMARY', 'Key Findings');
-      
-      checkSpace(25);
-      
-      const summaryPoints = [
-        `Overall performance rate: ${pdfMetrics?.overallRate || 0}%`,
-        `Total security checks completed: ${pdfMetrics?.totalCompleted || 0}`,
-        `Security incidents reported: ${pdfMetrics?.totalIncidents || 0}`,
-        `Report covers ${report.summary?.length || 0} security posts`,
-        `Time period: ${startDate} to ${endDate}`,
-        `Total patrol events logged: ${report.events?.length || 0}`
-      ];
-      
-      pdf.setFontSize(9);
-      pdf.setTextColor(0, 0, 0);
-      
-      summaryPoints.forEach((point, pointIndex) => {
-        pdf.text(`• ${point}`, margin + 5, yPos + (pointIndex * 4));
-      });
-      
-      yPos += (summaryPoints.length * 4) + 5;
-
-      addFooter();
-
-      const safeClientName = (client || 'Unknown').replace(/[^a-zA-Z0-9]/g, '_');
-      const safeShiftType = shiftType.replace(/\//g, '_');
-      const filename = `BOB-MORGAN_Report_${safeClientName}_${safeShiftType}_${startDate}.pdf`;
-      
-      pdf.save(filename);
-
-    } catch (error) {
-      console.error('PDF generation error:', error);
-      setPdfError(`Failed to generate PDF: ${error.message}`);
-    } finally {
-      setPdfLoading(false);
-    }
-  }, [client, startDate, startTime, endDate, endTime, shiftType, report, getShiftLabel, calculateDashboardMetrics, formatEventDescription, formatIncidentDescription]);
-
   const exportToCSV = useCallback(() => {
     if (!report || !report.summary) return;
 
@@ -1140,28 +578,29 @@ export default function SecurityDashboard() {
   }, [startDate, endDate]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-4 md:p-8">
+    <div className="min-h-screen bg-linear-to-b from-gray-50 to-blue-50 p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl shadow-2xl p-8 mb-8 text-white">
+        <div className="bg-linear-to-r from-blue-600 to-blue-700 rounded-2xl shadow-2xl p-8 mb-8 text-white">
           <div className="flex items-center justify-between flex-wrap gap-4">
-            <div>
+            <div className="shrink-0">
               <h1 className="text-4xl font-bold mb-2 flex items-center gap-3">
-                <Activity className="w-10 h-10" />
+                <Activity className="w-10 h-10 shrink-0" />
                 Security Performance Dashboard
               </h1>
               <p className="text-blue-100 text-lg">Real-time security operations analytics</p>
+              <p className="text-blue-200 text-sm mt-1">Backend PDF Generation Enabled ✅</p>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-4 shrink-0">
               <button
                 onClick={() => fetchClients(searchQuery)}
-                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded-lg transition-all"
+                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded-lg transition-all shrink-0"
                 title="Refresh clients"
               >
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className="w-4 h-4 shrink-0" />
                 Refresh
               </button>
-              <div className="bg-blue-500 bg-opacity-50 rounded-lg px-6 py-3">
+              <div className="bg-blue-500 bg-opacity-50 rounded-lg px-6 py-3 shrink-0">
                 <div className="text-sm text-blue-100">Last Updated</div>
                 <div className="text-xl font-semibold">{new Date().toLocaleTimeString()}</div>
               </div>
@@ -1172,14 +611,14 @@ export default function SecurityDashboard() {
         {/* Client Search and Selection */}
         <div className="bg-white rounded-2xl shadow-xl p-6 mb-8 border border-gray-100">
           <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-            <Building2 className="w-5 h-5 text-blue-600" />
+            <Building2 className="w-5 h-5 text-blue-600 shrink-0" />
             Report Configuration
           </h2>
           
           {/* Search Box */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              <Search className="inline w-4 h-4 mr-1" />
+              <Search className="inline w-4 h-4 mr-1 shrink-0" />
               Search Clients
             </label>
             <div className="flex gap-2">
@@ -1193,7 +632,7 @@ export default function SecurityDashboard() {
               <button
                 onClick={() => fetchClients(searchQuery)}
                 disabled={searchQuery.length < 2}
-                className="bg-blue-600 text-white rounded-lg px-4 py-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all"
+                className="bg-blue-600 text-white rounded-lg px-4 py-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shrink-0"
               >
                 Search
               </button>
@@ -1203,7 +642,7 @@ export default function SecurityDashboard() {
           <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
             <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                <Building2 className="inline w-4 h-4 mr-1" />
+                <Building2 className="inline w-4 h-4 mr-1 shrink-0" />
                 Select Client ({clients.length} found)
               </label>
               <select
@@ -1223,7 +662,7 @@ export default function SecurityDashboard() {
 
             <div className="lg:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                <Calendar className="inline w-4 h-4 mr-1" />
+                <Calendar className="inline w-4 h-4 mr-1 shrink-0" />
                 Start Date & Time
               </label>
               <div className="flex gap-2">
@@ -1248,7 +687,7 @@ export default function SecurityDashboard() {
 
             <div className="lg:col-span-2">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                <Calendar className="inline w-4 h-4 mr-1" />
+                <Calendar className="inline w-4 h-4 mr-1 shrink-0" />
                 End Date & Time
               </label>
               <div className="flex gap-2">
@@ -1273,7 +712,7 @@ export default function SecurityDashboard() {
 
             <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                <Clock className="inline w-4 h-4 mr-1" />
+                <Clock className="inline w-4 h-4 mr-1 shrink-0" />
                 Shift Type
               </label>
               <select
@@ -1304,12 +743,12 @@ export default function SecurityDashboard() {
               >
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
-                    <RefreshCw className="w-5 h-5 animate-spin" />
+                    <RefreshCw className="w-5 h-5 animate-spin shrink-0" />
                     Loading...
                   </span>
                 ) : (
                   <span className="flex items-center justify-center gap-2">
-                    <TrendingUp className="w-5 h-5" />
+                    <TrendingUp className="w-5 h-5 shrink-0" />
                     Generate Report
                   </span>
                 )}
@@ -1320,7 +759,7 @@ export default function SecurityDashboard() {
           {clientScheduleInfo && (
             <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
-                <Shield className="w-4 h-4" />
+                <Shield className="w-4 h-4 shrink-0" />
                 Patrol Schedule Configuration
               </h4>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
@@ -1350,7 +789,7 @@ export default function SecurityDashboard() {
               </div>
               {clientScheduleInfo.hasCustomSchedule && (
                 <div className="mt-2 text-xs text-blue-600 flex items-center gap-1">
-                  <Info className="w-3 h-3" />
+                  <Info className="w-3 h-3 shrink-0" />
                   Custom schedule from: {clientScheduleInfo.configSource || 'database'}
                 </div>
               )}
@@ -1360,7 +799,7 @@ export default function SecurityDashboard() {
 
         {errorMessage && (
           <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
             <div>
               <h3 className="font-semibold text-red-900">Error</h3>
               <p className="text-red-700">{errorMessage}</p>
@@ -1370,10 +809,69 @@ export default function SecurityDashboard() {
 
         {pdfError && (
           <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
             <div>
               <h3 className="font-semibold text-red-900">PDF Error</h3>
               <p className="text-red-700">{pdfError}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Export Options - Only shown when data is available */}
+        {hasData && (
+          <div className="bg-white rounded-xl shadow-lg p-6 mb-6 border border-gray-200">
+            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <Printer className="w-5 h-5 text-blue-600 shrink-0" />
+              Export Options
+            </h3>
+            
+            <div className="flex flex-col md:flex-row gap-4">
+              {/* Export Info */}
+              <div className="flex-1">
+                <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                  <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
+                    <Info className="w-4 h-4 shrink-0" />
+                    Backend PDF Generation
+                  </h4>
+                  <p className="text-sm text-blue-700">
+                    PDFs are generated server-side using pdfService.js. 
+                    This ensures consistent formatting and reduces browser memory usage.
+                  </p>
+                  <div className="mt-2 text-xs text-blue-600">
+                    Includes: Executive summary, incident reports, visual analytics, and detailed performance metrics.
+                  </div>
+                </div>
+              </div>
+
+              {/* Export Buttons */}
+              <div className="flex flex-col gap-2 shrink-0">
+                <button
+                  onClick={downloadPDF}
+                  disabled={pdfLoading || !client}
+                  className="flex items-center justify-center gap-2 bg-linear-to-r from-blue-600 to-blue-700 text-white rounded-lg px-6 py-3 hover:from-blue-700 hover:to-blue-800 transition-all shadow-lg hover:shadow-xl disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                >
+                  {pdfLoading ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+                      Generating PDF...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4 shrink-0" />
+                      Download PDF Report
+                    </>
+                  )}
+                </button>
+                
+                <button
+                  onClick={exportToCSV}
+                  disabled={!report}
+                  className="flex items-center justify-center gap-2 bg-linear-to-r from-purple-600 to-purple-700 text-white rounded-lg px-6 py-3 hover:from-purple-700 hover:to-purple-800 transition-all shadow-lg hover:shadow-xl disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  Export CSV Data
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1383,56 +881,39 @@ export default function SecurityDashboard() {
           <>
             {/* Report Header */}
             <div className="flex justify-between items-start mb-6 flex-wrap gap-4">
-              <div>
+              <div className="shrink-0">
                 <h2 className="text-2xl font-bold text-gray-900">Dashboard Analytics</h2>
                 <p className="text-sm text-gray-600">
                   {client} • {startDate} {startTime ? ` ${startTime}` : ""} to {endDate} {endTime ? ` ${endTime}` : ""}
-                  <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs font-medium">
+                  <span className="ml-2 px-2 py-1 bg-blue-100 text-blue-800 rounded-md text-xs font-medium shrink-0">
                     {report.shift?.effective || getShiftLabel(shiftType)}
                   </span>
                   {report.period?.daysInRange && (
-                    <span className="ml-2 px-2 py-1 bg-gray-100 text-gray-700 rounded-md text-xs font-medium">
+                    <span className="ml-2 px-2 py-1 bg-gray-100 text-gray-700 rounded-md text-xs font-medium shrink-0">
                       {report.period.daysInRange} days
                     </span>
                   )}
                   {metrics.validZonesCount && (
-                    <span className="ml-2 px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium">
+                    <span className="ml-2 px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium shrink-0">
                       {metrics.validZonesCount} security posts
                     </span>
                   )}
                   {metrics.expectedPerZone && (
-                    <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-medium">
+                    <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-medium shrink-0">
                       {metrics.expectedPerZone} expected per zone
                     </span>
                   )}
                 </p>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  onClick={exportToPDF}
-                  disabled={pdfLoading}
-                  className="flex items-center gap-2 bg-red-600 text-white rounded-lg px-4 py-2 hover:bg-red-700 transition-all shadow-lg hover:shadow-xl disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  <FileText className="w-4 h-4" />
-                  {pdfLoading ? "Generating..." : "Export PDF"}
-                </button>
-                <button
-                  onClick={exportToCSV}
-                  className="flex items-center gap-2 bg-purple-600 text-white rounded-lg px-4 py-2 hover:bg-purple-700 transition-all shadow-lg hover:shadow-xl"
-                >
-                  <Download className="w-4 h-4" />
-                  Export CSV
-                </button>
               </div>
             </div>
 
             {/* GUARD REPORTS SECTION */}
             <div className="bg-white rounded-xl shadow-lg p-6 mb-8 border border-gray-200">
               <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-red-600" />
+                <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
                 Security Incidents & Guard Reports
                 {metrics.totalIncidents > 0 && (
-                  <span className="ml-2 px-2 py-1 bg-red-100 text-red-800 rounded-md text-xs font-medium">
+                  <span className="ml-2 px-2 py-1 bg-red-100 text-red-800 rounded-md text-xs font-medium shrink-0">
                     {metrics.totalIncidents} incident{metrics.totalIncidents !== 1 ? 's' : ''}
                   </span>
                 )}
@@ -1474,7 +955,7 @@ export default function SecurityDashboard() {
               ) : (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4">
                   <p className="text-lg font-semibold text-green-800 flex items-center gap-2">
-                    <CheckCircle className="w-5 h-5" />
+                    <CheckCircle className="w-5 h-5 shrink-0" />
                     No security incidents reported during this period
                   </p>
                 </div>
@@ -1483,19 +964,19 @@ export default function SecurityDashboard() {
 
             {/* Key Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-              <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
+              <div className="bg-linear-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-6 text-white">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold opacity-90 uppercase">Total Incidents</h3>
-                  <AlertTriangle className="w-6 h-6 opacity-90" />
+                  <AlertTriangle className="w-6 h-6 opacity-90 shrink-0" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.totalIncidents}</p>
                 <p className="text-sm opacity-80">Security incidents</p>
               </div>
 
-              <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-6 text-white">
+              <div className="bg-linear-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-6 text-white">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold opacity-90 uppercase">Checks Completed</h3>
-                  <CheckCircle className="w-6 h-6 opacity-90" />
+                  <CheckCircle className="w-6 h-6 opacity-90 shrink-0" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.totalCompleted}</p>
                 <p className="text-sm opacity-80">
@@ -1503,19 +984,19 @@ export default function SecurityDashboard() {
                 </p>
               </div>
 
-              <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl shadow-lg p-6 text-white">
+              <div className="bg-linear-to-br from-red-500 to-red-600 rounded-xl shadow-lg p-6 text-white">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold opacity-90 uppercase">Missed Patrols</h3>
-                  <XCircle className="w-6 h-6 opacity-90" />
+                  <XCircle className="w-6 h-6 opacity-90 shrink-0" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.totalMissedPatrols}</p>
                 <p className="text-sm opacity-80">Incomplete checks</p>
               </div>
 
-              <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl shadow-lg p-6 text-white">
+              <div className="bg-linear-to-br from-purple-500 to-purple-600 rounded-xl shadow-lg p-6 text-white">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold opacity-90 uppercase">Performance</h3>
-                  <TrendingUp className="w-6 h-6 opacity-90" />
+                  <TrendingUp className="w-6 h-6 opacity-90 shrink-0" />
                 </div>
                 <p className="text-4xl font-bold mb-2">{metrics.overallRate}%</p>
                 <p className="text-sm opacity-80">
@@ -1524,12 +1005,12 @@ export default function SecurityDashboard() {
               </div>
             </div>
 
-            {/* COMPLETE WORKING PIE CHART WITH GRID WRAPPER */}
+            {/* Charts Section */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
               {/* Performance Distribution Pie Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <Target className="w-5 h-5 text-blue-600" />
+                  <Target className="w-5 h-5 text-blue-600 shrink-0" />
                   Performance Distribution
                 </h3>
                 
@@ -1606,7 +1087,7 @@ export default function SecurityDashboard() {
               {/* Performance Trend Line Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <BarChart3 className="w-5 h-5 text-blue-600" />
+                  <BarChart3 className="w-5 h-5 text-blue-600 shrink-0" />
                   Weekly Performance Trend
                 </h3>
                 <ResponsiveContainer width="100%" height={320}>
@@ -1696,7 +1177,7 @@ export default function SecurityDashboard() {
             {report.events?.length > 0 && (
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-blue-600" />
+                  <Activity className="w-5 h-5 text-blue-600 shrink-0" />
                   Patrol Events Log ({report.events.length} events)
                 </h3>
                 <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
@@ -1731,7 +1212,7 @@ export default function SecurityDashboard() {
         {/* Empty State */}
         {!loading && !hasData && !errorMessage && (
           <div className="bg-white rounded-2xl shadow-xl p-12 text-center border border-gray-200">
-            <Users className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+            <Users className="w-16 h-16 text-gray-400 mx-auto mb-4 shrink-0" />
             <h3 className="text-xl font-bold text-gray-900 mb-2">No Data Available</h3>
             <p className="text-gray-600 mb-4">Select a client and date range to generate your dashboard</p>
             <div className="text-sm text-gray-500 space-y-1">
@@ -1740,13 +1221,19 @@ export default function SecurityDashboard() {
               <p>✓ Select shift type</p>
               <p>✓ Click "Generate Report"</p>
             </div>
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200 max-w-md mx-auto">
+              <h4 className="font-semibold text-blue-800 mb-2">Backend PDF Generation</h4>
+              <p className="text-sm text-blue-700">
+                Once you have data, you can export it as a professionally formatted PDF generated server-side.
+              </p>
+            </div>
           </div>
         )}
 
         {/* Loading State */}
         {loading && (
           <div className="bg-white rounded-2xl shadow-xl p-12 text-center border border-gray-200">
-            <RefreshCw className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+            <RefreshCw className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin shrink-0" />
             <h3 className="text-xl font-bold text-gray-900 mb-2">Loading Report...</h3>
             <p className="text-gray-600">Please wait while we fetch your security data</p>
           </div>

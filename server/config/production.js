@@ -76,11 +76,7 @@ const productionConfig = {
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
     bcryptSaltRounds: 10,
     sessionSecret: process.env.SESSION_SECRET || 'session-secret-change-in-production',
-    rateLimit: {
-      windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 100, // limit each IP to 100 requests per windowMs
-      authMax: 10 // login attempts per hour
-    },
+    // ✅ RATE LIMITING REMOVED - Was causing 429 errors with multiple workers
     cors: {
       origin: process.env.FRONTEND_URL || 'https://reports-97dm.onrender.com',
       credentials: true
@@ -106,8 +102,8 @@ const productionConfig = {
   performance: {
     compression: true,
     cluster: {
-      enabled: true,
-      maxWorkers: 4 // Limit to 4 workers even on high-CPU machines
+      enabled: process.env.NODE_ENV === 'production', // Only cluster in production
+      maxWorkers: 2 // Reduced from 4 to avoid overwhelming the system
     },
     requestTimeout: 30000,
     keepAliveTimeout: 65000,
@@ -235,10 +231,11 @@ export function displayConfigSummary() {
   console.log(`📧 Email:         ${productionConfig.email.enabled ? '✅ Enabled' : '❌ Disabled'} - ${productionConfig.email.auth.user || 'Not configured'}`);
   console.log(`⏰ Scheduler:     ${productionConfig.scheduler.enabled ? '✅ Enabled' : '❌ Disabled'} - ${productionConfig.scheduler.timezone}`);
   console.log(`🔐 Auth:          ✅ Enabled - JWT expires in ${productionConfig.security.jwtExpiresIn}`);
-  console.log(`🛡️  Security:      Rate limit ${productionConfig.security.rateLimit.max} req/15min`);
+  console.log(`🛡️  Security:      Rate limiting disabled`);
   console.log(`📊 Monitoring:    ${productionConfig.monitoring.metricsEnabled ? '✅ Enabled' : '❌ Disabled'}`);
   console.log(`🌐 CORS Origin:   ${productionConfig.security.cors.origin}`);
   console.log(`📁 Temp Storage:  ${productionConfig.storage.savePdfToDisk ? '✅ Enabled' : '❌ Disabled'}`);
+  console.log(`⚙️  Workers:       ${productionConfig.performance.cluster.enabled ? productionConfig.performance.cluster.maxWorkers : 1} worker(s)`);
   console.log('='.repeat(70) + '\n');
 }
 

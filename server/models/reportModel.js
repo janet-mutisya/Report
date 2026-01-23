@@ -1,4 +1,4 @@
-// server/models/reportModelOptimized.js - FLEXIBLE SHIFT-BASED MODEL WITH INCIDENT MODEL INTEGRATION
+// server/models/reportModel.js
 process.env.TZ = 'Africa/Nairobi';
 console.log('🔧 FORCED TZ:', process.env.TZ);
 
@@ -6,7 +6,7 @@ import { sql, poolPromise } from "../config/database.js";
 import { getClientSchedule, getPatrolScheduleConfig } from "../scripts/managePatrolSchedules.js";
 import bmSecurityAPI from "../service/bmSecurityAPI.js";
 import { getCachedPatrolEvents } from '../service/bmSecurityAPICache.js';
-import { getIncidentCount } from './incidentModel.js'; // ✅ IMPORT INCIDENT MODEL
+import { getIncidentCount } from './incidentModel.js'; //  IMPORT INCIDENT MODEL
 import dayjs from "dayjs";
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
@@ -106,6 +106,7 @@ function parseEventDate(rawDate) {
 
 /**
  * ✅ FIXED: SHIFT-BASED DATE RANGE FOR ANY DURATION
+ * Now correctly handles inclusive day counting
  */
 function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_TYPES.CUSTOM) {
   try {
@@ -121,16 +122,20 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
       throw new Error("End date cannot be before start date");
     }
     
-    // ✅ Calculate SHIFT DAYS instead of calendar days
-    const shiftDays = end.diff(start, 'day') + 1;
+    // ✅ Calculate SHIFT DAYS with INCLUSIVE count
+    const shiftDays = end.diff(start, 'day') + 1; // +1 for inclusive counting
 
-    if (shiftDays <= 0) {
+    if (shiftDays < 1) {
       throw new Error(`Invalid shiftDays calculation: ${shiftDays}`);
     }    
     
-    // For weekly reports, warn but don't enforce
+    // Validate expected shift days for specific report types
     if (reportType === DEFAULT_REPORT_TYPES.WEEKLY && shiftDays !== 7) {
       logger.warn(`⚠️ Weekly report expected 7 shift days, but got ${shiftDays} shift days`);
+    }
+    
+    if (reportType === DEFAULT_REPORT_TYPES.DAILY && shiftDays !== 1) {
+      logger.warn(`⚠️ Daily report expected 1 shift day, but got ${shiftDays} shift days`);
     }
     
     logger.info(`✅ VALIDATED: ${reportType.toUpperCase()} report = ${shiftDays} shift days`);
@@ -171,33 +176,56 @@ function validateAndFormatDates(startDate, endDate, reportType = DEFAULT_REPORT_
 
 /**
  * ✅ FIXED BUSINESS RULE: Generate date range for common report types
- * Weekly must always = 7 shift days
- * Monthly must always = 30 or 31 shift days (depending on month)
- * Both must end at today's morning (current shift end)
+ * - DAILY: Single shift day (yesterday's 18:00 → today's 06:00)
+ * - WEEKLY: Exactly 7 shift days (7 nights of 18:00→06:00)
+ * - MONTHLY: Full month of shift days
+ * All reports end at the most recent completed shift (this morning's 06:00)
  */
 function generateDateRangeForReportType(reportType, endDate = null) {
   const now = endDate ? dayjs.tz(endDate, TZ) : dayjs.tz(TZ);
 
-  // Shift day boundary: before 06:00 still counts as yesterday
-  let effectiveDay = now;
+  // ✅ Determine the last COMPLETED shift end
+  // If current time is before 06:00, the last completed shift ended yesterday at 06:00
+  // If current time is after 06:00, the last completed shift ended today at 06:00
+  let lastCompletedShiftEnd;
   if (now.hour() < SHIFT_END_HOUR) {
-    effectiveDay = now.subtract(1, 'day');
+    // Before 06:00 - last shift ended yesterday
+    lastCompletedShiftEnd = now.subtract(1, 'day').startOf('day');
+    logger.debug(`🕕 Before 06:00 - last completed shift ended yesterday (${lastCompletedShiftEnd.format('YYYY-MM-DD')})`);
+  } else {
+    // After 06:00 - last shift ended this morning
+    lastCompletedShiftEnd = now.startOf('day');
+    logger.debug(`🕕 After 06:00 - last completed shift ended today (${lastCompletedShiftEnd.format('YYYY-MM-DD')})`);
   }
 
-  const end = effectiveDay.startOf('day');
+  // The END date for reports is the CALENDAR DAY of the shift end
+  // For shift that ends Jan 24 at 06:00, the end date is Jan 23 (when it started)
+  const reportEndDate = lastCompletedShiftEnd.subtract(1, 'day');
+  
+  logger.debug(`📊 Report end date: ${reportEndDate.format('YYYY-MM-DD')} (shift that ended ${lastCompletedShiftEnd.format('YYYY-MM-DD')} 06:00)`);
 
   switch (reportType.toLowerCase()) {
     case 'daily': {
-      const day = end.subtract(1, 'day');
+      // ✅ DAILY = ONE shift day (yesterday 18:00 → today 06:00)
+      // Start date = end date for a single shift day
+      const shiftDay = reportEndDate;
+      logger.info(`📅 DAILY report: ${shiftDay.format('YYYY-MM-DD')} (covers ${shiftDay.format('YYYY-MM-DD')} 18:00 → ${shiftDay.add(1, 'day').format('YYYY-MM-DD')} 06:00)`);
+      
       return {
-        startDate: day.format('YYYY-MM-DD'),
-        endDate: day.format('YYYY-MM-DD')
+        startDate: shiftDay.format('YYYY-MM-DD'),
+        endDate: shiftDay.format('YYYY-MM-DD')
       };
     }
 
     case 'weekly': {
-      // EXACTLY 7 shift days window
-      const start = end.subtract(6, 'day'); // inclusive = 7 days
+      // ✅ WEEKLY = EXACTLY 7 shift days (7 consecutive nights)
+      // If end = Jan 23, we want Jan 16-23 (inclusive) = 7 days
+      const end = reportEndDate;
+      const start = end.subtract(6, 'day'); // 7 days total (inclusive)
+      
+      logger.info(`📅 WEEKLY report: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')} = 7 shift days`);
+      logger.info(`   Covers: ${start.format('YYYY-MM-DD')} 18:00 → ${end.add(1, 'day').format('YYYY-MM-DD')} 06:00`);
+      
       return {
         startDate: start.format('YYYY-MM-DD'),
         endDate: end.format('YYYY-MM-DD')
@@ -205,37 +233,61 @@ function generateDateRangeForReportType(reportType, endDate = null) {
     }
 
     case 'monthly': {
-      // EXACT rolling month window (30 or 31 depending on previous month)
-      const daysInWindow = end.daysInMonth(); // number of days in the CURRENT ending month
-      const start = end.subtract(daysInWindow - 1, 'day'); // inclusive window
+      // ✅ MONTHLY = Full calendar month of shift days
+      const end = reportEndDate;
+      const start = end.startOf('month');
+      
+      const daysInMonth = end.daysInMonth();
+      const shiftDays = end.diff(start, 'day') + 1; // Inclusive count
+      
+      logger.info(`📅 MONTHLY report: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')} = ${shiftDays} shift days`);
+      logger.info(`   Month has ${daysInMonth} calendar days, ${shiftDays} shift days in range`);
+      
       return {
         startDate: start.format('YYYY-MM-DD'),
         endDate: end.format('YYYY-MM-DD')
       };
     }
 
-    case 'last7days':
-      const last7Start = end.subtract(6, 'day');
+    case 'last7days': {
+      // Rolling 7-day window
+      const end = reportEndDate;
+      const start = end.subtract(6, 'day');
+      
+      logger.info(`📅 LAST 7 DAYS: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')} = 7 shift days`);
+      
       return {
-        startDate: last7Start.format('YYYY-MM-DD'),
+        startDate: start.format('YYYY-MM-DD'),
         endDate: end.format('YYYY-MM-DD')
       };
+    }
       
-    case 'last30days':
-      const last30Start = end.subtract(29, 'day');
+    case 'last30days': {
+      // Rolling 30-day window
+      const end = reportEndDate;
+      const start = end.subtract(29, 'day');
+      
+      logger.info(`📅 LAST 30 DAYS: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')} = 30 shift days`);
+      
       return {
-        startDate: last30Start.format('YYYY-MM-DD'),
+        startDate: start.format('YYYY-MM-DD'),
         endDate: end.format('YYYY-MM-DD')
       };
+    }
       
-    case 'lastmonth':
-      const lastMonth = end.subtract(1, 'month');
-      const lastMonthStart = lastMonth.startOf('month');
-      const lastMonthEnd = lastMonth.endOf('month');
+    case 'lastmonth': {
+      // Previous complete calendar month
+      const lastMonth = now.subtract(1, 'month');
+      const start = lastMonth.startOf('month');
+      const end = lastMonth.endOf('month');
+      
+      logger.info(`📅 LAST MONTH: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`);
+      
       return {
-        startDate: lastMonthStart.format('YYYY-MM-DD'),
-        endDate: lastMonthEnd.format('YYYY-MM-DD')
+        startDate: start.format('YYYY-MM-DD'),
+        endDate: end.format('YYYY-MM-DD')
       };
+    }
       
     default:
       throw new Error(`Unsupported report type: ${reportType}`);
@@ -898,12 +950,13 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
       throw new Error("Client ID, start date, and end date are required");
     }
 
-    // ✅ FLEXIBLE: Accept any date range
+    // ✅ FIXED: Now uses inclusive day counting
     const dates = validateAndFormatDates(startDate, endDate, reportType);
     const clientInfo = await getClientInfo(clientId);
     
     logger.info(`✅ Client: ${clientInfo.clientName}`);
     logger.info(`✅ Patrol window: ${dates.displayStart} ${SHIFT_START_HOUR}:00 → ${dates.displayEnd} ${SHIFT_END_HOUR}:00`);
+    logger.info(`✅ Shift days: ${dates.shiftDays} (inclusive count)`);
 
     const tableNames = getTableNames(dates.startDateTime, dates.endDateTime, usePartitions);
     
@@ -1065,7 +1118,8 @@ export const fetchPatrolReport = async (clientId, startDate, endDate, usePartiti
           incidentsFrom: 'incidentModel.js',
           shiftBased: true,
           shiftDays: dates.shiftDays,
-          flexibleRange: true
+          flexibleRange: true,
+          inclusiveDayCount: true
         },
         success: true
       }

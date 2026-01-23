@@ -1,4 +1,4 @@
-// server/service/emailService.js - CLEAN COMPACT VERSION
+// server/service/emailService.js - CLEAN COMPACT VERSION WITH DEBUG LOGS
 import nodemailer from 'nodemailer';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
@@ -14,6 +14,7 @@ const logger = {
   info: (...args) => console.log('[EMAIL]', ...args),
   warn: (...args) => console.warn('[EMAIL WARNING]', ...args),
   error: (...args) => console.error('[EMAIL ERROR]', ...args),
+  debug: (...args) => console.log('[EMAIL DEBUG]', ...args)
 };
 
 // ----------------- CONFIG VALIDATION -----------------
@@ -35,7 +36,7 @@ function validateEmailConfig() {
     throw new Error(error);
   }
 
-  logger.info('Email configuration validated');
+  logger.debug('Email configuration validated');
   return requiredVars;
 }
 
@@ -63,9 +64,28 @@ function createEmailTransporter() {
 
 // ----------------- COMPACT TEMPLATE GENERATOR -----------------
 function generateGuardReportEmail(recipientName, clientName, startDate, endDate) {
+  logger.debug('📧 Generating email template with dates:', {
+    startDate: startDate,
+    endDate: endDate,
+    startType: typeof startDate,
+    endType: typeof endDate
+  });
+
   const safeRecipient = recipientName || 'Valued Partner';
+  
+  // ✅ DEBUG: Log raw dates before parsing
+  logger.debug('Raw dates:', { startDate, endDate });
+  
   const start = dayjs(startDate).tz(TZ);
   const end = dayjs(endDate).tz(TZ);
+  
+  // ✅ DEBUG: Log parsed dates
+  logger.debug('Parsed dates:', {
+    start: start.format('YYYY-MM-DD'),
+    startValid: start.isValid(),
+    end: end.format('YYYY-MM-DD'),
+    endValid: end.isValid()
+  });
 
   const hour = dayjs().tz(TZ).hour();
   let greeting = 'Good day';
@@ -74,6 +94,8 @@ function generateGuardReportEmail(recipientName, clientName, startDate, endDate)
   else greeting = 'Good evening';
 
   const dateRange = `${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`;
+  
+  logger.debug('📧 Template date range:', dateRange);
 
   return `<!DOCTYPE html>
 <html>
@@ -304,49 +326,119 @@ async function sendEmailWithRetry(mailOptions, maxRetries = 3) {
 
 // ----------------- EXPORTABLE FUNCTIONS -----------------
 export async function sendGuardReport({ to, recipientName = '', clientName = '', startDate, endDate, pdfBuffer, pdfFilename }) {
-  validateEmailConfig();
+  try {
+    validateEmailConfig();
 
-  const safeRecipient = recipientName || to.split('@')[0] || 'Valued Partner';
-  const safeClient = clientName || 'Client';
+    // ✅ DEBUG LOGGING - SHOW EXACT PARAMETERS
+    logger.info('📧 ========== EMAIL DEBUG START ==========');
+    logger.info('📧 sendGuardReport called with parameters:');
+    logger.info(`   to: ${to}`);
+    logger.info(`   recipientName: ${recipientName}`);
+    logger.info(`   clientName: ${clientName}`);
+    logger.info(`   startDate: "${startDate}" (type: ${typeof startDate})`);
+    logger.info(`   endDate: "${endDate}" (type: ${typeof endDate})`);
+    logger.info(`   pdfFilename: ${pdfFilename || 'Not provided'}`);
+    logger.info(`   pdfBuffer size: ${pdfBuffer ? Math.round(pdfBuffer.length / 1024) + 'KB' : 'No buffer'}`);
+    logger.info('📧 ========== EMAIL DEBUG END ==========');
 
-  const emailHtml = generateGuardReportEmail(safeRecipient, safeClient, startDate, endDate);
+    const safeRecipient = recipientName || to.split('@')[0] || 'Valued Partner';
+    const safeClient = clientName || 'Client';
 
-  const start = dayjs(startDate).tz(TZ);
-  const end = dayjs(endDate).tz(TZ);
-  const isSingleDay = start.isSame(end, 'day');
-  const daysDiff = end.diff(start, 'day');
+    const emailHtml = generateGuardReportEmail(safeRecipient, safeClient, startDate, endDate);
 
-  const subject = isSingleDay
-    ? `🛡️ Security Report: ${safeClient} | ${start.format('YYYY-MM-DD')}`
-    : `🛡️ Security Report: ${safeClient} | ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`;
-
-  const fromName = process.env.FROM_NAME || 'Security Operations';
-  const fromEmail = process.env.FROM_EMAIL || process.env.EMAIL_USER;
-
-  const filename = pdfFilename || `Security_Report_${safeClient.replace(/\s+/g, '_')}_${start.format('YYYY-MM-DD')}_to_${end.format('YYYY-MM-DD')}.pdf`;
-
-  logger.info(`📧 Sending email: ${daysDiff} days from ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`);
-
-  const mailOptions = {
-    from: `"${fromName}" <${fromEmail}>`,
-    to,
-    subject,
-    html: emailHtml,
-    attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
-    priority: 'normal',
-    headers: {
-      'X-Report-Type': 'Security-Operations',
-      'X-Report-Period': `${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`,
-      'X-Client-Name': safeClient,
-      'X-Report-Days': daysDiff.toString()
+    // ✅ ADD VALIDATION LOGGING
+    logger.info('📧 ========== DATE PARSING DEBUG ==========');
+    const start = dayjs(startDate).tz(TZ);
+    const end = dayjs(endDate).tz(TZ);
+    
+    logger.info(`   startDate raw: "${startDate}"`);
+    logger.info(`   endDate raw: "${endDate}"`);
+    logger.info(`   Parsed start: ${start.format('YYYY-MM-DD')} (valid: ${start.isValid()})`);
+    logger.info(`   Parsed end: ${end.format('YYYY-MM-DD')} (valid: ${end.isValid()})`);
+    
+    if (!start.isValid()) {
+      logger.error(`❌ ERROR: startDate "${startDate}" is not a valid date!`);
+      logger.error(`   Trying fallback parsing...`);
+      const fallbackStart = dayjs(startDate, 'YYYY-MM-DD').tz(TZ);
+      logger.error(`   Fallback result: ${fallbackStart.format('YYYY-MM-DD')} (valid: ${fallbackStart.isValid()})`);
     }
-  };
+    
+    if (!end.isValid()) {
+      logger.error(`❌ ERROR: endDate "${endDate}" is not a valid date!`);
+      logger.error(`   Trying fallback parsing...`);
+      const fallbackEnd = dayjs(endDate, 'YYYY-MM-DD').tz(TZ);
+      logger.error(`   Fallback result: ${fallbackEnd.format('YYYY-MM-DD')} (valid: ${fallbackEnd.isValid()})`);
+    }
+    
+    const isSingleDay = start.isSame(end, 'day');
+    const daysDiff = end.diff(start, 'day');
+    logger.info(`   Single day: ${isSingleDay}`);
+    logger.info(`   Days difference: ${daysDiff}`);
+    logger.info('📧 ========== DATE DEBUG END ==========');
 
-  return await sendEmailWithRetry(mailOptions);
+    const subject = isSingleDay
+      ? `🛡️ Security Report: ${safeClient} | ${start.format('YYYY-MM-DD')}`
+      : `🛡️ Security Report: ${safeClient} | ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`;
+
+    const fromName = process.env.FROM_NAME || 'Security Operations';
+    const fromEmail = process.env.FROM_EMAIL || process.env.EMAIL_USER;
+
+    const filename = pdfFilename || `Security_Report_${safeClient.replace(/\s+/g, '_')}_${start.format('YYYY-MM-DD')}_to_${end.format('YYYY-MM-DD')}.pdf`;
+
+    logger.info('📧 ========== EMAIL CONFIG ==========');
+    logger.info(`   Subject: ${subject}`);
+    logger.info(`   From: "${fromName}" <${fromEmail}>`);
+    logger.info(`   To: ${to}`);
+    logger.info(`   Attachment: ${filename}`);
+    logger.info(`   Sending email: ${daysDiff + 1} days from ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`);
+    logger.info('📧 ========== CONFIG END ==========');
+
+    const mailOptions = {
+      from: `"${fromName}" <${fromEmail}>`,
+      to,
+      subject,
+      html: emailHtml,
+      attachments: [{ filename, content: pdfBuffer, contentType: 'application/pdf' }],
+      priority: 'normal',
+      headers: {
+        'X-Report-Type': 'Security-Operations',
+        'X-Report-Period': `${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`,
+        'X-Client-Name': safeClient,
+        'X-Report-Days': (daysDiff + 1).toString(),
+        'X-Debug-StartDate': startDate || 'undefined',
+        'X-Debug-EndDate': endDate || 'undefined'
+      }
+    };
+
+    const result = await sendEmailWithRetry(mailOptions);
+    
+    logger.info('📧 ========== EMAIL SENT SUCCESSFULLY ==========');
+    logger.info(`   Message ID: ${result.messageId}`);
+    logger.info(`   Final dates in email: ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`);
+    
+    return result;
+    
+  } catch (error) {
+    logger.error('📧 ========== EMAIL SENDING FAILED ==========');
+    logger.error(`   Error: ${error.message}`);
+    logger.error(`   Original parameters:`);
+    logger.error(`     to: ${to}`);
+    logger.error(`     startDate: "${startDate}"`);
+    logger.error(`     endDate: "${endDate}"`);
+    logger.error('📧 ========== FAILURE DETAILS ==========');
+    throw error;
+  }
 }
 
-export async function sendPatrolReport(options) { return sendGuardReport(options); }
-export async function sendHistoricalReport(options) { return sendGuardReport(options); }
+export async function sendPatrolReport(options) { 
+  logger.info('📧 sendPatrolReport called (alias for sendGuardReport)');
+  return sendGuardReport(options); 
+}
+
+export async function sendHistoricalReport(options) { 
+  logger.info('📧 sendHistoricalReport called (alias for sendGuardReport)');
+  return sendGuardReport(options); 
+}
 
 export async function sendSimpleEmail({ to, subject, text, html, attachments }) {
   const fromName = process.env.FROM_NAME || 'Security Operations';

@@ -1,4 +1,4 @@
-// server/service/bmSecurityAPICache.js - PRODUCTION READY
+// server/service/bmSecurityAPICache.js - PRODUCTION READY (OPTIMIZED)
 import bmSecurityAPI from './bmSecurityAPI.js';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
@@ -18,9 +18,10 @@ const rawAPICache = new Map();
 const processedCache = new Map();
 const backgroundJobs = new Map();
 
-const RAW_API_CACHE_TTL = 5 * 60 * 1000;       // 5 minutes for raw API data
-const PROCESSED_CACHE_TTL = 2 * 60 * 1000;    // 2 minutes for processed client data
-const BACKGROUND_REFRESH_INTERVAL = 4 * 60 * 1000; // 4 minutes for background refresh
+// ✅ INCREASED CACHE TTLs (FIX #4)
+const RAW_API_CACHE_TTL = 10 * 60 * 1000;       // Increased from 5 to 10 minutes for raw API data
+const PROCESSED_CACHE_TTL = 5 * 60 * 1000;      // Increased from 2 to 5 minutes for processed client data
+const BACKGROUND_REFRESH_INTERVAL = 8 * 60 * 1000; // Increased from 4 to 8 minutes for background refresh
 
 // Cache hit metrics
 const cacheMetrics = {
@@ -33,6 +34,58 @@ const cacheMetrics = {
     return ((cacheMetrics.tier1 + cacheMetrics.tier2) / cacheMetrics.total * 100).toFixed(1);
   }
 };
+
+// Request throttling
+class RequestThrottler {
+  constructor(minInterval = 500) {
+    this.minInterval = minInterval;
+    this.lastRequestTime = 0;
+    this.queue = [];
+    this.processing = false;
+  }
+
+  async throttle(requestFn) {
+    return new Promise((resolve, reject) => {
+      const task = async () => {
+        try {
+          const now = Date.now();
+          const timeSinceLastRequest = now - this.lastRequestTime;
+          
+          if (timeSinceLastRequest < this.minInterval) {
+            const delay = this.minInterval - timeSinceLastRequest;
+            await new Promise(r => setTimeout(r, delay));
+          }
+          
+          this.lastRequestTime = Date.now();
+          const result = await requestFn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        } finally {
+          this.processing = false;
+          this.processQueue();
+        }
+      };
+
+      this.queue.push(task);
+      
+      if (!this.processing) {
+        this.processQueue();
+      }
+    });
+  }
+
+  processQueue() {
+    if (this.processing || this.queue.length === 0) return;
+    
+    this.processing = true;
+    const nextTask = this.queue.shift();
+    nextTask();
+  }
+}
+
+// Create throttler instance with 500ms minimum interval
+const apiThrottler = new RequestThrottler(500);
 
 // ✅ FIX #1: Use normalized dates in cache keys
 function generateRawCacheKey(accountNumber, startDate, endDate) {
@@ -70,6 +123,13 @@ function filterEventsForClient(events, clientId) {
   });
 }
 
+// Throttled API call wrapper
+async function throttledGetPatrolEvents(accountNumber, startDate, endDate) {
+  return await apiThrottler.throttle(() => 
+    bmSecurityAPI.getPatrolEvents(accountNumber, startDate, endDate)
+  );
+}
+
 export async function getCachedPatrolEvents(clientId, startDate, endDate, accountNumber = null) {
   cacheMetrics.total++;
   
@@ -87,7 +147,7 @@ export async function getCachedPatrolEvents(clientId, startDate, endDate, accoun
     console.log(`[API Cache] 🎯 Tier 1 hit: ${clientId} (${age}s old)`);
     cacheMetrics.tier1++;
     
-    // Schedule background refresh
+    // Schedule background refresh with longer interval
     scheduleBackgroundRefresh(clientId, startDate, endDate, accountNumber);
     
     return {
@@ -130,7 +190,7 @@ export async function getCachedPatrolEvents(clientId, startDate, endDate, accoun
     };
   }
   
-  // TIER 3: Cache miss - fetch from API
+  // TIER 3: Cache miss - fetch from API with throttling
   console.log(`[API Cache] 🔄 Cache miss: ${clientId} (${normalizedStart} → ${normalizedEnd})`);
   cacheMetrics.misses++;
   
@@ -141,7 +201,8 @@ export async function getCachedPatrolEvents(clientId, startDate, endDate, accoun
       throw new Error('BM Security API not available');
     }
     
-    const result = await bmSecurityAPI.getPatrolEvents(
+    // Use throttled API call
+    const result = await throttledGetPatrolEvents(
       accountNumber, 
       startDate, 
       endDate
@@ -194,7 +255,7 @@ export async function getCachedPatrolEvents(clientId, startDate, endDate, accoun
   }
 }
 
-// ✅ FIX #2: Normalized background refresh with proper guards
+// ✅ FIX #2 & #4: Normalized background refresh with longer interval
 async function scheduleBackgroundRefresh(clientId, startDate, endDate, accountNumber) {
   // ✅ Use normalized dates for job key
   const jobKey = `refresh_${clientId}_${normalizeDate(startDate)}_${normalizeDate(endDate)}`;
@@ -204,7 +265,7 @@ async function scheduleBackgroundRefresh(clientId, startDate, endDate, accountNu
     return;
   }
   
-  console.log(`[API Cache] ⏰ Scheduling background refresh: ${jobKey}`);
+  console.log(`[API Cache] ⏰ Scheduling background refresh: ${jobKey} (${BACKGROUND_REFRESH_INTERVAL/60000}min)`);
   
   const refreshTimeout = setTimeout(async () => {
     console.log(`[API Cache] 🔄 Background refresh starting: ${jobKey}`);
@@ -237,7 +298,8 @@ async function performSilentRefresh(clientId, startDate, endDate, accountNumber)
   const processedKey = generateProcessedCacheKey(clientId, startDate, endDate);
   
   try {
-    const result = await bmSecurityAPI.getPatrolEvents(
+    // Use throttled API call for silent refresh too
+    const result = await throttledGetPatrolEvents(
       accountNumber, 
       startDate, 
       endDate
@@ -279,6 +341,7 @@ export async function smartWarmup(clientId, accountNumber = null) {
   
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   
+  // Use throttled requests for warmup
   const promises = [
     getCachedPatrolEvents(
       clientId,
@@ -373,16 +436,19 @@ export function getAPICacheStats() {
     raw: { 
       size: rawAPICache.size, 
       entries: rawEntries.slice(0, 10), // Show first 10 only
-      ttl: RAW_API_CACHE_TTL / 1000 
+      ttl: RAW_API_CACHE_TTL / 1000,
+      ttlMinutes: RAW_API_CACHE_TTL / 60000
     },
     processed: { 
       size: processedCache.size, 
       entries: processedEntries.slice(0, 10),
-      ttl: PROCESSED_CACHE_TTL / 1000 
+      ttl: PROCESSED_CACHE_TTL / 1000,
+      ttlMinutes: PROCESSED_CACHE_TTL / 60000
     },
     backgroundJobs: { 
       active: backgroundJobs.size, 
-      jobs: Array.from(backgroundJobs.keys()).slice(0, 5) 
+      jobs: Array.from(backgroundJobs.keys()).slice(0, 5),
+      intervalMinutes: BACKGROUND_REFRESH_INTERVAL / 60000
     },
     metrics: {
       tier1: cacheMetrics.tier1,
@@ -390,6 +456,11 @@ export function getAPICacheStats() {
       misses: cacheMetrics.misses,
       total: cacheMetrics.total,
       hitRate: cacheMetrics.getHitRate() + '%'
+    },
+    throttling: {
+      minIntervalMs: apiThrottler.minInterval,
+      queueSize: apiThrottler.queue.length,
+      processing: apiThrottler.processing
     }
   };
 }
@@ -437,9 +508,45 @@ export async function healthCheck() {
     status: 'healthy',
     cacheStats: getAPICacheStats(),
     timestamp: new Date().toISOString(),
-    timezone: 'Africa/Nairobi'
+    timezone: 'Africa/Nairobi',
+    config: {
+      rawCacheTTL: `${RAW_API_CACHE_TTL / 60000} minutes`,
+      processedCacheTTL: `${PROCESSED_CACHE_TTL / 60000} minutes`,
+      backgroundRefresh: `${BACKGROUND_REFRESH_INTERVAL / 60000} minutes`,
+      throttlingInterval: `${apiThrottler.minInterval}ms`
+    }
   };
 }
+
+// Cache cleanup function
+function cleanupExpiredCache() {
+  const now = Date.now();
+  let rawCleaned = 0;
+  let processedCleaned = 0;
+  
+  // Clean raw cache
+  for (const [key, value] of rawAPICache.entries()) {
+    if (now - value.timestamp > RAW_API_CACHE_TTL) {
+      rawAPICache.delete(key);
+      rawCleaned++;
+    }
+  }
+  
+  // Clean processed cache
+  for (const [key, value] of processedCache.entries()) {
+    if (now - value.timestamp > PROCESSED_CACHE_TTL) {
+      processedCache.delete(key);
+      processedCleaned++;
+    }
+  }
+  
+  if (rawCleaned > 0 || processedCleaned > 0) {
+    console.log(`[API Cache] 🧹 Cleaned ${rawCleaned} raw + ${processedCleaned} processed expired entries`);
+  }
+}
+
+// Run cleanup every 5 minutes
+setInterval(cleanupExpiredCache, 5 * 60 * 1000);
 
 export default {
   getCachedPatrolEvents,

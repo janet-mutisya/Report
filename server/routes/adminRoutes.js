@@ -1,4 +1,4 @@
-// server/routes/admin.js - Admin routes for manual account linking
+//routes for manual account linking
 import express from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";

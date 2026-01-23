@@ -344,7 +344,7 @@ export default function Dashboard() {
 
   if (loadingStatus) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+      <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-blue-50 to-indigo-100">
         <div className="text-center">
           <Loader className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
           <p className="text-gray-600 font-medium">Loading dashboard...</p>
@@ -354,14 +354,14 @@ export default function Dashboard() {
   }
 
   const ErrorAlert = ({ message, onRetry }) => (
-    <div className="bg-gradient-to-r from-red-50 to-pink-50 border-l-4 border-red-500 p-6 rounded-r-xl mb-6 shadow-lg">
+    <div className="bg-linear-to-r from-red-50 to-pink-50 border-l-4 border-red-500 p-6 rounded-r-xl mb-6 shadow-lg">
       <div className="flex items-start">
-        <AlertCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
+        <AlertCircle className="w-6 h-6 text-red-600 shrink-0 mt-1" />
         <div className="ml-3 flex-1">
           <p className="text-red-800 font-semibold">Error</p>
           <p className="text-red-700 mt-1">{message}</p>
           {onRetry && (
-            <button onClick={onRetry} className="mt-3 px-4 py-2 bg-gradient-to-r from-red-600 to-pink-600 text-white rounded-lg hover:from-red-700 hover:to-pink-700 transition">
+            <button onClick={onRetry} className="mt-3 px-4 py-2 bg-linear-to-r from-red-600 to-pink-600 text-white rounded-lg hover:from-red-700 hover:to-pink-700 transition">
               Retry
             </button>
           )}
@@ -372,20 +372,20 @@ export default function Dashboard() {
 
   if (status?.status === 'pending_link') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-50 to-orange-100 py-12 px-4">
+      <div className="min-h-screen bg-linear-to-br from-yellow-50 to-orange-100 py-12 px-4">
         <div className="max-w-2xl mx-auto">
           <div className="bg-white rounded-2xl shadow-xl p-8">
             <div className="text-center mb-6">
-              <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-full mb-4 shadow-lg">
+              <div className="inline-flex items-center justify-center w-20 h-20 bg-linear-to-br from-yellow-400 to-orange-500 rounded-full mb-4 shadow-lg">
                 <Clock className="w-10 h-10 text-white" />
               </div>
               <h2 className="text-3xl font-bold text-gray-900 mb-2">Account Setup in Progress</h2>
               <p className="text-gray-600 text-lg">We're working on linking your security account</p>
             </div>
             {error && <ErrorAlert message={error} />}
-            <div className="bg-gradient-to-r from-yellow-50 to-orange-50 border-2 border-yellow-200 rounded-xl p-6 mb-6">
+            <div className="bg-linear-to-r from-yellow-50 to-orange-50 border-2 border-yellow-200 rounded-xl p-6 mb-6">
               <div className="flex gap-4">
-                <AlertCircle className="w-6 h-6 text-yellow-600 flex-shrink-0 mt-1" />
+                <AlertCircle className="w-6 h-6 text-yellow-600 shrink-0 mt-1" />
                 <div>
                   <h3 className="font-bold text-yellow-900 mb-2 text-lg">What's happening?</h3>
                   <p className="text-yellow-800 leading-relaxed">
@@ -397,7 +397,7 @@ export default function Dashboard() {
             </div>
             <div className="space-y-4 mb-6">
               <div className="flex items-start gap-4 p-4 bg-green-50 rounded-lg border border-green-200">
-                <CheckCircle className="w-6 h-6 text-green-600 flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-6 h-6 text-green-600 shrink-0 mt-0.5" />
                 <div>
                   <p className="font-semibold text-gray-900">Account Created</p>
                   <p className="text-sm text-gray-600 mt-1">{user?.email}</p>
@@ -418,16 +418,16 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 py-8 px-4">
+    <div className="min-h-screen bg-linear-to-br from-blue-50 via-indigo-50 to-purple-50 py-8 px-4">
       <div className="max-w-7xl mx-auto">
         <div className="mb-8 bg-white rounded-2xl shadow-lg p-6 border-t-4 border-blue-600">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
               <div className="flex items-center gap-3 mb-2">
-                <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg">
+                <div className="p-2 bg-linear-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg">
                   <Shield className="w-8 h-8 text-white" />
                 </div>
-                <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+                <h1 className="text-3xl font-bold bg-linear-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
                   VigiControl Dashboard
                 </h1>
               </div>
@@ -447,7 +447,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-blue-500 hover:shadow-xl transition-all hover:-translate-y-1">
             <div className="flex items-center justify-between mb-4">
-              <div className="p-3 bg-gradient-to-br from-blue-400 to-blue-600 rounded-xl shadow-md">
+              <div className="p-3 bg-linear-to-br from-blue-400 to-blue-600 rounded-xl shadow-md">
                 <CheckSquare className="w-6 h-6 text-white" />
               </div>
               {loadingEvents ? <Loader className="w-5 h-5 text-blue-400 animate-spin" /> : <TrendingUp className="w-5 h-5 text-green-500" />}
@@ -456,7 +456,7 @@ export default function Dashboard() {
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-blue-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent mb-2">{events.length}</p>
+                <p className="text-4xl font-bold bg-linear-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent mb-2">{events.length}</p>
                 <p className="text-sm font-medium text-gray-600">VigiControl Arrivals</p>
                 <p className="text-xs text-gray-500 mt-1">{getDateRangeLabel()}</p>
               </>
@@ -465,7 +465,7 @@ export default function Dashboard() {
 
           <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-green-500 hover:shadow-xl transition-all hover:-translate-y-1">
             <div className="flex items-center justify-between mb-4">
-              <div className="p-3 bg-gradient-to-br from-green-400 to-green-600 rounded-xl shadow-md">
+              <div className="p-3 bg-linear-to-br from-green-400 to-green-600 rounded-xl shadow-md">
                 <TrendingUp className="w-6 h-6 text-white" />
               </div>
               {loadingSummary ? <Loader className="w-5 h-5 text-green-400 animate-spin" /> : <Activity className="w-5 h-5 text-green-400" />}
@@ -483,7 +483,7 @@ export default function Dashboard() {
 
           <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-purple-500 hover:shadow-xl transition-all hover:-translate-y-1">
             <div className="flex items-center justify-between mb-4">
-              <div className="p-3 bg-gradient-to-br from-purple-400 to-purple-600 rounded-xl shadow-md">
+              <div className="p-3 bg-linear-to-br from-purple-400 to-purple-600 rounded-xl shadow-md">
                 <MapPin className="w-6 h-6 text-white" />
               </div>
               {loadingSummary ? <Loader className="w-5 h-5 text-purple-400 animate-spin" /> : <Users className="w-5 h-5 text-purple-400" />}
@@ -492,7 +492,7 @@ export default function Dashboard() {
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-purple-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">{summary?.summary?.totalPosts || 0}</p>
+                <p className="text-4xl font-bold bg-linear-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent mb-2">{summary?.summary?.totalPosts || 0}</p>
                 <p className="text-sm font-medium text-gray-600">Security Posts</p>
                 <p className="text-xs text-gray-500 mt-1">Total Locations</p>
               </>
@@ -501,7 +501,7 @@ export default function Dashboard() {
 
           <div className="bg-white rounded-2xl shadow-lg p-6 border-l-4 border-orange-500 hover:shadow-xl transition-all hover:-translate-y-1">
             <div className="flex items-center justify-between mb-4">
-              <div className="p-3 bg-gradient-to-br from-orange-400 to-orange-600 rounded-xl shadow-md">
+              <div className="p-3 bg-linear-to-br from-orange-400 to-orange-600 rounded-xl shadow-md">
                 <BarChart3 className="w-6 h-6 text-white" />
               </div>
               {loadingSummary ? <Loader className="w-5 h-5 text-orange-400 animate-spin" /> : <Calendar className="w-5 h-5 text-orange-400" />}
@@ -510,7 +510,7 @@ export default function Dashboard() {
               <div className="h-16 flex items-center"><Loader className="w-8 h-8 animate-spin text-orange-400 mx-auto" /></div>
             ) : (
               <>
-                <p className="text-4xl font-bold bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent mb-2">{summary?.summary?.avgPerDay || 0}</p>
+                <p className="text-4xl font-bold bg-linear-to-r from-orange-600 to-red-600 bg-clip-text text-transparent mb-2">{summary?.summary?.avgPerDay || 0}</p>
                 <p className="text-sm font-medium text-gray-600">Avg Per Day</p>
                 <p className="text-xs text-gray-500 mt-1">{summary?.summary?.daysCovered || 0} days in range</p>
               </>
@@ -614,7 +614,7 @@ export default function Dashboard() {
               disabled={loadingEvents || loadingSummary}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'week'
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
+                  ? 'bg-linear-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
@@ -625,7 +625,7 @@ export default function Dashboard() {
               disabled={loadingEvents || loadingSummary}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'month'
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
+                  ? 'bg-linear-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
@@ -636,7 +636,7 @@ export default function Dashboard() {
               disabled={loadingEvents || loadingSummary}
               className={`px-6 py-3 rounded-xl font-semibold transition-all ${
                 dateRange === 'custom'
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
+                  ? 'bg-linear-to-r from-blue-600 to-indigo-600 text-white shadow-lg scale-105'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
               } ${loadingEvents || loadingSummary ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
@@ -645,7 +645,7 @@ export default function Dashboard() {
           </div>
 
           {dateRange === 'custom' && (
-            <div className="flex flex-wrap gap-4 items-end bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-xl border border-blue-200">
+            <div className="flex flex-wrap gap-4 items-end bg-linear-to-r from-blue-50 to-indigo-50 p-4 rounded-xl border border-blue-200">
               <div className="flex-1 min-w-[200px]">
                 <label className="block text-sm font-semibold text-gray-700 mb-2">Start Date</label>
                 <input
@@ -667,7 +667,7 @@ export default function Dashboard() {
               <button
                 onClick={handleCustomDateSearch}
                 disabled={!customDates.startDate || !customDates.endDate || loadingEvents || loadingSummary}
-                className="px-6 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-indigo-700 transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-6 py-3 bg-linear-to-r from-blue-600 to-indigo-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-indigo-700 transition shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Apply Filter
               </button>
@@ -676,7 +676,7 @@ export default function Dashboard() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
-          <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white">
+          <div className="bg-linear-to-r from-blue-600 to-indigo-600 p-6 text-white">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h3 className="font-bold text-xl flex items-center gap-2">
@@ -700,7 +700,7 @@ export default function Dashboard() {
                 <button
                   onClick={exportToPDF}
                   disabled={!events || events.length === 0 || exportingPDF}
-                  className="flex items-center gap-2 px-5 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl hover:from-green-600 hover:to-emerald-700 transition font-semibold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center gap-2 px-5 py-3 bg-linear-to-r from-green-500 to-emerald-600 text-white rounded-xl hover:from-green-600 hover:to-emerald-700 transition font-semibold shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {exportingPDF ? (
                     <>
@@ -728,7 +728,7 @@ export default function Dashboard() {
             ) : events.length > 0 ? (
               <>
                 <table className="w-full">
-                  <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
+                  <thead className="bg-linear-to-r from-gray-50 to-gray-100">
                     <tr>
                       <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Date</th>
                       <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Time</th>
@@ -752,7 +752,7 @@ export default function Dashboard() {
                           </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="inline-flex items-center gap-2 px-3 py-1 bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 text-sm font-semibold rounded-full">
+                          <span className="inline-flex items-center gap-2 px-3 py-1 bg-linear-to-r from-green-100 to-emerald-100 text-green-800 text-sm font-semibold rounded-full">
                             <CheckCircle className="w-4 h-4" />
                             {event.event}
                           </span>
@@ -769,7 +769,7 @@ export default function Dashboard() {
                 </table>
 
                 {totalPages > 1 && (
-                  <div className="bg-gradient-to-r from-gray-50 to-gray-100 px-6 py-4 border-t border-gray-200">
+                  <div className="bg-linear-to-r from-gray-50 to-gray-100 px-6 py-4 border-t border-gray-200">
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-gray-700">
                         Showing <span className="font-semibold">{startIndex + 1}</span> to{' '}
@@ -785,7 +785,7 @@ export default function Dashboard() {
                           <ChevronLeft className="w-4 h-4" />
                           Previous
                         </button>
-                        <div className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold">
+                        <div className="px-4 py-2 bg-linear-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold">
                           Page {currentPage} of {totalPages}
                         </div>
                         <button

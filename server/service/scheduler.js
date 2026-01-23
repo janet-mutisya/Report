@@ -1,4 +1,4 @@
-// server/service/scheduler.js - OPTIMIZED FOR 60-SECOND CHECKS
+// server/service/scheduler.js - FIXED FOR NIGHT SHIFT REPORTING
 
 import cron from "node-cron";
 import dotenv from "dotenv";
@@ -22,6 +22,10 @@ dayjs.extend(timezone);
 const TZ = process.env.TIMEZONE || "Africa/Nairobi";
 const TEST_MODE = process.env.TEST_MODE === "true";
 
+// ✅ NIGHT SHIFT CONFIGURATION (MUST MATCH reportModel.js)
+const SHIFT_START_HOUR = 18; // 18:00
+const SHIFT_END_HOUR = 6;    // 06:00 next day
+
 // Email kill switch
 const EMAIL_ENABLED = global.EMAIL_SENDING_ENABLED !== undefined 
   ? global.EMAIL_SENDING_ENABLED 
@@ -39,15 +43,17 @@ if (SAVE_PDF_TO_DISK && !fs.existsSync(PDF_TEMP_DIR)) {
 const SCHEDULER_CONFIG = {
   SCHEDULER_CHECK_INTERVAL: process.env.SCHEDULER_CHECK_INTERVAL || "* * * * *", // Every 1 minute
   EMAIL_SUBJECT_PREFIX: process.env.EMAIL_SUBJECT_PREFIX || "Security Report",
-  DELAY_BETWEEN_CLIENTS: parseInt(process.env.DELAY_BETWEEN_CLIENTS) || 500, // Reduced from 1000ms
+  DELAY_BETWEEN_CLIENTS: parseInt(process.env.DELAY_BETWEEN_CLIENTS) || 500,
   LOG_ERRORS_TO_FILE: process.env.LOG_ERRORS_TO_FILE === 'true',
   ERROR_LOG_FILE: process.env.ERROR_LOG_FILE || 'scheduler_errors.log',
   SUCCESS_LOG_FILE: process.env.SUCCESS_LOG_FILE || 'scheduler_success.log',
-  MAX_CONCURRENT_PDFS: parseInt(process.env.MAX_CONCURRENT_PDFS) || 5, // Increased from 3
-  PDF_GENERATION_TIMEOUT: parseInt(process.env.PDF_GENERATION_TIMEOUT) || 45000, // Reduced from 60000
-  EMAIL_SEND_TIMEOUT: parseInt(process.env.EMAIL_SEND_TIMEOUT) || 20000, // Reduced from 30000
-  PROCESS_PAST_DUE_UP_TO_HOURS: parseInt(process.env.PROCESS_PAST_DUE_UP_TO_HOURS) || 1, // Reduced from 24
-  GRACE_PERIOD_MINUTES: parseInt(process.env.GRACE_PERIOD_MINUTES) || 10 // New: 10-minute grace period
+  MAX_CONCURRENT_PDFS: parseInt(process.env.MAX_CONCURRENT_PDFS) || 5,
+  PDF_GENERATION_TIMEOUT: parseInt(process.env.PDF_GENERATION_TIMEOUT) || 45000,
+  EMAIL_SEND_TIMEOUT: parseInt(process.env.EMAIL_SEND_TIMEOUT) || 20000,
+  PROCESS_PAST_DUE_UP_TO_HOURS: parseInt(process.env.PROCESS_PAST_DUE_UP_TO_HOURS) || 1,
+  GRACE_PERIOD_MINUTES: parseInt(process.env.GRACE_PERIOD_MINUTES) || 10,
+  SHIFT_START_HOUR: SHIFT_START_HOUR,
+  SHIFT_END_HOUR: SHIFT_END_HOUR
 };
 
 /**
@@ -58,9 +64,7 @@ async function getDatabaseConnection(maxRetries = 3, retryDelay = 1000) {
     try {
       const pool = await poolPromise;
       
-      // Test the connection
       if (pool && pool.connected !== false) {
-        // Try a simple query to verify connection
         await pool.request().query('SELECT 1 as test');
         console.log(`[DB] ✅ Database connection successful (attempt ${attempt})`);
         return pool;
@@ -71,7 +75,7 @@ async function getDatabaseConnection(maxRetries = 3, retryDelay = 1000) {
       if (attempt < maxRetries) {
         console.log(`[DB] 🔄 Retrying in ${retryDelay}ms...`);
         await delay(retryDelay);
-        retryDelay *= 2; // Exponential backoff
+        retryDelay *= 2;
       } else {
         console.error('[DB] ❌ All database connection attempts failed');
         throw error;
@@ -169,22 +173,18 @@ async function generatePDF(pdfData) {
       throw new Error('PDF generation function not found');
     }
 
-    // Determine which function to call
     const pdfFunc = typeof pdfService.generateDashboardPDF === 'function'
       ? pdfService.generateDashboardPDF
       : pdfService.default.generateDashboardPDF;
 
-    // Adjust timeout dynamically based on number of days or expected data volume
-    const days = pdfData.startDate && pdfData.endDate
-      ? Math.max(1, Math.ceil(
-          (new Date(pdfData.endDate) - new Date(pdfData.startDate)) / (1000 * 60 * 60 * 24)
-        ))
-      : 1;
+    // Calculate shift days for timeout adjustment
+    const start = dayjs(pdfData.startDate);
+    const end = dayjs(pdfData.endDate);
+    const shiftDays = end.diff(start, 'day') + 1; // Inclusive count
 
-    const dynamicTimeout = Math.max(SCHEDULER_CONFIG.PDF_GENERATION_TIMEOUT, days * 10000); 
-    // 10 seconds per day minimum
+    const dynamicTimeout = Math.max(SCHEDULER_CONFIG.PDF_GENERATION_TIMEOUT, shiftDays * 10000);
 
-    console.log(`[PDF] 🕒 Generating PDF with timeout ${dynamicTimeout}ms for ${days} day(s)`);
+    console.log(`[PDF] 🕒 Generating PDF for ${shiftDays} shift days, timeout ${dynamicTimeout}ms`);
 
     const pdfBuffer = await withTimeout(
       pdfFunc(pdfData),
@@ -324,62 +324,118 @@ async function getDueSchedules() {
 }
 
 /**
- * ✅ Get date range based on frequency
+ * ✅ FIXED: Get date range aligned with NIGHT SHIFT reporting
+ * CRITICAL: Must align with reportModel's inclusive day counting
  */
 function getDateRangeForFrequency(frequency, intervalDays = 1, runTime = null) {
   const runDate = runTime ? dayjs(runTime).tz(TZ) : dayjs().tz(TZ);
   
+  console.log(`[DATE RANGE] 🕒 Run date: ${runDate.format('YYYY-MM-DD HH:mm:ss')}`);
+  console.log(`[DATE RANGE] 📊 Frequency: ${frequency} (1=Daily, 2=Weekly, 3=Monthly)`);
+  
+  // ✅ Determine last COMPLETED shift based on current time
+  let lastCompletedShiftDay;
+  if (runDate.hour() < SHIFT_END_HOUR) { // Before 06:00
+    // Last completed shift ended yesterday at 06:00
+    lastCompletedShiftDay = runDate.subtract(1, 'day').startOf('day');
+    console.log(`[DATE RANGE] 🌙 Before 06:00 - last shift ended yesterday (${lastCompletedShiftDay.format('YYYY-MM-DD')} 06:00)`);
+  } else { // After 06:00
+    // Last completed shift ended this morning at 06:00
+    lastCompletedShiftDay = runDate.startOf('day');
+    console.log(`[DATE RANGE] 🌞 After 06:00 - last shift ended today (${lastCompletedShiftDay.format('YYYY-MM-DD')} 06:00)`);
+  }
+  
+  // The END date for reports is the CALENDAR DAY when the shift STARTED
+  // For shift that ends Jan 24 at 06:00, the end date is Jan 23
+  const reportEndDate = lastCompletedShiftDay.subtract(1, 'day');
+  console.log(`[DATE RANGE] 📅 Report end date: ${reportEndDate.format('YYYY-MM-DD')} (shift started here)`);
+  
   switch (frequency) {
-    case 1: // Daily - Previous FULL day (start to end)
-      const previousDay = runDate.subtract(1, 'day');
+    case 1: { // DAILY - ONE shift day (yesterday 18:00 → today 06:00)
+      const shiftDay = reportEndDate;
+      const shiftWindow = `${shiftDay.format('YYYY-MM-DD')} ${SHIFT_START_HOUR}:00 → ${shiftDay.add(1,'day').format('YYYY-MM-DD')} ${SHIFT_END_HOUR}:00`;
+      
+      console.log(`[DATE RANGE] 📅 DAILY: Single shift day ${shiftDay.format('YYYY-MM-DD')}`);
+      console.log(`[DATE RANGE] 🕐 Window: ${shiftWindow}`);
       
       return {
-        startDate: previousDay.format('YYYY-MM-DD'),
-        endDate: previousDay.format('YYYY-MM-DD'),
-        rangeLabel: `Daily Report: ${previousDay.format('MMM D, YYYY')}`,
+        startDate: shiftDay.format('YYYY-MM-DD'),
+        endDate: shiftDay.format('YYYY-MM-DD'), // Same = 1 shift day (inclusive)
+        rangeLabel: `Daily Night Shift: ${shiftDay.format('MMM D, YYYY')} ${SHIFT_START_HOUR}:00-${SHIFT_END_HOUR}:00`,
         frequency: 'daily',
-        reportDate: previousDay.format('YYYY-MM-DD')
+        reportDate: shiftDay.format('YYYY-MM-DD'),
+        shiftDays: 1,
+        shiftWindow: shiftWindow,
+        description: `Night shift from ${shiftDay.format('MMM D')} 18:00 to ${shiftDay.add(1,'day').format('MMM D')} 06:00`
       };
+    }
       
-    case 2: // Weekly - Last 7 days up to TODAY
-      const weeklyEnd = runDate.endOf('day');           // TODAY
-      const weeklyStart = weeklyEnd.subtract(6, 'day'); // TODAY - 7 days
-
+    case 2: { // WEEKLY - EXACTLY 7 shift days (7 consecutive nights)
+      // End = yesterday (last completed shift day)
+      const end = reportEndDate;
+      // Start = 6 days before end (inclusive = 7 days total)
+      const start = end.subtract(6, 'day');
+      const shiftWindow = `${start.format('YYYY-MM-DD')} ${SHIFT_START_HOUR}:00 → ${end.add(1,'day').format('YYYY-MM-DD')} ${SHIFT_END_HOUR}:00`;
+      
+      console.log(`[DATE RANGE] 📅 WEEKLY: 7 shift days ${start.format('YYYY-MM-DD')} to ${end.format('YYYY-MM-DD')}`);
+      console.log(`[DATE RANGE] 🕐 Window: ${shiftWindow}`);
+      
       return {
-        startDate: weeklyStart.format('YYYY-MM-DD'),
-        endDate: weeklyEnd.format('YYYY-MM-DD'),
-        rangeLabel: `Weekly Report: ${weeklyStart.format('MMM D')} - ${weeklyEnd.format('MMM D, YYYY')}`,
+        startDate: start.format('YYYY-MM-DD'),
+        endDate: end.format('YYYY-MM-DD'),
+        rangeLabel: `Weekly Night Shifts: ${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
         frequency: 'weekly',
-        reportDate: weeklyEnd.format('YYYY-MM-DD')
+        reportDate: end.format('YYYY-MM-DD'),
+        shiftDays: 7,
+        shiftWindow: shiftWindow,
+        description: `7 consecutive night shifts from ${start.format('MMM D')} to ${end.format('MMM D')}`
       };
+    }
 
-    case 3: // Monthly - Previous completed month
-      const previousMonthStart = runDate.subtract(1, 'month').startOf('month');
-      const previousMonthEnd = runDate.subtract(1, 'month').endOf('month');
+    case 3: { // MONTHLY - Full calendar month of shift days
+      // Get previous month's boundaries
+      const previousMonth = runDate.subtract(1, 'month');
+      const previousMonthStart = previousMonth.startOf('month');
+      const previousMonthEnd = previousMonth.endOf('month');
+      
+      const daysInMonth = previousMonthEnd.date();
+      const shiftWindow = `${previousMonthStart.format('YYYY-MM-DD')} ${SHIFT_START_HOUR}:00 → ${previousMonthEnd.add(1,'day').format('YYYY-MM-DD')} ${SHIFT_END_HOUR}:00`;
+      
+      console.log(`[DATE RANGE] 📅 MONTHLY: ${daysInMonth} shift days in ${previousMonth.format('MMMM YYYY')}`);
+      console.log(`[DATE RANGE] 🕐 Window: ${shiftWindow}`);
       
       return {
         startDate: previousMonthStart.format('YYYY-MM-DD'),
         endDate: previousMonthEnd.format('YYYY-MM-DD'),
-        rangeLabel: `Monthly Report: ${previousMonthStart.format('MMMM YYYY')}`,
+        rangeLabel: `Monthly Night Shifts: ${previousMonthStart.format('MMMM YYYY')}`,
         frequency: 'monthly',
-        reportDate: previousMonthEnd.format('YYYY-MM-DD')
+        reportDate: previousMonthEnd.format('YYYY-MM-DD'),
+        shiftDays: daysInMonth,
+        shiftWindow: shiftWindow,
+        description: `Complete month of night shifts for ${previousMonth.format('MMMM YYYY')}`
       };
+    }
       
-    default:
+    default: {
       // Default to previous day if unknown frequency
-      const defaultDay = runDate.subtract(1, 'day');
+      const defaultDay = reportEndDate;
+      console.warn(`[DATE RANGE] ⚠️ Unknown frequency ${frequency}, defaulting to daily`);
+      
       return {
         startDate: defaultDay.format('YYYY-MM-DD'),
         endDate: defaultDay.format('YYYY-MM-DD'),
-        rangeLabel: `Report: ${defaultDay.format('MMM D, YYYY')}`,
+        rangeLabel: `Night Shift: ${defaultDay.format('MMM D, YYYY')}`,
         frequency: 'unknown',
-        reportDate: defaultDay.format('YYYY-MM-DD')
+        reportDate: defaultDay.format('YYYY-MM-DD'),
+        shiftDays: 1,
+        shiftWindow: `${defaultDay.format('YYYY-MM-DD')} ${SHIFT_START_HOUR}:00 → ${defaultDay.add(1,'day').format('YYYY-MM-DD')} ${SHIFT_END_HOUR}:00`
       };
+    }
   }
 }
 
 /**
- * ✅ FIXED: Update next run time with proper connection handling
+ * ✅ FIXED: Update next run time - ALIGNED WITH NIGHT SHIFT REPORTING
  */
 async function updateNextRunTime(schedule) {
   let pool;
@@ -389,40 +445,115 @@ async function updateNextRunTime(schedule) {
       throw new Error('Database connection pool is null');
     }
     
-    const lastScheduledRun = dayjs(schedule.NextRun).tz(TZ);
-    let newNextRun = lastScheduledRun;
-    
-    switch (schedule.Frequency) {
-      case 1: // Daily
-        newNextRun = newNextRun.add(schedule.IntervalDays || 1, "day");
-        break;
-      case 2: // Weekly
-        newNextRun = newNextRun.add(schedule.IntervalDays || 1, "week");
-        break;
-      case 3: // Monthly
-        newNextRun = newNextRun.add(schedule.IntervalDays || 1, "month");
-        break;
-      default:
-        newNextRun = newNextRun.add(1, "day");
-    }
+    console.log(`\n[DEBUG] 🕒 UPDATING SCHEDULE FOR NIGHT SHIFT REPORTING`);
+    console.log(`[DEBUG] Client: ${schedule.ClientName} (ID: ${schedule.ClientID})`);
     
     const now = dayjs().tz(TZ);
+    console.log(`[DEBUG] Current time: ${now.format('YYYY-MM-DD HH:mm:ss')}`);
+    console.log(`[DEBUG] Current hour: ${now.hour()}`);
     
-    // Ensure next run is at least 5 minutes in the future to avoid immediate re-processing
-    const minimumFutureTime = now.add(5, 'minute');
-    if (newNextRun.isBefore(minimumFutureTime)) {
-      switch (schedule.Frequency) {
-        case 1: newNextRun = minimumFutureTime.add(schedule.IntervalDays || 1, "day").startOf('day'); break;
-        case 2: newNextRun = minimumFutureTime.add(schedule.IntervalDays || 1, "week"); break;
-        case 3: newNextRun = minimumFutureTime.add(schedule.IntervalDays || 1, "month").startOf('day'); break;
-        default: newNextRun = minimumFutureTime.add(1, "day").startOf('day');
+    let newNextRun;
+    
+    switch (schedule.Frequency) {
+      case 1: { // DAILY - Night Shift (18:00-06:00)
+        console.log(`[DEBUG] Frequency: Daily (Night Shift ${SHIFT_START_HOUR}:00-${SHIFT_END_HOUR}:00)`);
+        
+        // Calculate the NEXT night shift start (18:00)
+        let nextNightStart;
+        
+        if (now.hour() < SHIFT_END_HOUR) {
+          // Between midnight-06:00: today's shift hasn't started yet
+          nextNightStart = now.set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+          console.log(`[DEBUG] Before ${SHIFT_END_HOUR}:00: Setting to today ${SHIFT_START_HOUR}:00`);
+        } else if (now.hour() < SHIFT_START_HOUR) {
+          // Between 06:00-18:00: today's shift starts tonight
+          nextNightStart = now.set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+          console.log(`[DEBUG] Between ${SHIFT_END_HOUR}:00-${SHIFT_START_HOUR}:00: Setting to today ${SHIFT_START_HOUR}:00`);
+        } else {
+          // After 18:00: current shift running, next is tomorrow
+          nextNightStart = now.add(1, 'day').set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+          console.log(`[DEBUG] After ${SHIFT_START_HOUR}:00: Setting to tomorrow ${SHIFT_START_HOUR}:00`);
+        }
+        
+        // Apply interval if needed
+        const interval = schedule.IntervalDays || 1;
+        
+        if (interval > 1) {
+          // For every N days schedule
+          let lastScheduledRun = schedule.NextRun instanceof Date 
+            ? dayjs.tz(schedule.NextRun.toISOString().slice(0, 19).replace('T', ' '), 'UTC').tz(TZ)
+            : dayjs.tz(schedule.NextRun, TZ);
+          
+          newNextRun = lastScheduledRun.add(interval, 'day').set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+          console.log(`[DEBUG] Interval: Every ${interval} days, adding to last scheduled run`);
+        } else {
+          newNextRun = nextNightStart;
+        }
+        
+        console.log(`[DEBUG] Next shift scheduled: ${newNextRun.format('YYYY-MM-DD HH:mm:ss')}`);
+        break;
+      }
+        
+      case 2: { // WEEKLY
+        console.log(`[DEBUG] Frequency: Weekly`);
+        
+        let weeklyBaseTime = schedule.NextRun instanceof Date 
+          ? dayjs.tz(schedule.NextRun.toISOString().slice(0, 19).replace('T', ' '), 'UTC').tz(TZ)
+          : dayjs.tz(schedule.NextRun, TZ);
+        
+        newNextRun = weeklyBaseTime.add(schedule.IntervalDays || 1, "week");
+        console.log(`[DEBUG] Weekly: Adding ${schedule.IntervalDays || 1} week(s)`);
+        break;
+      }
+        
+      case 3: { // MONTHLY
+        console.log(`[DEBUG] Frequency: Monthly`);
+        
+        let monthlyBaseTime = schedule.NextRun instanceof Date 
+          ? dayjs.tz(schedule.NextRun.toISOString().slice(0, 19).replace('T', ' '), 'UTC').tz(TZ)
+          : dayjs.tz(schedule.NextRun, TZ);
+        
+        newNextRun = monthlyBaseTime.add(schedule.IntervalDays || 1, "month");
+        console.log(`[DEBUG] Monthly: Adding ${schedule.IntervalDays || 1} month(s)`);
+        break;
+      }
+        
+      default: {
+        console.log(`[DEBUG] Frequency: Unknown, defaulting to 1 day`);
+        
+        let defaultBaseTime = schedule.NextRun instanceof Date 
+          ? dayjs.tz(schedule.NextRun.toISOString().slice(0, 19).replace('T', ' '), 'UTC').tz(TZ)
+          : dayjs.tz(schedule.NextRun, TZ);
+        
+        newNextRun = defaultBaseTime.add(1, "day");
+        break;
       }
     }
     
-    const originalTime = lastScheduledRun.format('YYYY-MM-DD HH:mm:ss');
+    // Ensure next run is at least 5 minutes in the future
+    const minimumFutureTime = now.add(5, 'minute');
+    if (newNextRun.isBefore(minimumFutureTime)) {
+      console.log(`[DEBUG] ⚠️ Next run is too soon, adjusting to minimum 5 minutes in future`);
+      newNextRun = minimumFutureTime;
+      
+      // For daily night shift, ensure it's at 18:00
+      if (schedule.Frequency === 1) {
+        if (newNextRun.hour() >= SHIFT_START_HOUR) {
+          newNextRun = newNextRun.add(1, 'day').set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+        } else {
+          newNextRun = newNextRun.set('hour', SHIFT_START_HOUR).set('minute', 0).set('second', 0);
+        }
+      }
+    }
+    
+    const originalTime = schedule.NextRun instanceof Date 
+      ? dayjs(schedule.NextRun.toISOString()).tz(TZ).format('YYYY-MM-DD HH:mm:ss')
+      : schedule.NextRun;
+    
     const newTime = newNextRun.format('YYYY-MM-DD HH:mm:ss');
     
     console.log(`[SCHEDULER] 🔄 Updating schedule ${schedule.ScheduleID}: ${originalTime} → ${newTime}`);
+    console.log(`[DEBUG] =================================\n`);
     
     await pool.request()
       .input('ScheduleID', sql.Int, schedule.ScheduleID)
@@ -473,12 +604,16 @@ async function processSchedule(schedule, customDateRange = null) {
       return { success: false, skipped: true, reason: 'No email address' };
     }
 
-    // Get date range
+    // Get date range - ALIGNED WITH REPORTMODEL
     const dateRange = customDateRange || getDateRangeForFrequency(Frequency, IntervalDays, NextRun);
     const isManualTest = customDateRange !== null;
 
     console.log(`[SCHEDULER] 📧 Email: ${finalEmail}`);
     console.log(`[SCHEDULER] 📅 Date Range: ${dateRange.startDate} to ${dateRange.endDate}`);
+    console.log(`[SCHEDULER] 🌙 Shift Days: ${dateRange.shiftDays} (inclusive)`);
+    if (dateRange.shiftWindow) {
+      console.log(`[SCHEDULER] 🕐 Shift Window: ${dateRange.shiftWindow}`);
+    }
 
     // Generate PDF with timeout
     console.log('[SCHEDULER] 🎨 Generating PDF...');
@@ -489,7 +624,8 @@ async function processSchedule(schedule, customDateRange = null) {
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
       frequency: dateRange.frequency,
-      reportDate: dateRange.reportDate
+      reportDate: dateRange.reportDate,
+      reportType: frequencyLabel.toLowerCase()
     };
 
     let pdfBuffer;
@@ -514,11 +650,15 @@ async function processSchedule(schedule, customDateRange = null) {
     // Skip email in test mode
     if (TEST_MODE) {
       console.log(`[SCHEDULER] 🚫 TEST MODE - Would send to ${finalEmail}`);
+      console.log(`[SCHEDULER]    Report covers: ${dateRange.description || dateRange.rangeLabel}`);
+      console.log(`${'='.repeat(70)}\n`);
+      
       return { 
         success: true, 
         testMode: true, 
         email: finalEmail,
         frequency: frequencyLabel,
+        dateRange: dateRange,
         isManualTest
       };
     }
@@ -532,14 +672,15 @@ async function processSchedule(schedule, customDateRange = null) {
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
       pdfBuffer: pdfBuffer,
-      pdfFilename: `BM_Security_Report_${ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}.pdf`,
+      pdfFilename: `BM_Security_Report_${ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}_${dateRange.endDate}.pdf`,
       frequency: frequencyLabel,
       reportDate: dateRange.reportDate,
       client: {
         ClientID: ClientID,
         ClientName: ClientName
       },
-      dateRange: dateRange
+      dateRange: dateRange,
+      subjectPrefix: SCHEDULER_CONFIG.EMAIL_SUBJECT_PREFIX
     };
 
     try {
@@ -553,6 +694,7 @@ async function processSchedule(schedule, customDateRange = null) {
           email: finalEmail,
           reason: emailResult.reason,
           frequency: frequencyLabel,
+          dateRange: dateRange,
           isManualTest
         };
       }
@@ -561,6 +703,7 @@ async function processSchedule(schedule, customDateRange = null) {
       console.log(`[SCHEDULER] ✅ ✅ ✅ EMAIL SENT SUCCESSFULLY! ✅ ✅ ✅`);
       console.log(`[SCHEDULER]    - Recipient: ${finalEmail}`);
       console.log(`[SCHEDULER]    - Frequency: ${frequencyLabel}`);
+      console.log(`[SCHEDULER]    - Report Period: ${dateRange.rangeLabel}`);
       console.log(`[SCHEDULER]    - Total Time: ${totalTime}ms`);
       console.log(`${'='.repeat(70)}\n`);
       
@@ -568,6 +711,7 @@ async function processSchedule(schedule, customDateRange = null) {
         email: finalEmail,
         frequency: frequencyLabel,
         dateRange: `${dateRange.startDate} to ${dateRange.endDate}`,
+        shiftDays: dateRange.shiftDays,
         totalTime: totalTime
       });
       
@@ -575,6 +719,7 @@ async function processSchedule(schedule, customDateRange = null) {
         success: true, 
         email: finalEmail,
         frequency: frequencyLabel,
+        dateRange: dateRange,
         processingTime: totalTime,
         isManualTest
       };
@@ -661,15 +806,23 @@ async function processSchedulesWithConcurrency(schedules, customDateRange = null
             clientId: schedule.ClientID,
             email: result.email,
             frequency: result.frequency,
+            dateRange: result.dateRange,
             time: result.processingTime
           });
           
           // Update schedule if successful and not in test mode
           if (!result.emailSkipped && !skipScheduleUpdate && !result.isManualTest) {
             try {
-              await updateNextRunTime(schedule);
+              const updatedTime = await updateNextRunTime(schedule);
+              console.log(`[SCHEDULER] 🔄 Schedule updated: Next run at ${updatedTime}`);
             } catch (updateError) {
               console.warn(`[SCHEDULER] ⚠️ Failed to update schedule: ${updateError.message}`);
+              results.errors.push({
+                client: schedule.ClientName,
+                clientId: schedule.ClientID,
+                error: 'Schedule update failed',
+                details: updateError.message
+              });
             }
           }
         } else {
@@ -691,7 +844,7 @@ async function processSchedulesWithConcurrency(schedules, customDateRange = null
       }
     }
     
-    // Delay between batches (reduced from 1000ms to 500ms)
+    // Delay between batches
     if (i + batchSize < schedules.length) {
       await delay(SCHEDULER_CONFIG.DELAY_BETWEEN_CLIENTS);
     }
@@ -715,7 +868,8 @@ export async function runDynamicReportScheduler(options = {}) {
   console.log("\n" + "=".repeat(70));
   console.log("⏰ OPTIMIZED SCHEDULER TRIGGERED");
   console.log(`✅ Current time: ${now.format('YYYY-MM-DD HH:mm:ss')}`);
-  console.log("✅ Checks EVERY 60 SECONDS (1 minute)");
+  console.log(`🌙 Night shift: ${SHIFT_START_HOUR}:00 → ${SHIFT_END_HOUR}:00 next day`);
+  console.log(`✅ Checks EVERY 60 SECONDS (1 minute)`);
   console.log("=".repeat(70));
 
   const startTime = Date.now();
@@ -752,9 +906,9 @@ export async function runDynamicReportScheduler(options = {}) {
     });
     
     console.log(`   📊 Frequency breakdown:`);
-    console.log(`      Daily: ${freqCount.daily}`);
-    console.log(`      Weekly: ${freqCount.weekly}`);
-    console.log(`      Monthly: ${freqCount.monthly}`);
+    console.log(`      Daily: ${freqCount.daily} (night shifts 18:00-06:00)`);
+    console.log(`      Weekly: ${freqCount.weekly} (7 consecutive night shifts)`);
+    console.log(`      Monthly: ${freqCount.monthly} (full month of night shifts)`);
     if (freqCount.unknown > 0) console.log(`      Unknown: ${freqCount.unknown}`);
 
     const results = await processSchedulesWithConcurrency(
@@ -786,8 +940,9 @@ export async function runDynamicReportScheduler(options = {}) {
       console.log(`\n   ✅ Successfully Sent Reports:`);
       results.successDetails.forEach(detail => {
         console.log(`      - ${detail.client} (ID: ${detail.clientId})`);
-        console.log(`        Email: ${detail.email}`);
         console.log(`        Frequency: ${detail.frequency}`);
+        console.log(`        Period: ${detail.dateRange.startDate} to ${detail.dateRange.endDate}`);
+        console.log(`        Shift Days: ${detail.dateRange.shiftDays}`);
         console.log(`        Time: ${detail.time}ms`);
       });
     }
@@ -797,6 +952,7 @@ export async function runDynamicReportScheduler(options = {}) {
       results.errors.slice(0, 3).forEach(err => {
         console.log(`      - ${err.client} (ID: ${err.clientId || 'N/A'})`);
         console.log(`        Error: ${err.error}`);
+        if (err.details) console.log(`        Details: ${err.details}`);
       });
       if (results.errors.length > 3) {
         console.log(`      ... and ${results.errors.length - 3} more errors`);
@@ -804,7 +960,7 @@ export async function runDynamicReportScheduler(options = {}) {
     }
     
     if (!EMAIL_ENABLED) {
-      console.log(`\n   ⚠️  EMAIL SENDING IS DISABLED`);
+      console.log(`\n   ⚠️  EMAIL SENDING IS DISABLED (test mode)`);
     }
     
     console.log("=".repeat(70) + "\n");
@@ -813,7 +969,12 @@ export async function runDynamicReportScheduler(options = {}) {
       success: true,
       results: results,
       processedAt: now.format('YYYY-MM-DD HH:mm:ss'),
-      duration: duration
+      duration: duration,
+      shiftConfiguration: {
+        startHour: SHIFT_START_HOUR,
+        endHour: SHIFT_END_HOUR,
+        timezone: TZ
+      }
     };
 
   } catch (error) {
@@ -899,7 +1060,7 @@ export async function getUpcomingSchedules(hoursAhead = 24) {
 // Initialize with optimizations
 async function initializeScheduler() {
   console.log("\n" + "🚀".repeat(35));
-  console.log("🚀 OPTIMIZED SCHEDULER INITIALIZING");
+  console.log("🚀 NIGHT SHIFT SCHEDULER INITIALIZING");
   console.log("🚀".repeat(35));
   
   // Test database connection first
@@ -918,6 +1079,7 @@ async function initializeScheduler() {
   console.log(`   - Email: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
   console.log(`   - Max Concurrent: ${SCHEDULER_CONFIG.MAX_CONCURRENT_PDFS}`);
   console.log(`   - Grace Period: ${SCHEDULER_CONFIG.GRACE_PERIOD_MINUTES} minutes`);
+  console.log(`   - Night Shift: ${SHIFT_START_HOUR}:00 → ${SHIFT_END_HOUR}:00`);
   console.log(`   - Current Time: ${dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss')}`);
   console.log("🚀".repeat(35) + "\n");
 
@@ -930,7 +1092,7 @@ async function initializeScheduler() {
     });
     console.log(`✅ Scheduler active: Checking every 60 seconds for due schedules`);
   } else {
-    console.log("🛑 TEST MODE: Scheduler disabled");
+    console.log("🛑 TEST MODE: Scheduler disabled (would run every 60 seconds)");
   }
 
   // Optional: Warm cache 5 seconds after startup

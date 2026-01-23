@@ -1,330 +1,531 @@
-// server/routes/dashboard.js - ULTRA-OPTIMIZED VERSION
+// server/routes/dashboard.js - UPDATED WITH PATROL SCHEDULE INTEGRATION
 import express from "express";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { requireLinkedAccount } from "../middleware/requireLinkedAccount.js";
-import { 
-  getDashboardPatrolEvents, 
-  getDashboardSummary,
-  generateDashboardPDF,
-  clearAllCaches,
-  getCacheStats,
-  warmupCache
-} from "../service/dashboardReportService.js";
+import dashboardService from "../service/dashboardReportService.js";
 import { getClientById } from "../service/clientStorage.js";
 import bmSecurityAPI from "../service/bmSecurityAPI.js";
 
 const router = express.Router();
 
+// Helper to validate date format
+function isValidDate(dateString) {
+  const regex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!regex.test(dateString)) return false;
+  
+  const date = new Date(dateString);
+  return date instanceof Date && !isNaN(date);
+}
+
+// Helper to get default date ranges
+function getDefaultDateRange(reportType = 'weekly') {
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+  
+  switch (reportType.toLowerCase()) {
+    case 'weekly':
+    case 'last7':
+      const weekAgo = new Date();
+      weekAgo.setDate(today.getDate() - 6); // 7 days inclusive
+      return {
+        startDate: weekAgo.toISOString().split('T')[0],
+        endDate: todayStr,
+        days: 7
+      };
+      
+    case 'monthly':
+    case 'last30':
+      const monthAgo = new Date();
+      monthAgo.setDate(today.getDate() - 29); // 30 days inclusive
+      return {
+        startDate: monthAgo.toISOString().split('T')[0],
+        endDate: todayStr,
+        days: 30
+      };
+      
+    case 'daily':
+      const yesterday = new Date();
+      yesterday.setDate(today.getDate() - 1);
+      return {
+        startDate: yesterday.toISOString().split('T')[0],
+        endDate: yesterday.toISOString().split('T')[0],
+        days: 1
+      };
+      
+    default:
+      return {
+        startDate: todayStr,
+        endDate: todayStr,
+        days: 1
+      };
+  }
+}
+
 /**
  * GET /api/dashboard/status
- * Check account linking status (no account required)
+ * Check account linking status
  */
 router.get("/status", requireAuth, (req, res) => {
-  res.json({
-    success: true,
-    status: req.user.status,
-    accountNumber: req.user.apiClientAccount,
-    email: req.user.email,
-    companyName: req.user.companyName,
-    hasAccess: req.user.status === "active" && !!req.user.apiClientAccount,
-    message: req.user.status === "pending_link"
-      ? "Account setup in progress. You'll receive an email when ready."
-      : req.user.status === "active"
-      ? "Dashboard access granted"
-      : "Account inactive"
-  });
+  try {
+    res.json({
+      success: true,
+      status: req.user.status,
+      accountNumber: req.user.apiClientAccount,
+      email: req.user.email,
+      companyName: req.user.companyName,
+      hasAccess: req.user.status === "active" && !!req.user.apiClientAccount,
+      message: req.user.status === "pending_link"
+        ? "Account setup in progress. You'll receive an email when ready."
+        : req.user.status === "active"
+        ? "Dashboard access granted"
+        : "Account inactive",
+      timestamp: new Date()
+    });
+  } catch (error) {
+    console.error("[Dashboard] Status error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Unable to check status"
+    });
+  }
 });
 
 /**
- * ✅ ULTRA-FAST: GET /api/dashboard/summary
- * Weekly summary with aggressive caching - SHOULD LOAD IN 1-2 SECONDS
+ * GET /api/dashboard/summary
+ * Get dashboard summary with patrol schedule integration
  */
 router.get("/summary", requireAuth, requireLinkedAccount, async (req, res) => {
   const startTime = Date.now();
   
   try {
-    // Get date range from query params or default to last 7 days
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, reportType = 'custom', forceWeekly = 'false' } = req.query;
     
-    let start, end;
+    let dateRange;
+    let finalReportType = reportType;
+    let finalForceWeekly = forceWeekly === 'true';
     
-    if (startDate && endDate) {
-      start = startDate;
-      end = endDate;
+    // Handle preset report types
+    if (reportType && !startDate && !endDate) {
+      dateRange = getDefaultDateRange(reportType);
+      finalReportType = reportType;
+      
+      // Only enforce weekly for weekly reports
+      if (reportType === 'weekly' || reportType === 'last7') {
+        finalForceWeekly = true;
+      }
+    } else if (startDate && endDate) {
+      // Validate custom dates
+      if (!isValidDate(startDate) || !isValidDate(endDate)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid date format. Use YYYY-MM-DD"
+        });
+      }
+      dateRange = { startDate, endDate };
+      finalReportType = 'custom';
+      finalForceWeekly = false;
     } else {
-      end = new Date().toISOString().split("T")[0];
-      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      start = weekAgo.toISOString().split("T")[0];
+      // Default to weekly
+      dateRange = getDefaultDateRange('weekly');
+      finalReportType = 'weekly';
+      finalForceWeekly = true;
     }
-
-    console.log(`[Dashboard] Summary request for ${req.user.apiClientAccount}: ${start} to ${end}`);
-
-    const result = await getDashboardSummary({
-      clientId: req.user.apiClientAccount,
-      startDate: start,
-      endDate: end
+    
+    console.log(`[Dashboard] Summary request for ${req.user.apiClientAccount}:`, {
+      reportType: finalReportType,
+      range: `${dateRange.startDate} to ${dateRange.endDate}`,
+      forceWeekly: finalForceWeekly
     });
-
+    
+    const result = await dashboardService.getDashboardSummary({
+      clientId: req.user.apiClientAccount,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      forceWeekly: finalForceWeekly,
+      reportType: finalReportType
+    });
+    
     const duration = Date.now() - startTime;
-    console.log(`[Dashboard] Summary response sent in ${duration}ms`);
-
-    // Add user context to response
+    console.log(`[Dashboard] Summary response in ${duration}ms`);
+    
     res.json({
       ...result,
-      accountNumber: req.user.apiClientAccount,
-      companyName: req.user.companyName,
-      email: req.user.email,
-      totalResponseTime: duration
+      userContext: {
+        accountNumber: req.user.apiClientAccount,
+        companyName: req.user.companyName,
+        email: req.user.email
+      },
+      performance: {
+        responseTime: duration,
+        cached: result.cached || false
+      }
     });
-
+    
   } catch (error) {
     const duration = Date.now() - startTime;
     console.error(`[Dashboard] Summary error after ${duration}ms:`, error.message);
     
     res.status(500).json({
       success: false,
-      message: "Unable to fetch summary data. Please try again later.",
+      message: "Unable to fetch summary data",
       error: error.message,
-      totalResponseTime: duration
+      responseTime: duration
     });
   }
 });
 
 /**
- * ✅ ULTRA-FAST: GET /api/dashboard/patrol-events
- * Get patrol events with aggressive caching
+ * GET /api/dashboard/patrol-events
+ * Get patrol events with schedule context
  */
 router.get("/patrol-events", requireAuth, requireLinkedAccount, async (req, res) => {
   const startTime = Date.now();
   
   try {
-    const { startDate, endDate } = req.query;
-
-    const today = new Date().toISOString().split("T")[0];
-    const start = startDate || today;
-    const end = endDate || today;
-
-    // Validate date format
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(start) || !dateRegex.test(end)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid date format. Use YYYY-MM-DD"
-      });
+    const { startDate, endDate, reportType = 'custom', forceWeekly = 'false' } = req.query;
+    
+    let dateRange;
+    let finalReportType = reportType;
+    let finalForceWeekly = forceWeekly === 'true';
+    
+    if (reportType && !startDate && !endDate) {
+      dateRange = getDefaultDateRange(reportType);
+      finalReportType = reportType;
+    } else if (startDate && endDate) {
+      if (!isValidDate(startDate) || !isValidDate(endDate)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid date format. Use YYYY-MM-DD"
+        });
+      }
+      dateRange = { startDate, endDate };
+      finalReportType = 'custom';
+    } else {
+      // Default to today
+      const today = new Date().toISOString().split('T')[0];
+      dateRange = { startDate: today, endDate: today };
+      finalReportType = 'daily';
     }
-
-    console.log(`[Dashboard] Patrol events request for ${req.user.apiClientAccount}: ${start} to ${end}`);
-
-    const result = await getDashboardPatrolEvents({
-      clientId: req.user.apiClientAccount,
-      startDate: start,
-      endDate: end
+    
+    console.log(`[Dashboard] Patrol events request for ${req.user.apiClientAccount}:`, {
+      range: `${dateRange.startDate} to ${dateRange.endDate}`,
+      reportType: finalReportType
     });
-
+    
+    const result = await dashboardService.getDashboardPatrolEvents({
+      clientId: req.user.apiClientAccount,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      forceWeekly: finalForceWeekly,
+      reportType: finalReportType
+    });
+    
     const duration = Date.now() - startTime;
-    console.log(`[Dashboard] Patrol events response sent in ${duration}ms`);
-
+    console.log(`[Dashboard] Patrol events response in ${duration}ms (${result.data?.length || 0} events)`);
+    
     res.json({
       ...result,
-      totalResponseTime: duration
+      performance: {
+        responseTime: duration,
+        cached: result.cached || false
+      }
     });
-
+    
   } catch (error) {
     const duration = Date.now() - startTime;
     console.error(`[Dashboard] Patrol events error after ${duration}ms:`, error.message);
     
     res.status(500).json({
       success: false,
-      message: "Unable to fetch patrol data. Please try again later.",
+      message: "Unable to fetch patrol events",
       error: error.message,
-      totalResponseTime: duration
+      responseTime: duration
     });
   }
 });
 
 /**
- * ✅ NEW: GET /api/dashboard/pdf
- * Generate and download PDF report
+ * GET /api/dashboard/schedule
+ * Get client patrol schedule details
+ */
+router.get("/schedule", requireAuth, requireLinkedAccount, async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    console.log(`[Dashboard] Schedule request for ${req.user.apiClientAccount}`);
+    
+    const result = await dashboardService.getClientPatrolSchedule(req.user.apiClientAccount);
+    
+    const duration = Date.now() - startTime;
+    console.log(`[Dashboard] Schedule response in ${duration}ms`);
+    
+    res.json({
+      ...result,
+      performance: {
+        responseTime: duration
+      }
+    });
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(`[Dashboard] Schedule error after ${duration}ms:`, error.message);
+    
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch patrol schedule",
+      error: error.message,
+      responseTime: duration
+    });
+  }
+});
+
+/**
+ * GET /api/dashboard/compliance
+ * Get patrol compliance analysis
+ */
+router.get("/compliance", requireAuth, requireLinkedAccount, async (req, res) => {
+  const startTime = Date.now();
+  
+  try {
+    const { startDate, endDate } = req.query;
+    
+    let dateRange;
+    
+    if (startDate && endDate) {
+      if (!isValidDate(startDate) || !isValidDate(endDate)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid date format. Use YYYY-MM-DD"
+        });
+      }
+      dateRange = { startDate, endDate };
+    } else {
+      // Default to last 30 days
+      dateRange = getDefaultDateRange('monthly');
+    }
+    
+    console.log(`[Dashboard] Compliance request for ${req.user.apiClientAccount}:`, {
+      range: `${dateRange.startDate} to ${dateRange.endDate}`
+    });
+    
+    const result = await dashboardService.getPatrolCompliance(
+      req.user.apiClientAccount,
+      dateRange.startDate,
+      dateRange.endDate
+    );
+    
+    const duration = Date.now() - startTime;
+    console.log(`[Dashboard] Compliance response in ${duration}ms`);
+    
+    res.json({
+      ...result,
+      performance: {
+        responseTime: duration
+      }
+    });
+    
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(`[Dashboard] Compliance error after ${duration}ms:`, error.message);
+    
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch compliance analysis",
+      error: error.message,
+      responseTime: duration
+    });
+  }
+});
+
+/**
+ * GET /api/dashboard/pdf
+ * Generate PDF report
  */
 router.get("/pdf", requireAuth, requireLinkedAccount, async (req, res) => {
   const startTime = Date.now();
   
   try {
-    const { startDate, endDate } = req.query;
-
+    const { startDate, endDate, reportType = 'custom' } = req.query;
+    
     if (!startDate || !endDate) {
       return res.status(400).json({
         success: false,
-        message: "startDate and endDate are required (YYYY-MM-DD)"
+        message: "startDate and endDate are required"
       });
     }
-
-    // Validate date format
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+    
+    if (!isValidDate(startDate) || !isValidDate(endDate)) {
       return res.status(400).json({
         success: false,
         message: "Invalid date format. Use YYYY-MM-DD"
       });
     }
-
-    console.log(`[Dashboard] PDF generation request for ${req.user.apiClientAccount}: ${startDate} to ${endDate}`);
-
-    const result = await generateDashboardPDF({
+    
+    console.log(`[Dashboard] PDF request for ${req.user.apiClientAccount}:`, {
+      range: `${startDate} to ${endDate}`,
+      reportType
+    });
+    
+    const result = await dashboardService.generateDashboardPDF({
       clientId: req.user.apiClientAccount,
       clientName: req.user.companyName,
       startDate,
-      endDate
+      endDate,
+      reportType
     });
-
+    
     const duration = Date.now() - startTime;
-    console.log(`[Dashboard] PDF generated and sent in ${duration}ms`);
-
-    // Send as downloadable PDF
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
-    res.setHeader("X-Processing-Time", duration.toString());
-
+    console.log(`[Dashboard] PDF generated in ${duration}ms`);
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.setHeader('X-Processing-Time', duration.toString());
+    
     res.send(result.pdfBuffer);
-
+    
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[Dashboard] PDF generation error after ${duration}ms:`, error);
+    console.error(`[Dashboard] PDF error after ${duration}ms:`, error);
     
     res.status(500).json({
       success: false,
       message: "Failed to generate PDF",
       error: error.message,
-      totalResponseTime: duration
+      responseTime: duration
     });
   }
 });
 
 /**
- * ✅ ULTRA-FAST: GET /api/dashboard/all-events
- * Get ALL events for dashboard (last 90 days)
+ * PRESET REPORT ENDPOINTS
+ * These provide convenience endpoints for common report types
  */
-router.get("/all-events", requireAuth, requireLinkedAccount, async (req, res) => {
-  const startTime = Date.now();
-  
+
+// Weekly report (last 7 days)
+router.get("/weekly", requireAuth, requireLinkedAccount, async (req, res) => {
   try {
-    // Get last 90 days of data for dashboard
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(endDate.getDate() - 90);
-    
-    const formattedStart = startDate.toISOString().split('T')[0];
-    const formattedEnd = endDate.toISOString().split('T')[0];
-
-    console.log(`[Dashboard] All events request for ${req.user.apiClientAccount}: ${formattedStart} to ${formattedEnd}`);
-
-    const [eventsResult, summaryResult] = await Promise.all([
-      getDashboardPatrolEvents({
-        clientId: req.user.apiClientAccount,
-        startDate: formattedStart,
-        endDate: formattedEnd
-      }),
-      getDashboardSummary({
-        clientId: req.user.apiClientAccount,
-        startDate: formattedStart,
-        endDate: formattedEnd
-      })
-    ]);
-
-    const duration = Date.now() - startTime;
-    console.log(`[Dashboard] All events response sent in ${duration}ms`);
-
-    res.json({
-      success: true,
-      events: eventsResult.data || [],
-      summary: summaryResult.data?.summary || {},
-      metadata: summaryResult.data?.metadata || {},
-      posts: summaryResult.data?.posts || [],
-      dataSource: eventsResult.dataSource || 'UNKNOWN',
-      totalEvents: eventsResult.data?.length || 0,
-      generatedAt: new Date(),
-      totalResponseTime: duration
-    });
-
+    const result = await dashboardService.getWeeklySummary(req.user.apiClientAccount);
+    res.json(result);
   } catch (error) {
-    const duration = Date.now() - startTime;
-    console.error(`[Dashboard] All events error after ${duration}ms:`, error.message);
-    
+    console.error("[Dashboard] Weekly report error:", error);
     res.status(500).json({
       success: false,
-      message: "Unable to fetch dashboard data. Please try again later.",
-      events: [],
-      summary: {},
-      metadata: null,
-      totalResponseTime: duration
+      message: "Unable to fetch weekly report"
     });
   }
 });
 
-/**
- * GET /api/dashboard/monthly-summary
- * Monthly summary with caching
- */
-router.get("/monthly-summary", requireAuth, requireLinkedAccount, async (req, res) => {
-  const startTime = Date.now();
-  
+// Last 7 days report (same as weekly)
+router.get("/last7", requireAuth, requireLinkedAccount, async (req, res) => {
   try {
-    const today = new Date();
-    const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
-      .toISOString()
-      .split("T")[0];
-    const lastDayOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0)
-      .toISOString()
-      .split("T")[0];
-
-    console.log(`[Dashboard] Monthly summary request for ${req.user.apiClientAccount}`);
-
-    const result = await getDashboardSummary({
-      clientId: req.user.apiClientAccount,
-      startDate: firstDayOfMonth,
-      endDate: lastDayOfMonth
-    });
-
-    const duration = Date.now() - startTime;
-    console.log(`[Dashboard] Monthly summary response sent in ${duration}ms`);
-
-    // Add user context to response
-    res.json({
-      ...result,
-      accountNumber: req.user.apiClientAccount,
-      companyName: req.user.companyName,
-      totalResponseTime: duration
-    });
-
+    const result = await dashboardService.getLast7DaysSummary(req.user.apiClientAccount);
+    res.json(result);
   } catch (error) {
-    const duration = Date.now() - startTime;
-    console.error(`[Dashboard] Monthly summary error after ${duration}ms:`, error.message);
-    
+    console.error("[Dashboard] Last7 report error:", error);
     res.status(500).json({
       success: false,
-      message: "Unable to fetch monthly summary. Please try again later.",
-      totalResponseTime: duration
+      message: "Unable to fetch last 7 days report"
+    });
+  }
+});
+
+// Last 30 days report
+router.get("/last30", requireAuth, requireLinkedAccount, async (req, res) => {
+  try {
+    const result = await dashboardService.getLast30DaysSummary(req.user.apiClientAccount);
+    res.json(result);
+  } catch (error) {
+    console.error("[Dashboard] Last30 report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch last 30 days report"
+    });
+  }
+});
+
+// Monthly report (same as last30)
+router.get("/monthly", requireAuth, requireLinkedAccount, async (req, res) => {
+  try {
+    const result = await dashboardService.getMonthlySummary(req.user.apiClientAccount);
+    res.json(result);
+  } catch (error) {
+    console.error("[Dashboard] Monthly report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch monthly report"
+    });
+  }
+});
+
+// Daily report (yesterday)
+router.get("/daily", requireAuth, requireLinkedAccount, async (req, res) => {
+  try {
+    const result = await dashboardService.getDailySummary(req.user.apiClientAccount);
+    res.json(result);
+  } catch (error) {
+    console.error("[Dashboard] Daily report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch daily report"
+    });
+  }
+});
+
+// Custom range report
+router.get("/custom", requireAuth, requireLinkedAccount, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate and endDate are required"
+      });
+    }
+    
+    if (!isValidDate(startDate) || !isValidDate(endDate)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format. Use YYYY-MM-DD"
+      });
+    }
+    
+    const result = await dashboardService.getCustomRangeSummary(
+      req.user.apiClientAccount,
+      startDate,
+      endDate
+    );
+    
+    res.json(result);
+  } catch (error) {
+    console.error("[Dashboard] Custom report error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Unable to fetch custom report"
     });
   }
 });
 
 /**
  * GET /api/dashboard/account-info
- * Get account information from BM Security
+ * Get account information
  */
 router.get("/account-info", requireAuth, requireLinkedAccount, async (req, res) => {
   try {
-    console.log(`[Dashboard] Fetching account info for ${req.user.apiClientAccount}`);
+    console.log(`[Dashboard] Account info request for ${req.user.apiClientAccount}`);
     
     const result = await bmSecurityAPI.getAccountByNumber(req.user.apiClientAccount);
-
+    
     if (!result.success || !result.account) {
       return res.status(404).json({
         success: false,
         message: "Account information not found"
       });
     }
-
+    
+    // Get schedule info
+    const schedule = await dashboardService.getClientPatrolSchedule(req.user.apiClientAccount);
+    
     res.json({
       success: true,
       account: {
@@ -332,10 +533,12 @@ router.get("/account-info", requireAuth, requireLinkedAccount, async (req, res) 
         name: result.account.cue_cnombre || result.account.cue_cempresa,
         email: result.account.cue_correo || result.account.cue_cemail,
         phone: result.account.cue_ctelefono,
-        active: result.account.cue_lactivo
-      }
+        active: result.account.cue_lactivo,
+        createdAt: result.account.cue_tcreacion
+      },
+      schedule: schedule.success ? schedule.schedule : null
     });
-
+    
   } catch (error) {
     console.error("[Dashboard] Account info error:", error);
     res.status(500).json({
@@ -347,19 +550,19 @@ router.get("/account-info", requireAuth, requireLinkedAccount, async (req, res) 
 
 /**
  * GET /api/dashboard/user-profile
- * Get user profile information
+ * Get user profile
  */
 router.get("/user-profile", requireAuth, async (req, res) => {
   try {
     const client = await getClientById(req.user.userId);
-
+    
     if (!client) {
       return res.status(404).json({
         success: false,
         message: "User not found"
       });
     }
-
+    
     res.json({
       success: true,
       profile: {
@@ -367,10 +570,11 @@ router.get("/user-profile", requireAuth, async (req, res) => {
         companyName: client.companyName,
         accountNumber: client.accountNumber,
         status: client.status,
-        createdAt: client.createdAt
+        createdAt: client.createdAt,
+        lastLogin: client.lastLogin
       }
     });
-
+    
   } catch (error) {
     console.error("[Dashboard] User profile error:", error);
     res.status(500).json({
@@ -381,37 +585,67 @@ router.get("/user-profile", requireAuth, async (req, res) => {
 });
 
 /**
- * ✅ NEW: POST /api/dashboard/warmup
- * Warmup cache for faster initial load
- * Optional: Pass startDate and endDate to warm specific range
+ * CACHE MANAGEMENT ENDPOINTS
  */
+
+// Get cache statistics
+router.get("/cache-stats", requireAuth, async (req, res) => {
+  try {
+    const stats = dashboardService.getCacheStats();
+    
+    res.json({
+      success: true,
+      stats,
+      timestamp: new Date()
+    });
+    
+  } catch (error) {
+    console.error("[Dashboard] Cache stats error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Clear all caches (admin)
+router.post("/clear-cache", requireAuth, async (req, res) => {
+  try {
+    const result = dashboardService.clearAllCaches();
+    
+    res.json({
+      success: true,
+      message: "All caches cleared successfully",
+      cleared: result,
+      timestamp: new Date()
+    });
+    
+  } catch (error) {
+    console.error("[Dashboard] Clear cache error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Warmup cache for better performance
 router.post("/warmup", requireAuth, requireLinkedAccount, async (req, res) => {
   try {
-    const { startDate, endDate } = req.body;
+    const { reportType = 'weekly' } = req.body;
     
-    console.log(`[Dashboard] Cache warmup request for ${req.user.apiClientAccount}`, 
-      startDate && endDate ? `(${startDate} to ${endDate})` : '(smart warmup)');
+    console.log(`[Dashboard] Cache warmup for ${req.user.apiClientAccount} (${reportType})`);
     
-    let result;
-    
-    if (startDate && endDate) {
-      // Warmup specific date range
-      const { warmupDateRange } = await import("../service/bmSecurityAPICache.js");
-      result = await warmupDateRange(req.user.apiClientAccount, startDate, endDate);
-    } else {
-      // Smart warmup (last 7 days + current month)
-      result = await warmupCache(req.user.apiClientAccount);
-    }
+    const result = await dashboardService.warmupCache(req.user.apiClientAccount, reportType);
     
     res.json({
       success: result.success,
       message: result.success 
-        ? "Cache warmed up successfully. Next requests will be instant." 
+        ? "Cache warmed up successfully" 
         : "Cache warmup failed",
-      details: result,
-      tip: "The first warmup takes 40+ seconds, but all subsequent requests will be fast"
+      details: result
     });
-
+    
   } catch (error) {
     console.error("[Dashboard] Cache warmup error:", error);
     res.status(500).json({
@@ -423,83 +657,52 @@ router.post("/warmup", requireAuth, requireLinkedAccount, async (req, res) => {
 });
 
 /**
- * ✅ NEW: GET /api/dashboard/cache-stats
- * Get cache statistics (admin only)
+ * GET /api/dashboard/report-types
+ * Get available report types and descriptions
  */
-router.get("/cache-stats", requireAuth, async (req, res) => {
+router.get("/report-types", requireAuth, async (req, res) => {
   try {
-    const stats = getCacheStats();
+    const reportTypes = dashboardService.getAvailableReportTypes();
     
     res.json({
       success: true,
-      stats,
+      reportTypes,
       timestamp: new Date()
     });
-
+    
   } catch (error) {
-    console.error("[Dashboard] Cache stats error:", error);
+    console.error("[Dashboard] Report types error:", error);
     res.status(500).json({
       success: false,
-      error: error.message
+      message: "Unable to fetch report types"
     });
   }
 });
 
 /**
- * ✅ NEW: POST /api/dashboard/clear-cache
- * Clear all caches (admin only)
+ * GET /api/dashboard/performance-tiers
+ * Get performance tier definitions
  */
-router.post("/clear-cache", requireAuth, async (req, res) => {
+router.get("/performance-tiers", requireAuth, async (req, res) => {
   try {
-    const result = clearAllCaches();
+    const tiers = dashboardService.PERFORMANCE_TIERS || {
+      EXCELLENT: { min: 90, label: 'Excellent', color: 'green' },
+      GOOD: { min: 80, label: 'Good', color: 'blue' },
+      FAIR: { min: 70, label: 'Fair', color: 'yellow' },
+      NEEDS_IMPROVEMENT: { min: 0, label: 'Needs Improvement', color: 'red' }
+    };
     
     res.json({
       success: true,
-      message: "Caches cleared successfully",
-      cleared: result
+      tiers,
+      timestamp: new Date()
     });
-
+    
   } catch (error) {
-    console.error("[Dashboard] Clear cache error:", error);
+    console.error("[Dashboard] Performance tiers error:", error);
     res.status(500).json({
       success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
- * ✅ NEW: POST /api/dashboard/force-refresh
- * Force refresh cache for specific date range (bypasses cache)
- */
-router.post("/force-refresh", requireAuth, requireLinkedAccount, async (req, res) => {
-  try {
-    const { startDate, endDate } = req.body;
-    
-    if (!startDate || !endDate) {
-      return res.status(400).json({
-        success: false,
-        message: "startDate and endDate are required"
-      });
-    }
-    
-    console.log(`[Dashboard] Force refresh request for ${req.user.apiClientAccount}: ${startDate} to ${endDate}`);
-    
-    const { forceRefresh } = await import("../service/bmSecurityAPICache.js");
-    const result = await forceRefresh(req.user.apiClientAccount, startDate, endDate);
-    
-    res.json({
-      success: result.success,
-      message: "Cache refreshed successfully",
-      events: result.data?.length || 0
-    });
-
-  } catch (error) {
-    console.error("[Dashboard] Force refresh error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to refresh cache",
-      error: error.message
+      message: "Unable to fetch performance tiers"
     });
   }
 });
@@ -512,6 +715,14 @@ router.get("/health", (req, res) => {
   res.json({
     success: true,
     status: "healthy",
+    service: "dashboard",
+    version: "2.0.0",
+    features: [
+      "patrol_schedule_integration",
+      "dynamic_patrol_calculation",
+      "performance_analytics",
+      "multi_layer_caching"
+    ],
     timestamp: new Date(),
     uptime: process.uptime()
   });

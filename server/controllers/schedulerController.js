@@ -1,4 +1,4 @@
-// server/controllers/schedulerController.js - UPDATED TO USE OPTIMIZED REPORT MODEL
+// server/controllers/schedulerController.js - FIXED VERSION
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
@@ -8,9 +8,6 @@ import { sql, poolPromise } from '../config/database.js';
 
 // ✅ Import the optimized report model
 import { fetchWeeklyReport } from '../models/reportModel.js';
-
-// ✅ Import the updated scheduler service
-import * as schedulerService from '../service/scheduler.js';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -85,15 +82,92 @@ export const getDatabaseQueryDates = (startDate, endDate) => {
   }
 };
 
-// ✅ Use scheduler's date range functions directly
-export const getTodayRange = () => schedulerService.getPreviousWeekRange(); // Fallback
-export const getYesterdayRange = () => schedulerService.getPreviousWeekRange(); // Fallback
-export const getLast7DaysRange = schedulerService.getLast7DaysRange;
-export const getPreviousWeekRange = schedulerService.getPreviousWeekRange;
-export const getCurrentWeekRange = schedulerService.getCurrentWeekRange;
-export const getLast30DaysRange = () => schedulerService.getPreviousWeekRange(); // Fallback
-export const getPreviousMonthRange = () => schedulerService.getPreviousWeekRange(); // Fallback
-export const getCurrentMonthRange = () => schedulerService.getCurrentWeekRange(); // Fallback
+// ✅ FIXED: Create local date range functions
+export const getLast7DaysRange = () => {
+  const end = dayjs().tz(TZ);
+  const start = end.subtract(6, 'day');
+  const nightsInRange = calculateNightsInRange(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  const dbDates = getDatabaseQueryDates(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  return {
+    startDate: start.format('YYYY-MM-DD'),
+    endDate: end.format('YYYY-MM-DD'),
+    sqlStartDate: dbDates.dbStartDate,
+    sqlEndDate: dbDates.dbEndDate,
+    rangeLabel: `Last 7 Days: ${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
+    nightsInRange: nightsInRange,
+    daysInRange: nightsInRange,
+    periodType: 'last7days'
+  };
+};
+
+export const getPreviousWeekRange = () => {
+  const today = dayjs().tz(TZ);
+  // Previous week: 14 days ago to 7 days ago
+  const end = today.subtract(7, 'day');
+  const start = today.subtract(13, 'day');
+  const nightsInRange = calculateNightsInRange(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  const dbDates = getDatabaseQueryDates(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  return {
+    startDate: start.format('YYYY-MM-DD'),
+    endDate: end.format('YYYY-MM-DD'),
+    sqlStartDate: dbDates.dbStartDate,
+    sqlEndDate: dbDates.dbEndDate,
+    rangeLabel: `Previous Week: ${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
+    nightsInRange: nightsInRange,
+    daysInRange: nightsInRange,
+    periodType: 'previousWeek'
+  };
+};
+
+export const getCurrentWeekRange = () => {
+  const today = dayjs().tz(TZ);
+  // Current week: 7 days ago to today
+  const end = today;
+  const start = today.subtract(6, 'day');
+  const nightsInRange = calculateNightsInRange(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  const dbDates = getDatabaseQueryDates(
+    start.format('YYYY-MM-DD'),
+    end.format('YYYY-MM-DD')
+  );
+  
+  return {
+    startDate: start.format('YYYY-MM-DD'),
+    endDate: end.format('YYYY-MM-DD'),
+    sqlStartDate: dbDates.dbStartDate,
+    sqlEndDate: dbDates.dbEndDate,
+    rangeLabel: `Current Week: ${start.format('MMM D')} - ${end.format('MMM D, YYYY')}`,
+    nightsInRange: nightsInRange,
+    daysInRange: nightsInRange,
+    periodType: 'currentWeek'
+  };
+};
+
+// Fallback functions
+export const getTodayRange = () => getPreviousWeekRange();
+export const getYesterdayRange = () => getPreviousWeekRange();
+export const getLast30DaysRange = () => getPreviousWeekRange();
+export const getPreviousMonthRange = () => getPreviousWeekRange();
+export const getCurrentMonthRange = () => getPreviousWeekRange();
 
 export const getCustomDateRange = (startDate, endDate) => {
   try {
@@ -191,7 +265,7 @@ export const getHistoricalDateRange = (options = {}) => {
     };
     
     console.log(`📅 Historical range: ${range.startDate} to ${range.endDate} (${nightsInRange} nights)`);
-    return range;
+  return range;
   } catch (error) {
     console.error('❌ Error calculating historical range:', error);
     const today = dayjs().tz(TZ);
@@ -729,12 +803,15 @@ export const deleteSchedule = async (req, res) => {
 };
 
 // =====================================================
-// 🚀 MANUAL TRIGGERS USING UPDATED SCHEDULER
+// 🚀 MANUAL TRIGGERS
 // =====================================================
 
 export const triggerDynamicReports = async (req, res) => {
   try {
     console.log('🔧 Manual trigger for dynamic reports...');
+    
+    // ✅ FIXED: Dynamic import for scheduler service
+    const schedulerService = await import('../service/scheduler.js');
     
     // Use the scheduler's main function
     await schedulerService.runDynamicReportScheduler();
@@ -755,14 +832,7 @@ export const triggerDynamicReports = async (req, res) => {
   }
 };
 
-// Replace this function in server/controllers/schedulerController.js
-
-/**
- * ✅ FIXED: Manual trigger for patrol reports
- * Handles BOTH:
- * 1. Individual client report (when clientId + recipientEmail provided)
- * 2. Bulk scheduler run (when no parameters provided)
- */
+// ✅ FIXED: Manual trigger for patrol reports
 export const triggerPatrolReports = async (req, res) => {
   console.log('\n╔════════════════════════════════════════════════════════════╗');
   console.log('║     MANUAL PATROL REPORT TRIGGER RECEIVED                 ║');
@@ -881,19 +951,35 @@ export const triggerPatrolReports = async (req, res) => {
       // ========== SEND EMAIL ==========
       console.log(`📧 Sending email to ${recipientEmail}...`);
 
+      // ✅ DEBUG: Check dateRange before sending
+      console.log('📧 DEBUG: dateRange object:', {
+        startDate: dateRange.startDate,
+        endDate: dateRange.endDate,
+        hasStartDate: !!dateRange.startDate,
+        hasEndDate: !!dateRange.endDate
+      });
+
       // Import email service
       const emailService = await import('../service/emailService.js');
 
+      // ✅ FIXED: Ensure dates are explicitly passed as strings
       const emailData = {
         to: recipientEmail,
-        client: {
-          ClientID: client.ClientID,
-          ClientName: client.ClientName
-        },
-        dateRange: dateRange,
+        recipientName: recipientEmail.split('@')[0],
+        clientName: client.ClientName,
+        startDate: String(dateRange.startDate || dateRange.displayStartDate || ''),
+        endDate: String(dateRange.endDate || dateRange.displayEndDate || ''),
         pdfBuffer: pdfBuffer,
         pdfFilename: `Security_Report_${client.ClientName.replace(/\s+/g, '_')}_${dateRange.startDate}_to_${dateRange.endDate}.pdf`
       };
+
+      // ✅ DEBUG: Verify what we're sending
+      console.log('📧 DEBUG: emailData being sent:', {
+        to: emailData.to,
+        startDate: emailData.startDate,
+        endDate: emailData.endDate,
+        clientName: emailData.clientName
+      });
 
       let emailResult;
       try {
@@ -955,6 +1041,8 @@ export const triggerPatrolReports = async (req, res) => {
       // ========== BULK SCHEDULER RUN ==========
       console.log('🔧 Bulk scheduler run (all due schedules)...');
       
+      // ✅ FIXED: Dynamic import for bulk scheduler run
+      const schedulerService = await import('../service/scheduler.js');
       await schedulerService.triggerPatrolReportsNow();
       
       console.log('✅ Bulk scheduler completed');
@@ -1236,6 +1324,14 @@ export const testReportModel = async (req, res) => {
 export const diagnosticServices = async (req, res) => {
   try {
     console.log('🔍 Running service diagnostics...');
+    
+    // ✅ FIXED: Dynamic import for scheduler service
+    let schedulerService;
+    try {
+      schedulerService = await import('../service/scheduler.js');
+    } catch (importError) {
+      console.warn('⚠️ Could not import scheduler service:', importError.message);
+    }
     
     const diagnostics = {
       reportModel: {

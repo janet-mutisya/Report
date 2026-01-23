@@ -1,4 +1,4 @@
-// server/scripts/managePatrolSchedules.js - FIXED NO DUPLICATE EXPORTS
+// server/scripts/managePatrolSchedules.js - FIXED WITH CONSISTENT CONFIGURATION USAGE
 import sql from 'mssql';
 import { poolPromise } from '../config/database.js';
 import dayjs from 'dayjs';
@@ -11,8 +11,26 @@ dayjs.extend(timezone);
 
 const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
+// Configuration cache to reduce database queries
+const scheduleCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * 🔧 Clear schedule cache for a specific client
+ */
+function clearScheduleCache(clientId = null) {
+  if (clientId) {
+    scheduleCache.delete(clientId);
+    console.log(`🧹 Cleared schedule cache for client ${clientId}`);
+  } else {
+    scheduleCache.clear();
+    console.log('🧹 Cleared all schedule cache');
+  }
+}
+
 /**
  * 🔧 Get client patrols from database with enhanced analytics
+ * FIXED: Now uses stored schedule configuration for calculations
  */
 async function getClientPatrols(clientId, daysRange = 30) {
   try {
@@ -57,13 +75,14 @@ async function getClientPatrols(clientId, daysRange = 30) {
     const complianceRate = totalPatrols > 0 ? 
       `${Math.round((completedPatrols / totalPatrols) * 100)}%` : '0%';
 
-    // Get client schedule to calculate expected patrols
+    // Get client schedule to calculate expected patrols - FIXED: Uses stored config
     const schedule = await getClientSchedule(clientId);
     const expectedPatrols = calculateExpectedPatrols(schedule, daysRange);
     const scheduleCompliance = expectedPatrols > 0 ? 
       `${Math.round((totalPatrols / expectedPatrols) * 100)}%` : '0%';
 
     console.log(`📈 Client ${clientId}: ${totalPatrols}/${expectedPatrols} patrols (${scheduleCompliance} compliance)`);
+    console.log(`   Using schedule: ${schedule.patrols_per_day} patrols/day on ${schedule.patrol_days}`);
 
     return {
       pastPatrols: patrols,
@@ -83,7 +102,13 @@ async function getClientPatrols(clientId, daysRange = 30) {
         startDate: startDate,
         endDate: endDate,
         zones: getZoneAnalytics(patrols),
-        timeDistribution: getTimeDistribution(patrols)
+        timeDistribution: getTimeDistribution(patrols),
+        scheduleUsed: {
+          patrolsPerDay: schedule.patrols_per_day,
+          patrolDays: schedule.patrol_days,
+          weekendPatrols: schedule.weekend_patrols_per_day,
+          configSource: schedule.config_source
+        }
       }
     };
   } catch (error) {
@@ -114,8 +139,18 @@ async function getClientPatrols(clientId, daysRange = 30) {
 
 /**
  * 🔧 Get client schedule from database with proper fallbacks
+ * FIXED: Added caching and consistent configuration fetching
  */
-async function getClientSchedule(clientId) {
+async function getClientSchedule(clientId, forceRefresh = false) {
+  // Check cache first
+  if (!forceRefresh && scheduleCache.has(clientId)) {
+    const cached = scheduleCache.get(clientId);
+    if (Date.now() - cached.timestamp < CACHE_TTL) {
+      console.log(`📅 Using cached schedule for client ${clientId}`);
+      return cached.schedule;
+    }
+  }
+
   try {
     const pool = await poolPromise;
     
@@ -134,44 +169,27 @@ async function getClientSchedule(clientId) {
 
     if (clientResult.recordset.length === 0) {
       console.log(`📅 Client ${clientId} not found`);
-      return getDefaultSchedule(clientId);
+      const defaultSchedule = getDefaultSchedule(clientId);
+      scheduleCache.set(clientId, { schedule: defaultSchedule, timestamp: Date.now() });
+      return defaultSchedule;
     }
 
     const client = clientResult.recordset[0];
 
-    // Try to get stored schedule configuration from rep_cmail
-    const scheduleResult = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query(`
-        SELECT rep_cmail AS ScheduleConfig
-        FROM [_Datos].[dbo].[m_reportes_automaticos]
-        WHERE rep_iidcuenta = @clientId
-      `);
-
-    let scheduleConfig = null;
-    let usedColumn = 'none';
+    // FIXED: Get schedule configuration from rep_cmail
+    const scheduleConfig = await getScheduleConfigFromDatabase(clientId);
     
-    if (scheduleResult.recordset.length > 0 && scheduleResult.recordset[0].ScheduleConfig) {
-      try {
-        scheduleConfig = JSON.parse(scheduleResult.recordset[0].ScheduleConfig);
-        usedColumn = 'rep_cmail';
-      } catch (parseError) {
-        // If it's not JSON, it's probably a regular email address
-        console.log(`📧 rep_cmail contains email address, not schedule config for client ${clientId}`);
-      }
-    }
-
     // Use stored config or defaults
     const patrolsPerDay = scheduleConfig?.patrolsPerDay || 11;
     const patrolDays = scheduleConfig?.patrolDays || "Mon,Tue,Wed,Thu,Fri,Sat,Sun";
     const weekendPatrols = scheduleConfig?.weekendPatrols || 11;
     const shiftType = scheduleConfig?.shiftType || "Day/Night";
+    const scheduleType = scheduleConfig?.scheduleType || "daily";
+    const customIntervalDays = scheduleConfig?.customIntervalDays || null;
     
     const weeklyTotal = calculateWeeklyTotal(patrolsPerDay, weekendPatrols, patrolDays);
     
-    console.log(`📅 Client ${client.ClientName} (ID: ${clientId}): ${patrolsPerDay} patrols/day, ${patrolDays} [Config from: ${usedColumn}]`);
-    
-    return {
+    const schedule = {
       client_id: clientId,
       client_name: client.ClientName,
       client_email: client.ClientEmail,
@@ -179,15 +197,74 @@ async function getClientSchedule(clientId) {
       patrol_days: patrolDays,
       weekend_patrols_per_day: weekendPatrols,
       shift_type: shiftType,
+      schedule_type: scheduleType,
+      custom_interval_days: customIntervalDays,
       weekly_total: weeklyTotal,
       schedule_info: `${patrolsPerDay} patrols/day (${weeklyTotal}/week) - ${patrolDays}`,
       is_active: client.Status === 1,
       has_custom_schedule: !!scheduleConfig,
-      config_source: usedColumn
+      config_source: scheduleConfig ? 'rep_cmail' : 'default',
+      updated_at: scheduleConfig?.updatedAt || null
     };
+
+    console.log(`📅 Client ${client.ClientName} (ID: ${clientId}):`);
+    console.log(`   - Patrols/day: ${patrolsPerDay}`);
+    console.log(`   - Days: ${patrolDays}`);
+    console.log(`   - Weekend patrols: ${weekendPatrols}`);
+    console.log(`   - Has custom schedule: ${!!scheduleConfig}`);
+    console.log(`   - Config source: ${scheduleConfig ? 'rep_cmail' : 'default'}`);
+
+    // Cache the schedule
+    scheduleCache.set(clientId, { schedule, timestamp: Date.now() });
+    
+    return schedule;
   } catch (error) {
     console.error(`❌ Error fetching schedule for client ${clientId}:`, error.message);
-    return getDefaultSchedule(clientId);
+    const defaultSchedule = getDefaultSchedule(clientId);
+    scheduleCache.set(clientId, { schedule: defaultSchedule, timestamp: Date.now() });
+    return defaultSchedule;
+  }
+}
+
+/**
+ * 🔧 Helper function to get schedule configuration from database
+ */
+async function getScheduleConfigFromDatabase(clientId) {
+  try {
+    const pool = await poolPromise;
+    
+    const result = await pool.request()
+      .input('clientId', sql.Int, clientId)
+      .query(`
+        SELECT rep_cmail AS ScheduleConfig
+        FROM [_Datos].[dbo].[m_reportes_automaticos]
+        WHERE rep_iidcuenta = @clientId
+          AND rep_cmail IS NOT NULL
+      `);
+
+    if (result.recordset.length === 0 || !result.recordset[0].ScheduleConfig) {
+      return null;
+    }
+
+    const scheduleConfig = result.recordset[0].ScheduleConfig;
+    
+    try {
+      const parsed = JSON.parse(scheduleConfig);
+      // Validate that this is our schedule config, not a regular email
+      if (parsed.patrolsPerDay !== undefined) {
+        return parsed;
+      } else {
+        console.log(`⚠️ Found JSON in rep_cmail but not a schedule config for client ${clientId}`);
+        return null;
+      }
+    } catch (parseError) {
+      // If it's not JSON, it's probably a regular email address
+      console.log(`📧 rep_cmail contains email address, not schedule config for client ${clientId}`);
+      return null;
+    }
+  } catch (error) {
+    console.error(`❌ Error fetching schedule config for client ${clientId}:`, error.message);
+    return null;
   }
 }
 
@@ -203,11 +280,14 @@ function getDefaultSchedule(clientId) {
     patrol_days: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
     weekend_patrols_per_day: 11,
     shift_type: "Day/Night",
+    schedule_type: "daily",
+    custom_interval_days: null,
     weekly_total: 77,
     schedule_info: "11 patrols/day (77/week) - Mon,Tue,Wed,Thu,Fri,Sat,Sun",
     is_active: true,
     has_custom_schedule: false,
-    config_source: 'default'
+    config_source: 'default',
+    updated_at: null
   };
   
   console.log(`⚙️ Using default schedule for client ${clientId}`);
@@ -234,6 +314,7 @@ function calculateWeeklyTotal(weekdayPatrols, weekendPatrols, patrolDays) {
 
 /**
  * 🔧 Calculate expected patrols based on schedule and period
+ * FIXED: Uses actual schedule configuration
  */
 function calculateExpectedPatrols(schedule, daysRange) {
   const patrolDays = schedule.patrol_days.split(',').map(day => day.trim().toLowerCase());
@@ -325,12 +406,14 @@ function getTimeDistribution(patrols) {
 
 /**
  * 🔧 List all clients with their schedules
+ * FIXED: Now properly uses stored configuration
  */
 async function listAllSchedules() {
   try {
     const pool = await poolPromise;
     
-    // Get all clients with their schedule configurations from rep_cmail
+    console.log('📋 Fetching all clients with schedule configurations...');
+    
     const result = await pool.request().query(`
       SELECT 
         C.cue_iid AS ClientID,
@@ -351,51 +434,34 @@ async function listAllSchedules() {
       ORDER BY C.cue_cnombre
     `);
 
-    const enhancedClients = result.recordset.map(client => {
-      let scheduleConfig = null;
-      let configSource = 'none';
+    const enhancedClients = await Promise.all(result.recordset.map(async (client) => {
+      // Clear cache for this client to ensure fresh data
+      clearScheduleCache(client.ClientID);
       
-      // Try to parse from rep_cmail
-      if (client.ScheduleConfig) {
-        try {
-          scheduleConfig = JSON.parse(client.ScheduleConfig);
-          configSource = 'rep_cmail';
-        } catch (parseError) {
-          // If it's not JSON, it's probably a regular email address
-          console.log(`📧 Client ${client.ClientID}: rep_cmail contains email, not schedule config`);
-        }
-      }
-
-      // Use stored config or defaults
-      const patrolsPerDay = scheduleConfig?.patrolsPerDay || 11;
-      const weekendPatrols = scheduleConfig?.weekendPatrols || 11;
-      const patrolDays = scheduleConfig?.patrolDays || "Mon,Tue,Wed,Thu,Fri,Sat,Sun";
-      const shiftType = scheduleConfig?.shiftType || "Day/Night";
-      const scheduleType = scheduleConfig?.scheduleType || "daily";
-      const customIntervalDays = scheduleConfig?.customIntervalDays || null;
-      
-      const weeklyTotal = calculateWeeklyTotal(patrolsPerDay, weekendPatrols, patrolDays);
+      // Get full schedule with proper configuration
+      const schedule = await getClientSchedule(client.ClientID, true); // Force refresh
       
       return {
         ClientID: client.ClientID,
-        ClientName: client.ClientName,
-        ClientEmail: client.ClientEmail,
-        PatrolsPerDay: patrolsPerDay,
-        WeekendPatrols: weekendPatrols,
-        PatrolDays: patrolDays,
-        ShiftType: shiftType,
-        ScheduleType: scheduleType,
-        CustomIntervalDays: customIntervalDays,
+        ClientName: schedule.client_name,
+        ClientEmail: schedule.client_email,
+        PatrolsPerDay: schedule.patrols_per_day,
+        WeekendPatrols: schedule.weekend_patrols_per_day,
+        PatrolDays: schedule.patrol_days,
+        ShiftType: schedule.shift_type,
+        ScheduleType: schedule.schedule_type,
+        CustomIntervalDays: schedule.custom_interval_days,
         Status: client.Status,
-        WeeklyTotal: weeklyTotal,
-        ScheduleInfo: `${patrolsPerDay} patrols/day (${weeklyTotal}/week) - ${patrolDays}`,
-        IsActive: client.Status === 1,
-        HasCustomSchedule: !!scheduleConfig,
-        ConfigSource: configSource
+        WeeklyTotal: schedule.weekly_total,
+        ScheduleInfo: schedule.schedule_info,
+        IsActive: schedule.is_active,
+        HasCustomSchedule: schedule.has_custom_schedule,
+        ConfigSource: schedule.config_source,
+        UpdatedAt: schedule.updated_at
       };
-    });
+    }));
 
-    console.log(`📋 Found ${enhancedClients.length} clients`);
+    console.log(`📋 Found ${enhancedClients.length} clients with schedules`);
     return enhancedClients;
   } catch (error) {
     console.error('❌ Error listing clients:', error);
@@ -405,10 +471,14 @@ async function listAllSchedules() {
 
 /**
  * 🔧 Get client analytics with patrol calculations
+ * FIXED: Uses stored schedule configuration consistently
  */
 async function getClientAnalytics(clientId, daysRange = 30) {
   try {
-    const schedule = await getClientSchedule(clientId);
+    // Clear cache to ensure fresh data
+    clearScheduleCache(clientId);
+    
+    const schedule = await getClientSchedule(clientId, true);
     const patrolData = await getClientPatrols(clientId, daysRange);
     
     const totalDays = daysRange;
@@ -418,6 +488,12 @@ async function getClientAnalytics(clientId, daysRange = 30) {
     const expectedPatrols = (schedule.patrols_per_day * weekdays) + (schedule.weekend_patrols_per_day * weekends);
     const actualPatrols = patrolData.pastPatrols.length;
     const complianceRate = expectedPatrols > 0 ? ((actualPatrols / expectedPatrols) * 100).toFixed(1) : 0;
+
+    console.log(`📊 Analytics for ${schedule.client_name}:`);
+    console.log(`   - Expected: ${expectedPatrols} patrols`);
+    console.log(`   - Actual: ${actualPatrols} patrols`);
+    console.log(`   - Compliance: ${complianceRate}%`);
+    console.log(`   - Schedule used: ${schedule.patrols_per_day} patrols/day on ${schedule.patrol_days}`);
 
     return {
       clientId: clientId,
@@ -435,7 +511,13 @@ async function getClientAnalytics(clientId, daysRange = 30) {
                     complianceRate >= 80 ? 'Good' : 
                     complianceRate >= 70 ? 'Fair' : 'Poor',
         zonesCovered: patrolData.analytics.zones.length,
-        timeDistribution: patrolData.analytics.timeDistribution
+        timeDistribution: patrolData.analytics.timeDistribution,
+        scheduleUsed: {
+          patrolsPerDay: schedule.patrols_per_day,
+          patrolDays: schedule.patrol_days,
+          weekendPatrols: schedule.weekend_patrols_per_day,
+          configSource: schedule.config_source
+        }
       }
     };
   } catch (error) {
@@ -446,6 +528,7 @@ async function getClientAnalytics(clientId, daysRange = 30) {
 
 /**
  * 🔧 Get all clients with their current performance metrics
+ * FIXED: Uses stored schedule configuration
  */
 async function getAllClientsWithPerformance(daysRange = 7) {
   try {
@@ -541,6 +624,8 @@ async function updateClientEmailPreferences(clientId, preferences) {
       `);
 
     console.log(`✅ Updated email preferences for client ${clientId}`);
+    clearScheduleCache(clientId); // Clear cache after update
+    
     return { success: true, rowsAffected: result.rowsAffected[0] };
   } catch (error) {
     console.error(`❌ Error updating email preferences for client ${clientId}:`, error);
@@ -629,7 +714,7 @@ async function updateNextRun(clientId, frequency, intervalDays, currentNextRun) 
 
 /**
  * 🔧 Create or Update patrol schedule for a client
- * FIXED: Using rep_cmail column to store JSON config
+ * FIXED: Now properly stores and clears cache
  */
 async function upsertPatrolSchedule(clientId, scheduleData) {
   try {
@@ -720,6 +805,9 @@ async function upsertPatrolSchedule(clientId, scheduleData) {
       console.log(`   Rows affected: ${result.rowsAffected[0]}`);
     }
 
+    // Clear cache to ensure fresh data on next fetch
+    clearScheduleCache(clientId);
+
     return { 
       success: true, 
       message: `Patrol schedule saved successfully for ${clientName}`,
@@ -744,7 +832,7 @@ async function upsertPatrolSchedule(clientId, scheduleData) {
 
 /**
  * 🔧 Delete patrol schedule for a client
- * FIXED: Using rep_cmail column
+ * FIXED: Now properly clears cache
  */
 async function deletePatrolSchedule(clientId) {
   try {
@@ -810,6 +898,9 @@ async function deletePatrolSchedule(clientId) {
         WHERE rep_iidcuenta = @clientId
       `);
 
+    // Clear cache
+    clearScheduleCache(clientId);
+    
     console.log(`✅ Deleted patrol schedule for client ${clientId} (${clientName})`);
     
     return { 
@@ -827,74 +918,31 @@ async function deletePatrolSchedule(clientId) {
 
 /**
  * 🔧 Get patrol schedule with stored configuration
- * FIXED: Using rep_cmail column to retrieve config
+ * FIXED: Now properly clears and uses cache
  */
 async function getPatrolScheduleConfig(clientId) {
   try {
-    const pool = await poolPromise;
+    // Clear cache to ensure fresh data
+    clearScheduleCache(clientId);
     
-    console.log(`📋 Fetching patrol schedule config for client ${clientId}`);
+    const schedule = await getClientSchedule(clientId, true);
     
-    const result = await pool.request()
-      .input('clientId', sql.Int, clientId)
-      .query(`
-        SELECT 
-          R.rep_cmail AS ScheduleConfig,
-          C.cue_iid AS ClientID,
-          C.cue_cnombre AS ClientName,
-          C.cue_cemail AS ClientEmail
-        FROM [_Datos].[dbo].[m_cuentas] C
-        LEFT JOIN [_Datos].[dbo].[m_reportes_automaticos] R
-          ON C.cue_iid = R.rep_iidcuenta
-        WHERE C.cue_iid = @clientId
-      `);
-
-    if (result.recordset.length === 0) {
-      return { 
-        success: false, 
-        error: 'Client not found' 
-      };
-    }
-
-    const record = result.recordset[0];
-    let scheduleConfig = null;
-    let configSource = 'none';
-
-    // Try to parse from rep_cmail
-    if (record.ScheduleConfig) {
-      try {
-        scheduleConfig = JSON.parse(record.ScheduleConfig);
-        configSource = 'rep_cmail';
-        console.log(`✅ Found custom schedule for client ${clientId} in rep_cmail`);
-      } catch (parseError) {
-        // If it's not JSON, it might be a regular email address
-        console.log(`📧 rep_cmail contains email, not schedule config: ${record.ScheduleConfig}`);
-      }
-    }
-
-    if (!scheduleConfig) {
-      console.log(`📋 No custom schedule found for client ${clientId}, using defaults`);
-    }
-
-    // Use stored config or defaults
-    const schedule = {
-      ClientID: record.ClientID,
-      ClientName: record.ClientName,
-      ClientEmail: record.ClientEmail,
-      PatrolsPerDay: scheduleConfig?.patrolsPerDay || 11,
-      PatrolDays: scheduleConfig?.patrolDays || 'Mon,Tue,Wed,Thu,Fri,Sat,Sun',
-      ScheduleType: scheduleConfig?.scheduleType || 'daily',
-      WeekendPatrols: scheduleConfig?.weekendPatrols || 11,
-      CustomIntervalDays: scheduleConfig?.customIntervalDays || null,
-      ShiftType: scheduleConfig?.shiftType || 'Day/Night',
-      HasCustomSchedule: !!scheduleConfig,
-      UpdatedAt: scheduleConfig?.updatedAt || null,
-      ConfigSource: configSource
-    };
-
     return { 
       success: true, 
-      data: schedule 
+      data: {
+        ClientID: schedule.client_id,
+        ClientName: schedule.client_name,
+        ClientEmail: schedule.client_email,
+        PatrolsPerDay: schedule.patrols_per_day,
+        PatrolDays: schedule.patrol_days,
+        ScheduleType: schedule.schedule_type,
+        WeekendPatrols: schedule.weekend_patrols_per_day,
+        CustomIntervalDays: schedule.custom_interval_days,
+        ShiftType: schedule.shift_type,
+        HasCustomSchedule: schedule.has_custom_schedule,
+        UpdatedAt: schedule.updated_at,
+        ConfigSource: schedule.config_source
+      }
     };
   } catch (error) {
     console.error(`❌ Error fetching patrol schedule config for client ${clientId}:`, error);
@@ -918,7 +966,8 @@ export {
   updateNextRun,
   upsertPatrolSchedule,
   deletePatrolSchedule,
-  getPatrolScheduleConfig
+  getPatrolScheduleConfig,
+  clearScheduleCache
 };
 
 // Default export
@@ -934,5 +983,6 @@ export default {
   updateNextRun,
   upsertPatrolSchedule,
   deletePatrolSchedule,
-  getPatrolScheduleConfig
+  getPatrolScheduleConfig,
+  clearScheduleCache
 };

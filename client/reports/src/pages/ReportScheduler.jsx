@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Calendar, Clock, Mail, RefreshCw, Send, FileText, 
   CheckCircle, XCircle, Plus, Trash2, Edit, 
@@ -6,7 +6,7 @@ import {
   Shield, AlertCircle
 } from 'lucide-react';
 
-// API Configuration - UPDATED TO LOCALHOST
+// API Configuration
 const API_BASE_URL = 'http://localhost:5000/api';
 
 const SecurityReportsPage = () => {
@@ -51,10 +51,55 @@ const SecurityReportsPage = () => {
   // Manual Report Sending State
   const [isSendingReport, setIsSendingReport] = useState(false);
 
-  // API Helper Function
-  const fetchAPI = useCallback(async (url, options = {}) => {
+  // Refs for preventing duplicate requests
+  const healthCheckInProgress = useRef(false);
+  const initializationCompleted = useRef(false);
+  const requestQueue = useRef([]);
+  const isProcessingQueue = useRef(false);
+
+  // Request queue system to prevent rate limiting
+  const processRequestQueue = useCallback(async () => {
+    if (isProcessingQueue.current || requestQueue.current.length === 0) {
+      return;
+    }
+
+    isProcessingQueue.current = true;
+
+    while (requestQueue.current.length > 0) {
+      const request = requestQueue.current.shift();
+      
+      try {
+        // Add delay between requests to prevent rate limiting
+        if (requestQueue.current.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay between requests
+        }
+        
+        const result = await request.requestFn();
+        request.resolve(result);
+      } catch (err) {
+        request.reject(err);
+      }
+    }
+
+    isProcessingQueue.current = false;
+  }, []);
+
+  const addToRequestQueue = useCallback((requestFn, requestId) => {
+    return new Promise((resolve, reject) => {
+      requestQueue.current.push({ requestFn, requestId, resolve, reject });
+      processRequestQueue();
+    });
+  }, [processRequestQueue]);
+
+  // API Helper Function with rate limiting handling
+  const fetchAPI = useCallback(async (url, options = {}, retryCount = 0, maxRetries = 2) => {
     try {
-      console.log(`🌐 API Call: ${options.method || 'GET'} ${url}`);
+      console.log(`🌐 API Call: ${options.method || 'GET'} ${url} (attempt ${retryCount + 1})`);
+      
+      // Add delay for GET requests to prevent rate limiting
+      if (!options.method || options.method === 'GET') {
+        await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay for GET requests
+      }
       
       const response = await fetch(url, {
         ...options,
@@ -63,6 +108,18 @@ const SecurityReportsPage = () => {
           ...options.headers,
         },
       });
+
+      // Handle rate limiting with exponential backoff
+      if (response.status === 429) {
+        if (retryCount < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, retryCount), 5000); // Max 5 seconds
+          console.log(`⏳ Rate limited, retrying in ${delay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return fetchAPI(url, options, retryCount + 1, maxRetries);
+        }
+        const errorText = await response.text();
+        throw new Error(`Rate limit exceeded. Please wait before trying again.`);
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -91,31 +148,72 @@ const SecurityReportsPage = () => {
     }
   }, []);
 
-  // Data Fetching - UPDATED TO LOCALHOST
-  const fetchSchedules = useCallback(async () => {
+  // Queued version of fetchAPI
+  const fetchAPIQueued = useCallback(async (url, options = {}, requestId = '') => {
+    return addToRequestQueue(
+      () => fetchAPI(url, options),
+      requestId || url
+    );
+  }, [fetchAPI, addToRequestQueue]);
+
+  // Health Check
+  const checkBackendHealth = useCallback(async () => {
+    if (healthCheckInProgress.current) {
+      console.log('🏥 Health check already in progress, skipping...');
+      return false;
+    }
+
+    if (initializationCompleted.current) {
+      console.log('✅ Already initialized, skipping health check');
+      return true;
+    }
+
+    healthCheckInProgress.current = true;
+    
+    try {
+      const health = await fetchAPIQueued(`${API_BASE_URL}/scheduler/health`, {}, 'health-check');
+      console.log('✅ Backend health:', health);
+      return true;
+    } catch (healthError) {
+      console.error('❌ Backend health check failed:', healthError);
+      setError('Backend server is not responding. Make sure the backend is running on http://localhost:5000');
+      return false;
+    } finally {
+      setTimeout(() => {
+        healthCheckInProgress.current = false;
+      }, 100);
+    }
+  }, [fetchAPIQueued]);
+
+  // Sequential data fetching
+  const fetchAllDataSequentially = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await fetchAPI(`${API_BASE_URL}/scheduler`);
-      setSchedules(data.schedules || data.data || []);
-    } catch (fetchError) {
-      setError(fetchError.message);
-      setSchedules([]);
+      console.log('🔄 Fetching data sequentially...');
+      
+      // First fetch schedules
+      console.log('📋 Fetching schedules...');
+      const schedulesData = await fetchAPIQueued(`${API_BASE_URL}/scheduler`, {}, 'fetch-schedules');
+      setSchedules(schedulesData.schedules || schedulesData.data || []);
+      
+      // Wait a bit before next request
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
+      // Then fetch clients
+      console.log('👥 Fetching clients...');
+      const clientsData = await fetchAPIQueued(`${API_BASE_URL}/scheduler/clients/basic`, {}, 'fetch-clients');
+      setClients(clientsData.clients || clientsData.data || []);
+      
+      console.log('✅ All data fetched sequentially');
+    } catch (err) {
+      console.error('❌ Sequential fetch error:', err.message);
+      setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [fetchAPI]);
+  }, [fetchAPIQueued]);
 
-  const fetchClients = useCallback(async () => {
-    try {
-      const data = await fetchAPI(`${API_BASE_URL}/scheduler/clients/basic`);
-      setClients(data.clients || data.data || []);
-    } catch (fetchError) {
-      console.error('Error fetching clients:', fetchError);
-      setClients([]);
-    }
-  }, [fetchAPI]);
-
-  // Schedule Management - UPDATED TO LOCALHOST
+  // Schedule Management
   const createSchedule = useCallback(async () => {
     try {
       if (!formData.clientId || !formData.email || !formData.nextRun) {
@@ -134,22 +232,20 @@ const SecurityReportsPage = () => {
       
       console.log('📤 Creating schedule:', requestBody);
       
-      const response = await fetchAPI(`${API_BASE_URL}/scheduler`, {
+      await fetchAPI(`${API_BASE_URL}/scheduler`, {
         method: 'POST',
         body: JSON.stringify(requestBody)
       });
       
-      console.log('✅ Create schedule response:', response);
-      
       setSuccess('Schedule created successfully');
       setShowModal(false);
       resetForm();
-      fetchSchedules();
+      fetchAllDataSequentially();
     } catch (createError) {
       console.error('❌ Create schedule error:', createError);
       setError(createError.message || 'Failed to create schedule');
     }
-  }, [formData, fetchAPI, fetchSchedules]);
+  }, [formData, fetchAPI, fetchAllDataSequentially]);
 
   const updateSchedule = useCallback(async () => {
     try {
@@ -167,23 +263,21 @@ const SecurityReportsPage = () => {
       
       console.log('📤 Updating schedule:', requestBody);
       
-      const response = await fetchAPI(`${API_BASE_URL}/scheduler/${currentSchedule.id}`, {
+      await fetchAPI(`${API_BASE_URL}/scheduler/${currentSchedule.id}`, {
         method: 'PUT',
         body: JSON.stringify(requestBody)
       });
-      
-      console.log('✅ Update schedule response:', response);
       
       setSuccess('Schedule updated successfully');
       setShowModal(false);
       resetForm();
       setCurrentSchedule(null);
-      fetchSchedules();
+      fetchAllDataSequentially();
     } catch (updateError) {
       console.error('❌ Update failed:', updateError);
       setError(updateError.message || 'Failed to update schedule');
     }
-  }, [currentSchedule, formData, fetchAPI, fetchSchedules]);
+  }, [currentSchedule, formData, fetchAPI, fetchAllDataSequentially]);
 
   const deleteSchedule = useCallback(async (schedule) => {
     if (!window.confirm(`Are you sure you want to delete the schedule for ${schedule.clientName}?`)) return;
@@ -196,13 +290,13 @@ const SecurityReportsPage = () => {
       });
       
       setSuccess('Schedule deleted successfully');
-      fetchSchedules();
+      fetchAllDataSequentially();
     } catch (deleteError) {
       setError(deleteError.message || 'Failed to delete schedule');
     }
-  }, [fetchAPI, fetchSchedules]);
+  }, [fetchAPI, fetchAllDataSequentially]);
 
-  // Report Functions - SEND MANUAL REPORT (UPDATED TO LOCALHOST)
+  // Report Functions
   const sendReport = useCallback(async () => {
     try {
       setIsSendingReport(true);
@@ -215,7 +309,6 @@ const SecurityReportsPage = () => {
 
       console.log('📤 Sending manual report for client:', reportForm.clientId);
       
-      // Prepare request body according to schedulerRoutes.js
       const requestBody = {
         clientId: parseInt(reportForm.clientId),
         period: reportForm.reportPeriod === 'custom' ? 'custom' : 'previousWeek',
@@ -233,7 +326,6 @@ const SecurityReportsPage = () => {
       
       console.log('📤 Report request body:', requestBody);
       
-      // Using the correct endpoint from schedulerRoutes.js
       const responseData = await fetchAPI(`${API_BASE_URL}/scheduler/trigger/patrol-reports`, {
         method: 'POST',
         body: JSON.stringify(requestBody)
@@ -261,7 +353,6 @@ const SecurityReportsPage = () => {
   const sendQuickReport = useCallback(async (clientId) => {
     try {
       console.log('🚀 Sending quick report for client:', clientId);
-      // This would call a different endpoint - you might need to implement this
       setSuccess('Quick report feature coming soon!');
     } catch (quickError) {
       console.error('❌ Quick report error:', quickError);
@@ -272,34 +363,19 @@ const SecurityReportsPage = () => {
   const viewPreview = useCallback(async (clientId) => {
     try {
       console.log('👁️ Fetching preview for client:', clientId);
-      // Fetch preview data from /api/scheduler/analytics/client/:clientId
-      const previewData = await fetchAPI(`${API_BASE_URL}/scheduler/analytics/client/${clientId}?days=7`);
+      const previewData = await fetchAPIQueued(`${API_BASE_URL}/scheduler/analytics/client/${clientId}?days=7`, {}, `preview-${clientId}`);
       setPreviewData(previewData);
       setShowPreview(true);
     } catch (previewError) {
       console.error('❌ Preview error:', previewError);
       setError(previewError.message || 'Failed to load preview');
     }
-  }, [fetchAPI]);
+  }, [fetchAPIQueued]);
 
-  // Health Check - UPDATED TO LOCALHOST
-  const checkBackendHealth = useCallback(async () => {
-    try {
-      const health = await fetchAPI(`${API_BASE_URL}/scheduler/health`);
-      console.log('✅ Backend health:', health);
-      return true;
-    } catch (healthError) {
-      console.error('❌ Backend health check failed:', healthError);
-      setError('Backend server is not responding. Make sure the backend is running on http://localhost:5000');
-      return false;
-    }
-  }, [fetchAPI]);
-
-  // Refresh All Data
+  // Refresh All Data - Sequential
   const refreshAllData = useCallback(() => {
-    fetchSchedules();
-    fetchClients();
-  }, [fetchSchedules, fetchClients]);
+    fetchAllDataSequentially();
+  }, [fetchAllDataSequentially]);
 
   // Helper Functions
   const resetForm = () => {
@@ -421,16 +497,54 @@ const SecurityReportsPage = () => {
     }));
   };
 
-  // Effects
+  // Effects - Fixed for React Strict Mode
   useEffect(() => {
+    if (initializationCompleted.current) {
+      console.log('✅ Already initialized, skipping...');
+      return;
+    }
+
+    let ignore = false;
+    let mounted = true;
+
     const initializeApp = async () => {
-      const isHealthy = await checkBackendHealth();
-      if (isHealthy) {
-        refreshAllData();
+      if (ignore || !mounted) {
+        console.log('🚫 Component unmounted or ignored, skipping initialization...');
+        return;
+      }
+
+      try {
+        console.log('🔧 Initializing application...');
+        const isHealthy = await checkBackendHealth();
+        
+        if (!ignore && mounted && isHealthy) {
+          console.log('🔄 Fetching initial data SEQUENTIALLY...');
+          await fetchAllDataSequentially();
+          
+          if (!ignore && mounted) {
+            initializationCompleted.current = true;
+            console.log('🎉 Application initialization completed');
+          }
+        }
+      } catch (initError) {
+        if (!ignore && mounted) {
+          console.error('❌ Initialization error:', initError);
+        }
       }
     };
-    initializeApp();
-  }, [checkBackendHealth, refreshAllData]);
+
+    // Add a delay to avoid immediate duplicate calls
+    const timer = setTimeout(() => {
+      initializeApp();
+    }, 100);
+
+    return () => {
+      console.log('🧹 Cleaning up initialization...');
+      ignore = true;
+      mounted = false;
+      clearTimeout(timer);
+    };
+  }, [checkBackendHealth, fetchAllDataSequentially]);
 
   useEffect(() => {
     if (success) {
@@ -446,7 +560,14 @@ const SecurityReportsPage = () => {
     }
   }, [error]);
 
-  // Render Components
+  // Clean up request queue on unmount
+  useEffect(() => {
+    return () => {
+      requestQueue.current = [];
+    };
+  }, []);
+
+  // Render the component (same as your original render code)
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -490,14 +611,14 @@ const SecurityReportsPage = () => {
         {/* Notifications */}
         {success && (
           <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3">
-            <CheckCircle className="text-green-600 flex-shrink-0" size={20} />
+            <CheckCircle className="text-green-600 shrink-0" size={20} />
             <span className="text-green-800 font-medium">{success}</span>
           </div>
         )}
 
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
-            <XCircle className="text-red-600 flex-shrink-0 mt-0.5" size={20} />
+            <XCircle className="text-red-600 shrink-0 mt-0.5" size={20} />
             <span className="text-red-800 font-medium">{error}</span>
           </div>
         )}
@@ -658,27 +779,27 @@ const SecurityReportsPage = () => {
                   <h3 className="font-semibold text-blue-900 mb-4">Report Features</h3>
                   <ul className="space-y-3 text-sm text-blue-800">
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>Weekly patrol performance analysis</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>Guard incident reports (V03 events)</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>Site post compliance rates</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>Custom date range support</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>PDF format with detailed metrics</span>
                     </li>
                     <li className="flex items-start gap-2">
-                      <CheckCircle className="text-green-500 mt-0.5 flex-shrink-0" size={16} />
+                      <CheckCircle className="text-green-500 mt-0.5 shrink-0" size={16} />
                       <span>Automatic email delivery</span>
                     </li>
                   </ul>

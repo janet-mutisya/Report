@@ -1,5 +1,6 @@
-// server/controllers/reportController.js - FULLY UPDATED & SYNCHRONIZED
+// server/controllers/reportController.js - UPDATED WITH PDF SERVICE IMPORT
 import { generateWeeklyReportPDF } from "../service/reportService.js";
+import { generatePDFReport, generateDashboardPDF } from "../service/pdfService.js"; // ADDED PDF SERVICE
 import { fetchWeeklyReport } from "../models/reportModel.js";
 import { getClientSchedule } from "../scripts/managePatrolSchedules.js";
 import { sql, poolPromise } from "../config/database.js";
@@ -92,9 +93,6 @@ function getShiftDescription(shiftType) {
 /**
  * Get client info from database
  */
-/**
- * Get client info from database - FIXED VERSION
- */
 async function getClientInfo(clientParam) {
   const pool = await poolPromise;
   try {
@@ -170,18 +168,18 @@ async function getAllClients() {
 }
 
 // =====================================================
-// 📊 MAIN CONTROLLER FUNCTIONS - FULLY SYNCHRONIZED
+// 📊 MAIN CONTROLLER FUNCTIONS - WITH PDF SERVICE SUPPORT
 // =====================================================
 
 /**
- * 📄 Generate and download PDF report
+ * 📄 Generate and download PDF report (reportService version)
  * Uses: generateWeeklyReportPDF from reportService.js
  */
 export const getWeeklyReportPDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate, shiftType = "Day/Night" } = req.query;
     
-    console.log("📄 [CONTROLLER] PDF Request:", { clientName, startDate, endDate, shiftType });
+    console.log("📄 [CONTROLLER] PDF Request (ReportService):", { clientName, startDate, endDate, shiftType });
 
     if (!clientName) {
       return res.status(400).json({
@@ -246,6 +244,184 @@ export const getWeeklyReportPDF = async (req, res) => {
       message: "Error generating PDF report",
       error: error.message,
       timestamp: new Date().toISOString()
+    });
+  }
+};
+
+/**
+ * 📄 Generate Dashboard PDF (pdfService version)
+ * NEW ENDPOINT: Uses generateDashboardPDF from pdfService.js
+ */
+export const getDashboardPDF = async (req, res) => {
+  try {
+    const { clientName, startDate, endDate } = req.query;
+    
+    console.log("📊 [CONTROLLER] Dashboard PDF Request (PDFService):", { clientName, startDate, endDate });
+
+    if (!clientName) {
+      return res.status(400).json({
+        success: false,
+        message: "Client Name is required",
+        example: "/api/reports/dashboard-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
+      });
+    }
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Start date and end date are required",
+        example: "/api/reports/dashboard-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
+      });
+    }
+
+    const clientInfo = await getClientInfo(clientName);
+    if (!clientInfo) {
+      return res.status(404).json({
+        success: false,
+        message: `Client not found: ${clientName}`
+      });
+    }
+
+    console.log(`✅ Client found for dashboard: ${clientInfo.name} (ID: ${clientInfo.id})`);
+
+    // ✅ Use the pdfService.js for dashboard PDF generation
+    const pdfResult = await generatePDFReport({
+      clientId: clientInfo.id,
+      clientName: clientInfo.name,
+      startDate,
+      endDate
+    });
+    
+    if (!pdfResult.success || !pdfResult.pdfBuffer) {
+      console.error("❌ Dashboard PDF generation failed:", pdfResult.error);
+      return res.status(500).json({
+        success: false,
+        message: "Dashboard PDF generation failed",
+        error: pdfResult.error || "No buffer returned"
+      });
+    }
+
+    const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
+    const filename = `Security_Dashboard_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfResult.pdfBuffer.length);
+    
+    console.log("✅ Dashboard PDF generated successfully:", {
+      filename,
+      size: `${(pdfResult.pdfBuffer.length / 1024).toFixed(2)} KB`,
+      service: 'pdfService.js',
+      pages: pdfResult.metadata?.pages || 'Unknown'
+    });
+
+    res.send(pdfResult.pdfBuffer);
+
+  } catch (error) {
+    console.error("❌ Dashboard PDF Generation Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error generating dashboard PDF",
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+};
+
+/**
+ * 📄 Generate Comprehensive PDF with choice of service
+ * NEW ENDPOINT: Allows choosing between reportService and pdfService
+ */
+export const getComprehensivePDF = async (req, res) => {
+  try {
+    const { clientName, startDate, endDate, type = 'dashboard' } = req.query;
+    
+    console.log("📄 [CONTROLLER] Comprehensive PDF Request:", { clientName, startDate, endDate, type });
+
+    if (!clientName) {
+      return res.status(400).json({
+        success: false,
+        message: "Client Name is required",
+        example: "/api/reports/comprehensive-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08&type=dashboard"
+      });
+    }
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Start date and end date are required"
+      });
+    }
+
+    const clientInfo = await getClientInfo(clientName);
+    if (!clientInfo) {
+      return res.status(404).json({
+        success: false,
+        message: `Client not found: ${clientName}`
+      });
+    }
+
+    let pdfBuffer;
+    let serviceUsed;
+    let filenamePrefix;
+
+    if (type === 'dashboard' || type === 'pdfservice') {
+      // Use pdfService.js for dashboard-style PDF
+      console.log(`📊 Using pdfService.js for ${type} PDF`);
+      const pdfResult = await generatePDFReport({
+        clientId: clientInfo.id,
+        clientName: clientInfo.name,
+        startDate,
+        endDate
+      });
+      
+      if (!pdfResult.success || !pdfResult.pdfBuffer) {
+        throw new Error(pdfResult.error || "PDF Service failed");
+      }
+      
+      pdfBuffer = pdfResult.pdfBuffer;
+      serviceUsed = 'pdfService.js';
+      filenamePrefix = type === 'dashboard' ? 'Security_Dashboard' : 'Security_Report_PDFService';
+    } else {
+      // Default to reportService.js for weekly report
+      console.log(`📄 Using reportService.js for ${type} PDF`);
+      pdfBuffer = await generateWeeklyReportPDF(
+        clientInfo.id,
+        startDate,
+        endDate
+      );
+      serviceUsed = 'reportService.js';
+      filenamePrefix = 'Security_Patrol_Report';
+    }
+    
+    if (!pdfBuffer) {
+      throw new Error("PDF generation returned null buffer");
+    }
+
+    const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
+    const filename = `${filenamePrefix}_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    
+    console.log("✅ PDF generated successfully:", {
+      filename,
+      size: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+      service: serviceUsed,
+      type
+    });
+
+    res.send(pdfBuffer);
+
+  } catch (error) {
+    console.error("❌ Comprehensive PDF Generation Error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Error generating ${req.query.type || 'dashboard'} PDF`,
+      error: error.message,
+      timestamp: new Date().toISOString(),
+      availableTypes: ['dashboard', 'pdfservice', 'weekly', 'reportservice']
     });
   }
 };
@@ -356,7 +532,7 @@ export const getPatrolReport = async (req, res) => {
         startDate: effectiveStartDate,
         endDate: effectiveEndDate,
         daysInRange: reportData.metadata.daysInRange || 
-                    dayjs(effectiveEndDate).diff(dayjs(effectiveStartDate), 'day') + 1
+                    dayjs(effectiveEndDate).diff(dayjs(effectiveStartDate), 'day') 
       },
       shift: {
         requested: shiftType,
@@ -397,7 +573,15 @@ export const getPatrolReport = async (req, res) => {
       metadata: {
         generatedAt: reportData.metadata.generatedAt || new Date(),
         success: true,
-        notes: "Data synchronized with reportModel.js and reportService.js"
+        notes: "Data synchronized with reportModel.js, reportService.js, and pdfService.js"
+      },
+      pdfOptions: {
+        available: true,
+        services: {
+          reportService: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
+          pdfService: "/api/reports/dashboard-pdf?clientName=X&startDate=Y&endDate=Z",
+          comprehensive: "/api/reports/comprehensive-pdf?clientName=X&startDate=Y&endDate=Z&type=dashboard"
+        }
       }
     });
 
@@ -481,7 +665,11 @@ export const getClientShifts = async (req, res) => {
         updatedAt: schedule.updated_at
       } : null,
       availableShifts,
-      hasSchedule: !!schedule
+      hasSchedule: !!schedule,
+      pdfServices: {
+        reportService: "Weekly Patrol Report",
+        pdfService: "Dashboard Report with Incidents"
+      }
     });
 
   } catch (error) {
@@ -490,6 +678,109 @@ export const getClientShifts = async (req, res) => {
       success: false,
       message: "Error fetching client shift information",
       error: error.message,
+    });
+  }
+};
+
+/**
+ * 🧪 Test PDF services
+ */
+export const testPDFServices = async (req, res) => {
+  try {
+    const { clientName, startDate, endDate } = req.query;
+
+    console.log("🧪 [CONTROLLER] Test PDF Services:", { clientName, startDate, endDate });
+
+    if (!clientName) {
+      return res.status(400).json({
+        success: false,
+        message: "Client Name is required for testing"
+      });
+    }
+
+    const clientInfo = await getClientInfo(clientName);
+    if (!clientInfo) {
+      return res.status(404).json({
+        success: false,
+        message: `Client not found: ${clientName}`
+      });
+    }
+
+    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
+    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+
+    // Test both PDF services
+    const results = {
+      reportService: { success: false, size: 0, error: null },
+      pdfService: { success: false, size: 0, error: null }
+    };
+
+    // Test reportService.js
+    try {
+      const reportServicePDF = await generateWeeklyReportPDF(
+        clientInfo.id,
+        testStartDate,
+        testEndDate
+      );
+      results.reportService = {
+        success: !!reportServicePDF,
+        size: reportServicePDF ? reportServicePDF.length : 0,
+        service: 'reportService.js'
+      };
+    } catch (error) {
+      results.reportService.error = error.message;
+    }
+
+    // Test pdfService.js
+    try {
+      const pdfServiceResult = await generatePDFReport({
+        clientId: clientInfo.id,
+        clientName: clientInfo.name,
+        startDate: testStartDate,
+        endDate: testEndDate
+      });
+      results.pdfService = {
+        success: pdfServiceResult.success,
+        size: pdfServiceResult.pdfBuffer ? pdfServiceResult.pdfBuffer.length : 0,
+        service: 'pdfService.js',
+        metadata: pdfServiceResult.metadata
+      };
+    } catch (error) {
+      results.pdfService.error = error.message;
+    }
+
+    res.json({
+      success: true,
+      client: {
+        id: clientInfo.id,
+        name: clientInfo.name
+      },
+      period: {
+        startDate: testStartDate,
+        endDate: testEndDate
+      },
+      pdfServices: results,
+      recommendations: [
+        results.reportService.success ? "✅ reportService.js is working" : "❌ reportService.js failed",
+        results.pdfService.success ? "✅ pdfService.js is working" : "❌ pdfService.js failed",
+        "Use /api/reports/weekly/pdf for weekly reports",
+        "Use /api/reports/dashboard-pdf for dashboard reports",
+        "Use /api/reports/comprehensive-pdf?type=dashboard for comprehensive reports"
+      ],
+      endpoints: {
+        weeklyReport: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
+        dashboardPDF: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
+        comprehensivePDF: `/api/reports/comprehensive-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}&type=dashboard`
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Test PDF Services Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Test failed",
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 };
@@ -569,6 +860,11 @@ export const testReportData = async (req, res) => {
         overallPerformance: reportData.metadata?.overallPerformance,
         dataSource: reportData.metadata?.dataSource || 'Database',
         dataQuality: reportData.metadata?.dataQuality || {}
+      },
+      pdfServices: {
+        available: true,
+        reportService: "Weekly Patrol Report",
+        pdfService: "Dashboard with Incidents"
       }
     };
 
@@ -602,6 +898,11 @@ export const testReportData = async (req, res) => {
       period: { startDate: testStartDate, endDate: testEndDate },
       analysis,
       recommendations,
+      pdfEndpoints: {
+        weekly: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
+        dashboard: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
+        test: `/api/reports/test-pdf-services?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`
+      },
       notes: "Using synchronized data model with API/Database integration"
     });
 
@@ -617,7 +918,7 @@ export const testReportData = async (req, res) => {
 };
 
 /**
- * 🧪 Test PDF generation
+ * 🧪 Test report generation
  */
 export const testReportGeneration = async (req, res) => {
   try {
@@ -653,25 +954,49 @@ export const testReportGeneration = async (req, res) => {
       testEndDate
     );
 
-    // Test PDF generation
-    let pdfTest = { success: false, message: "Not attempted" };
+    // Test both PDF services
+    let pdfTestReport = { success: false, message: "Not attempted" };
+    let pdfTestDashboard = { success: false, message: "Not attempted" };
+    
     try {
       const pdfBuffer = await generateWeeklyReportPDF(
         clientInfo.id,
         testStartDate,
         testEndDate
       );
-      pdfTest = {
+      pdfTestReport = {
         success: !!pdfBuffer,
         message: pdfBuffer ? "PDF generated successfully" : "No data for PDF generation",
         size: pdfBuffer ? pdfBuffer.length : 0,
-        service: 'reportService.js (synchronized)'
+        service: 'reportService.js (weekly report)'
       };
     } catch (pdfError) {
-      pdfTest = {
+      pdfTestReport = {
         success: false,
         message: pdfError.message,
-        service: 'reportService.js (synchronized)'
+        service: 'reportService.js'
+      };
+    }
+
+    try {
+      const pdfResult = await generatePDFReport({
+        clientId: clientInfo.id,
+        clientName: clientInfo.name,
+        startDate: testStartDate,
+        endDate: testEndDate
+      });
+      pdfTestDashboard = {
+        success: pdfResult.success,
+        message: pdfResult.success ? "Dashboard PDF generated" : "Dashboard PDF failed",
+        size: pdfResult.pdfBuffer ? pdfResult.pdfBuffer.length : 0,
+        service: 'pdfService.js (dashboard)',
+        metadata: pdfResult.metadata
+      };
+    } catch (pdfError) {
+      pdfTestDashboard = {
+        success: false,
+        message: pdfError.message,
+        service: 'pdfService.js'
       };
     }
 
@@ -679,8 +1004,11 @@ export const testReportGeneration = async (req, res) => {
     if (reportData.posts?.length === 0) {
       recommendations.push("⚠️ No data found for the specified period");
     }
-    if (!pdfTest.success) {
-      recommendations.push("❌ PDF generation failed");
+    if (!pdfTestReport.success) {
+      recommendations.push("❌ Weekly PDF generation failed");
+    }
+    if (!pdfTestDashboard.success) {
+      recommendations.push("❌ Dashboard PDF generation failed");
     }
     
     if (reportData.metadata.success !== false) {
@@ -688,7 +1016,7 @@ export const testReportGeneration = async (req, res) => {
     }
     
     if (recommendations.length === 0) {
-      recommendations.push("✅ All tests passed");
+      recommendations.push("✅ All tests passed - both PDF services working");
     }
 
     res.json({
@@ -710,7 +1038,10 @@ export const testReportGeneration = async (req, res) => {
           dataQuality: reportData.metadata.dataQuality,
           dataSource: reportData.metadata.dataSource || 'Database'
         },
-        pdfGeneration: pdfTest,
+        pdfGeneration: {
+          reportService: pdfTestReport,
+          pdfService: pdfTestDashboard
+        },
         recommendations
       }
     });
@@ -803,12 +1134,19 @@ export const getComprehensiveClientReport = async (req, res) => {
       });
     }
 
-    // Test PDF generation
-    const pdfBuffer = await generateWeeklyReportPDF(
+    // Test both PDF services
+    const reportServicePDF = await generateWeeklyReportPDF(
       clientInfo.id,
       startDateStr,
       endDateStr
     );
+
+    const pdfServiceResult = await generatePDFReport({
+      clientId: clientInfo.id,
+      clientName: clientInfo.name,
+      startDate: startDateStr,
+      endDate: endDateStr
+    });
 
     res.json({
       success: true,
@@ -842,9 +1180,25 @@ export const getComprehensiveClientReport = async (req, res) => {
         dataQuality: reportData.metadata.dataQuality,
         dataSource: reportData.metadata.dataSource || 'Database'
       },
-      pdfAvailable: !!pdfBuffer,
-      pdfSize: pdfBuffer ? pdfBuffer.length : 0,
-      pdfService: 'reportService.js (synchronized)',
+      pdfServices: {
+        reportService: {
+          available: !!reportServicePDF,
+          size: reportServicePDF ? reportServicePDF.length : 0,
+          endpoint: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}`,
+          description: "Weekly Patrol Report"
+        },
+        pdfService: {
+          available: pdfServiceResult.success,
+          size: pdfServiceResult.pdfBuffer ? pdfServiceResult.pdfBuffer.length : 0,
+          endpoint: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}`,
+          description: "Dashboard Report with Incidents",
+          metadata: pdfServiceResult.metadata
+        },
+        comprehensive: {
+          endpoint: `/api/reports/comprehensive-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}&type=dashboard`,
+          description: "Choose between dashboard or weekly report"
+        }
+      },
       timestamp: new Date().toISOString()
     });
 
@@ -946,6 +1300,13 @@ export const getClientPerformanceTrends = async (req, res) => {
           parseFloat(month.performanceRate) < parseFloat(worst.performanceRate) ? month : trends[0]
         )
       },
+      pdfServices: {
+        available: true,
+        endpoints: {
+          monthlyReport: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${trends[0]?.period.split(' to ')[0]}&endDate=${trends[trends.length - 1]?.period.split(' to ')[1]}`,
+          dashboardReport: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${trends[0]?.period.split(' to ')[0]}&endDate=${trends[trends.length - 1]?.period.split(' to ')[1]}`
+        }
+      },
       timestamp: new Date().toISOString()
     });
 
@@ -973,6 +1334,15 @@ export const getAllClientsList = async (req, res) => {
         id: client.id,
         name: client.name
       })),
+      pdfServicesInfo: {
+        reportService: "Weekly patrol report PDF",
+        pdfService: "Dashboard report with incidents PDF",
+        endpoints: {
+          weeklyPDF: "/api/reports/weekly/pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
+          dashboardPDF: "/api/reports/dashboard-pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
+          comprehensivePDF: "/api/reports/comprehensive-pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&type=dashboard"
+        }
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1015,6 +1385,10 @@ export const searchClients = async (req, res) => {
       success: true,
       count: result.recordset.length,
       clients: result.recordset,
+      pdfServices: {
+        note: "Use client names with /api/reports/weekly/pdf or /api/reports/dashboard-pdf endpoints",
+        example: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(query)}&startDate=2024-01-01&endDate=2024-01-08`
+      },
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1083,13 +1457,21 @@ export const debugPerformanceCalc = async (req, res) => {
         report: r.report.substring(0, 100) + '...'
       })),
       dataQuality: reportData.metadata.dataQuality,
-      dataSource: reportData.metadata.dataSource || 'Database'
+      dataSource: reportData.metadata.dataSource || 'Database',
+      pdfServices: {
+        reportService: "Generates weekly patrol reports",
+        pdfService: "Generates dashboard reports with incidents",
+        endpoints: {
+          weekly: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDate}&endDate=${endDate}`,
+          dashboard: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDate}&endDate=${endDate}`
+        }
+      }
     };
     
     res.json({ 
       success: true, 
       debug,
-      notes: "Using synchronized data model with unified calculations"
+      notes: "Using synchronized data model with unified calculations and dual PDF services"
     });
   } catch (error) {
     res.status(500).json({ 
@@ -1116,29 +1498,30 @@ export const healthCheck = async (req, res) => {
     
     res.json({
       success: true,
-      message: "Report controller is healthy - FULLY SYNCHRONIZED ✅",
+      message: "Report controller is healthy - DUAL PDF SERVICES ✅",
       timestamp: new Date().toISOString(),
       database: "Connected",
       services: {
-        pdfService: "reportService.js (synchronized)",
+        pdfService: "reportService.js (weekly reports)",
+        pdfService2: "pdfService.js (dashboard reports)",
         dataModel: "reportModel.js (synchronized)",
         dataFetch: testData.metadata.success ? "Working" : "Failed"
       },
+      pdfServices: {
+        reportService: "Weekly patrol report generation",
+        pdfService: "Dashboard report with incident details",
+        endpoints: {
+          weeklyPDF: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
+          dashboardPDF: "/api/reports/dashboard-pdf?clientName=X&startDate=Y&endDate=Z",
+          comprehensivePDF: "/api/reports/comprehensive-pdf?clientName=X&startDate=Y&endDate=Z&type=dashboard",
+          testPDF: "/api/reports/test-pdf-services?clientName=X&startDate=Y&endDate=Z"
+        }
+      },
       synchronization: {
-        dataFlow: "Controller → reportModel.js → API/Database → reportService.js → PDF",
+        dataFlow: "Controller → reportModel.js → API/Database → reportService.js/pdfService.js → PDF",
         consistency: "All modules use same data source and calculations",
         apiIntegration: process.env.USE_BMSECURITY_API === 'true' ? "Enabled" : "Disabled",
         fallback: "Automatic database fallback if API fails"
-      },
-      endpoints: {
-        pdf: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
-        patrol: "/api/reports/patrol?client=X&startDate=Y&endDate=Z",
-        test: "/api/reports/test?clientName=X&startDate=Y&endDate=Z",
-        debug: "/api/reports/debug?clientName=X&startDate=Y&endDate=Z",
-        health: "/api/reports/health",
-        clients: "/api/reports/clients",
-        search: "/api/reports/clients/search?query=X",
-        trends: "/api/reports/trends/:clientName?months=6"
       }
     });
   } catch (error) {
@@ -1186,6 +1569,8 @@ export {
 export default {
   // Main endpoints
   getWeeklyReportPDF,
+  getDashboardPDF,          // NEW: PDF Service endpoint
+  getComprehensivePDF,      // NEW: Comprehensive PDF with choice
   getPatrolReport,
   getWeeklyReport,
   getClientShifts,
@@ -1193,6 +1578,7 @@ export default {
   // Testing endpoints
   testReportData,
   testReportGeneration,
+  testPDFServices,          // NEW: Test both PDF services
   
   // Client endpoints
   getComprehensiveClientReport,

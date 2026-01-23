@@ -203,7 +203,7 @@ export default function AdminDashboard() {
 
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0" />
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
             <p className="text-red-800">{error}</p>
             <button 
               onClick={() => setError(null)}

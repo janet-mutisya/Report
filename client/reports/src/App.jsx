@@ -201,12 +201,12 @@ function Sidebar() {
                     </Link>
 
                     <Link
-                      to="/patrol-schedule"
+                      to="/patrol-schedules"
                       onClick={() => setSidebarOpen(false)}
                       className="flex items-center gap-3 text-white hover:bg-white/20 px-3 py-3 rounded-lg transition-colors"
                     >
                       <MapPin className="w-5 h-5 flex-shrink-0" />
-                      <span className="font-medium">Patrol Schedule</span>
+                      <span className="font-medium">Patrol Schedules</span>
                     </Link>
 
                     <Link
@@ -335,7 +335,7 @@ function App() {
               />
               
               <Route 
-                path="/patrol-schedule" 
+                path="/patrol-schedules" 
                 element={
                   <ProtectedRoute allowedRoles={['admin']}>
                     <PatrolScheduleManager />

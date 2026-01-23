@@ -12,34 +12,58 @@ export default function BackupSyncDashboard() {
   const [canUpload, setCanUpload] = useState(true);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [serverReachable, setServerReachable] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
   useEffect(() => {
     const fetchUploadHistory = async () => {
       if (!navigator.onLine) {
+        console.log("No internet connection, skipping history fetch");
         return;
       }
 
+      setLoadingHistory(true);
       try {
+        console.log("Fetching upload history from:", `${API_BASE}/backup/history`);
         const res = await fetch(`${API_BASE}/backup/history`);
         
         if (!res.ok) {
+          console.error(`Server responded with status: ${res.status} ${res.statusText}`);
           setServerReachable(false);
+          setUploadHistory([]);
           return;
         }
         
         const data = await res.json();
+        console.log("History API response:", data);
+        
         if (data.success) {
-          setUploadHistory(data.history);
-          setCanUpload(data.history.length === 0);
+          // FIXED: The API returns 'data' not 'history'
+          const historyData = data.data || data.history;
+          
+          // Check if history exists and is an array
+          if (historyData && Array.isArray(historyData)) {
+            setUploadHistory(historyData);
+            setCanUpload(historyData.length === 0);
+          } else {
+            console.warn("History is not an array or is missing:", historyData);
+            setUploadHistory([]);
+            setCanUpload(true);
+          }
           setServerReachable(true);
         } else {
-          setServerReachable(true); // Server responded, even if no data
+          console.warn("API returned success: false", data);
+          setUploadHistory([]);
+          setCanUpload(true);
+          setServerReachable(true);
         }
       } catch (err) {
         console.error("Failed to fetch upload history:", err);
         setServerReachable(false);
+        setUploadHistory([]);
+      } finally {
+        setLoadingHistory(false);
       }
     };
 
@@ -73,7 +97,7 @@ export default function BackupSyncDashboard() {
 
     setDeleting(id);
     try {
-      const res = await fetch(`${API_BASE}/api/backup/history/${id}`, {
+      const res = await fetch(`${API_BASE}/backup/history/${id}`, {
         method: "DELETE",
       });
 
@@ -160,7 +184,7 @@ export default function BackupSyncDashboard() {
     formData.append("file", file);
 
     try {
-      const res = await fetch(`${API_BASE}/api/backup/sync`, {
+      const res = await fetch(`${API_BASE}/backup/sync`, {
         method: "POST",
         body: formData,
       });
@@ -178,11 +202,15 @@ export default function BackupSyncDashboard() {
         
         // Refresh history
         try {
-          const historyRes = await fetch(`${API_BASE}/api/backup/history`);
+          const historyRes = await fetch(`${API_BASE}/backup/history`);
           const historyData = await historyRes.json();
           if (historyData.success) {
-            setUploadHistory(historyData.history);
-            setCanUpload(historyData.history.length === 0);
+            // FIXED: The API returns 'data' not 'history'
+            const refreshedHistory = historyData.data || historyData.history;
+            if (refreshedHistory && Array.isArray(refreshedHistory)) {
+              setUploadHistory(refreshedHistory);
+              setCanUpload(refreshedHistory.length === 0);
+            }
           }
         } catch (err) {
           console.error("Failed to refresh data:", err);
@@ -209,11 +237,14 @@ export default function BackupSyncDashboard() {
 
   const isSystemAvailable = isOnline && serverReachable;
 
+  // Safe check for history length
+  const hasUploadHistory = Array.isArray(uploadHistory) && uploadHistory.length > 0;
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 p-4 md:p-8">
+    <div className="min-h-screen bg-linear-to-br from-slate-900 via-blue-900 to-slate-900 p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
-        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl shadow-2xl p-8 mb-8 text-white">
+        <div className="bg-linear-to-r from-blue-600 to-indigo-600 rounded-2xl shadow-2xl p-8 mb-8 text-white">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-4">
               <div className="bg-white/20 backdrop-blur-sm rounded-xl p-4">
@@ -243,11 +274,11 @@ export default function BackupSyncDashboard() {
                   )}
                 </div>
               </div>
-              {uploadHistory.length > 0 && isOnline && (
+              {hasUploadHistory && isOnline && (
                 <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20">
                   <Lock className="w-5 h-5" />
                   <span className="font-semibold text-sm">
-                    {uploadHistory.length} Active Backup
+                    {uploadHistory.length} Active Backup{uploadHistory.length !== 1 ? 's' : ''}
                   </span>
                 </div>
               )}
@@ -259,7 +290,7 @@ export default function BackupSyncDashboard() {
         {!isOnline && (
           <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-6 mb-6 shadow-lg">
             <div className="flex items-start gap-4">
-              <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
+              <XCircle className="w-6 h-6 text-red-600 shrink-0 mt-1" />
               <div className="flex-1">
                 <h3 className="text-lg font-bold text-red-900 mb-2">No Internet Connection</h3>
                 <p className="text-red-800 mb-2">
@@ -277,7 +308,7 @@ export default function BackupSyncDashboard() {
         {isOnline && !serverReachable && (
           <div className="bg-orange-50 border-l-4 border-orange-500 rounded-xl p-6 mb-6 shadow-lg">
             <div className="flex items-start gap-4">
-              <AlertCircle className="w-6 h-6 text-orange-600 flex-shrink-0 mt-1" />
+              <AlertCircle className="w-6 h-6 text-orange-600 shrink-0 mt-1" />
               <div className="flex-1">
                 <h3 className="text-lg font-bold text-orange-900 mb-2">Server Unreachable</h3>
                 <p className="text-orange-800 mb-2">
@@ -295,7 +326,7 @@ export default function BackupSyncDashboard() {
         {!canUpload && isSystemAvailable && (
           <div className="bg-amber-50 border-l-4 border-amber-500 rounded-xl p-6 mb-6 shadow-lg">
             <div className="flex items-start gap-4">
-              <Lock className="w-6 h-6 text-amber-600 flex-shrink-0 mt-1" />
+              <Lock className="w-6 h-6 text-amber-600 shrink-0 mt-1" />
               <div>
                 <h3 className="text-lg font-bold text-amber-900 mb-2">Upload Restricted</h3>
                 <p className="text-amber-800 mb-2">
@@ -372,7 +403,7 @@ export default function BackupSyncDashboard() {
             <button
               onClick={handleUpload}
               disabled={!file || uploading || !canUpload || !isSystemAvailable}
-              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl p-4 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
+              className="w-full bg-linear-to-r from-blue-600 to-indigo-600 text-white rounded-xl p-4 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed font-semibold text-lg transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-3"
             >
               {uploading ? (
                 <>
@@ -422,11 +453,11 @@ export default function BackupSyncDashboard() {
         {result && result.success && (
           <div className={`border-l-4 rounded-xl p-6 mb-6 shadow-lg ${
             result.isDelete 
-              ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-500'
-              : 'bg-gradient-to-r from-green-50 to-emerald-50 border-green-500'
+              ? 'bg-linear-to-r from-blue-50 to-indigo-50 border-blue-500'
+              : 'bg-linear-to-r from-green-50 to-emerald-50 border-green-500'
           }`}>
             <div className="flex items-start gap-4">
-              <CheckCircle className={`w-6 h-6 flex-shrink-0 mt-1 ${
+              <CheckCircle className={`w-6 h-6 shrink-0 mt-1 ${
                 result.isDelete ? 'text-blue-600' : 'text-green-600'
               }`} />
               <div className="flex-1">
@@ -476,7 +507,7 @@ export default function BackupSyncDashboard() {
         {error && (
           <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-6 mb-6 shadow-lg">
             <div className="flex items-start gap-4">
-              <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-1" />
+              <XCircle className="w-6 h-6 text-red-600 shrink-0 mt-1" />
               <div>
                 <h3 className="text-lg font-bold text-red-900 mb-2">Sync Failed</h3>
                 <p className="text-red-800">{error}</p>
@@ -485,47 +516,69 @@ export default function BackupSyncDashboard() {
           </div>
         )}
 
-        {/* Upload History */}
-        {uploadHistory.length > 0 && (
-          <div className="bg-white rounded-2xl shadow-2xl p-8">
-            <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-              <Clock className="w-6 h-6 text-blue-600" />
-              Backup History
-            </h2>
+        {/* Upload History Section */}
+        <div className="bg-white rounded-2xl shadow-2xl p-8">
+          <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+            <Clock className="w-6 h-6 text-blue-600" />
+            Backup History
+            {loadingHistory && (
+              <Loader className="w-5 h-5 text-blue-500 animate-spin ml-2" />
+            )}
+          </h2>
+          
+          {loadingHistory ? (
+            <div className="text-center py-8">
+              <Loader className="w-8 h-8 animate-spin mx-auto text-blue-500 mb-3" />
+              <p className="text-gray-600">Loading backup history...</p>
+            </div>
+          ) : hasUploadHistory ? (
             <div className="space-y-4">
               {uploadHistory.map((item) => (
                 <div
-                  key={item.id}
+                  key={item.id || `${item.filename}-${item.uploadedAt}`}
                   className="p-5 rounded-xl border-l-4 bg-green-50 border-green-500 transition-all hover:shadow-md"
                 >
                   <div className="flex items-start justify-between flex-wrap gap-4">
                     <div className="flex items-start gap-3 flex-1">
-                      <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                      <CheckCircle className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
                       <div className="flex-1">
-                        <p className="font-semibold text-gray-900 mb-1">{item.filename}</p>
+                        <p className="font-semibold text-gray-900 mb-1">{item.filename || 'Unknown File'}</p>
                         <p className="text-sm text-gray-600 mb-2">
-                          {new Date(item.uploadedAt).toLocaleString()}
+                          {item.uploadedAt ? new Date(item.uploadedAt).toLocaleString() : 'Unknown Date'}
                         </p>
                         
                         <div className="flex flex-wrap gap-3 text-xs mt-2">
-                          <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                            📊 {item.recordsMerged} merged
-                          </span>
-                          <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded">
-                            ⏭️ {item.duplicatesSkipped} skipped
-                          </span>
-                          <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
-                            💾 {item.fileSize}
-                          </span>
+                          {item.recordsMerged !== undefined && (
+                            <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                              📊 {item.recordsMerged} merged
+                            </span>
+                          )}
+                          {item.duplicatesSkipped !== undefined && (
+                            <span className="bg-amber-100 text-amber-800 px-2 py-1 rounded">
+                              ⏭️ {item.duplicatesSkipped} skipped
+                            </span>
+                          )}
+                          {item.fileSize && (
+                            <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
+                              💾 {item.fileSize}
+                            </span>
+                          )}
+                          {item.status && (
+                            <span className="bg-green-100 text-green-800 px-2 py-1 rounded">
+                              {item.status}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="px-3 py-1 rounded-full text-xs font-bold uppercase bg-green-100 text-green-800">
-                        {item.status}
-                      </span>
+                      {item.status && (
+                        <span className="px-3 py-1 rounded-full text-xs font-bold uppercase bg-green-100 text-green-800">
+                          {item.status}
+                        </span>
+                      )}
                       <button
-                        onClick={() => handleDelete(item.id, item.filename)}
+                        onClick={() => handleDelete(item.id, item.filename || 'Backup')}
                         disabled={deleting === item.id || !isSystemAvailable}
                         className="flex items-center gap-2 bg-red-600 text-white rounded-lg px-4 py-2 hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
                       >
@@ -546,13 +599,19 @@ export default function BackupSyncDashboard() {
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="text-center py-8 bg-gray-50 rounded-xl">
+              <Database className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+              <p className="text-gray-600 mb-1">No backup history found</p>
+              <p className="text-sm text-gray-500">Upload your first backup file to get started</p>
+            </div>
+          )}
+        </div>
 
         {/* Info Section */}
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-6 mt-6">
+        <div className="bg-linear-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-6 mt-6">
           <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+            <AlertCircle className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
             <div className="text-sm text-blue-800">
               <p className="font-semibold mb-3 text-base">How the Backup Sync Works:</p>
               <ol className="list-decimal list-inside space-y-2">
