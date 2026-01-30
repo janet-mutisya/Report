@@ -1,20 +1,6 @@
 // server/routes/managePatrolScheduleRoutes.js
-import express from 'express';
-import {
-  getClientPatrols,
-  getClientSchedule,
-  listAllSchedules,
-  getClientAnalytics,
-  getAllClientsWithPerformance,
-  getClientEmailPreferences,
-  updateClientEmailPreferences,
-  getDueClients,
-  updateNextRun,
-  // NEW IMPORTS
-  upsertPatrolSchedule,
-  deletePatrolSchedule,
-  getPatrolScheduleConfig
-} from '../scripts/managePatrolSchedules.js';
+const express = require('express');
+const patrolSchedules = require('../scripts/managePatrolSchedules.js');
 
 const router = express.Router();
 
@@ -30,7 +16,7 @@ const router = express.Router();
 router.get('/health', async (req, res) => {
   try {
     // Test database connection by fetching one client
-    const schedules = await listAllSchedules();
+    const schedules = await patrolSchedules.listAllSchedules();
     
     res.status(200).json({
       success: true,
@@ -60,7 +46,10 @@ router.get('/all', async (req, res) => {
   try {
     console.log('📋 Fetching all client schedules');
     
-    const schedules = await listAllSchedules();
+    // 🔥 CLEAR CACHE BEFORE FETCHING - ensures fresh data
+    patrolSchedules.clearScheduleCache();
+    
+    const schedules = await patrolSchedules.listAllSchedules();
     
     res.status(200).json({
       success: true,
@@ -90,7 +79,10 @@ router.get('/performance', async (req, res) => {
     
     console.log(`📊 Fetching performance metrics for all clients (${daysRange} days)`);
     
-    const clientsWithPerformance = await getAllClientsWithPerformance(daysRange);
+    // 🔥 CLEAR CACHE BEFORE FETCHING
+    patrolSchedules.clearScheduleCache();
+    
+    const clientsWithPerformance = await patrolSchedules.getAllClientsWithPerformance(daysRange);
     
     res.status(200).json({
       success: true,
@@ -119,7 +111,7 @@ router.get('/due', async (req, res) => {
   try {
     console.log('📅 Fetching clients due for reporting');
     
-    const dueClients = await getDueClients();
+    const dueClients = await patrolSchedules.getDueClients();
     
     res.status(200).json({
       success: true,
@@ -170,7 +162,11 @@ router.post('/:clientId', async (req, res) => {
       });
     }
     
-    const result = await upsertPatrolSchedule(parseInt(clientId), scheduleData);
+    const result = await patrolSchedules.upsertPatrolSchedule(parseInt(clientId), scheduleData);
+    
+    // 🔥 FORCE CLEAR ALL CACHE AFTER SAVING
+    patrolSchedules.clearScheduleCache(parseInt(clientId));
+    patrolSchedules.clearScheduleCache(); // Clear all to be absolutely sure
     
     if (result.success) {
       res.status(200).json({
@@ -204,7 +200,10 @@ router.get('/:clientId', async (req, res) => {
     
     console.log(`📋 Fetching patrol schedule config for client ${clientId}`);
     
-    const result = await getPatrolScheduleConfig(parseInt(clientId));
+    // 🔥 CLEAR CACHE FOR THIS CLIENT BEFORE FETCHING
+    patrolSchedules.clearScheduleCache(parseInt(clientId));
+    
+    const result = await patrolSchedules.getPatrolScheduleConfig(parseInt(clientId));
     
     if (result.success) {
       res.status(200).json({
@@ -237,7 +236,11 @@ router.delete('/:clientId', async (req, res) => {
     
     console.log(`🗑️ Deleting patrol schedule for client ${clientId}`);
     
-    const result = await deletePatrolSchedule(parseInt(clientId));
+    const result = await patrolSchedules.deletePatrolSchedule(parseInt(clientId));
+    
+    // 🔥 CLEAR CACHE AFTER DELETING
+    patrolSchedules.clearScheduleCache(parseInt(clientId));
+    patrolSchedules.clearScheduleCache(); // Clear all to be sure
     
     if (result.success) {
       res.status(200).json({
@@ -275,7 +278,7 @@ router.get('/client/:clientId/patrols', async (req, res) => {
     
     console.log(`📊 Fetching patrols for client ${clientId}, ${daysRange} days`);
     
-    const patrolData = await getClientPatrols(parseInt(clientId), daysRange);
+    const patrolData = await patrolSchedules.getClientPatrols(parseInt(clientId), daysRange);
     
     res.status(200).json({
       success: true,
@@ -301,7 +304,10 @@ router.get('/client/:clientId/schedule', async (req, res) => {
     
     console.log(`📅 Fetching schedule for client ${clientId}`);
     
-    const schedule = await getClientSchedule(parseInt(clientId));
+    // 🔥 CLEAR CACHE BEFORE FETCHING
+    patrolSchedules.clearScheduleCache(parseInt(clientId));
+    
+    const schedule = await patrolSchedules.getClientSchedule(parseInt(clientId), true); // Force refresh
     
     res.status(200).json({
       success: true,
@@ -328,7 +334,7 @@ router.get('/client/:clientId/analytics', async (req, res) => {
     
     console.log(`📈 Fetching analytics for client ${clientId}, ${daysRange} days`);
     
-    const analytics = await getClientAnalytics(parseInt(clientId), daysRange);
+    const analytics = await patrolSchedules.getClientAnalytics(parseInt(clientId), daysRange);
     
     if (!analytics) {
       return res.status(404).json({
@@ -361,7 +367,7 @@ router.get('/client/:clientId/email-preferences', async (req, res) => {
     
     console.log(`📧 Fetching email preferences for client ${clientId}`);
     
-    const preferences = await getClientEmailPreferences(parseInt(clientId));
+    const preferences = await patrolSchedules.getClientEmailPreferences(parseInt(clientId));
     
     res.status(200).json({
       success: true,
@@ -405,7 +411,7 @@ router.put('/client/:clientId/email-preferences', async (req, res) => {
       });
     }
     
-    const result = await updateClientEmailPreferences(parseInt(clientId), {
+    const result = await patrolSchedules.updateClientEmailPreferences(parseInt(clientId), {
       email,
       frequency: frequency || 1,
       intervalDays: intervalDays || 1,
@@ -457,7 +463,7 @@ router.post('/client/:clientId/update-next-run', async (req, res) => {
       });
     }
     
-    const result = await updateNextRun(
+    const result = await patrolSchedules.updateNextRun(
       parseInt(clientId),
       frequency,
       intervalDays || 1,
@@ -487,4 +493,4 @@ router.post('/client/:clientId/update-next-run', async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;

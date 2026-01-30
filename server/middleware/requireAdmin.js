@@ -1,11 +1,11 @@
 // server/middleware/requireAdmin.js
-import jwt from "jsonwebtoken";
+const jwt = require("jsonwebtoken");
 
 /**
  * Middleware to check if user is an admin
  * Must be used AFTER requireAuth middleware
  */
-export function requireAdmin(req, res, next) {
+function requireAdmin(req, res, next) {
   try {
     // Check if user exists (set by requireAuth)
     if (!req.user) {
@@ -43,7 +43,7 @@ export function requireAdmin(req, res, next) {
  * Helper function to create admin JWT token
  * Use this when creating admin accounts
  */
-export function createAdminToken(adminData) {
+function createAdminToken(adminData) {
   return jwt.sign(
     {
       userId: adminData.id,
@@ -69,6 +69,13 @@ const ADMIN_EMAILS = [
 /**
  * Check if an email is an admin
  */
-export function isAdminEmail(email) {
+function isAdminEmail(email) {
   return ADMIN_EMAILS.includes(email.toLowerCase());
 }
+
+// Export functions
+module.exports = {
+  requireAdmin,
+  createAdminToken,
+  isAdminEmail
+};

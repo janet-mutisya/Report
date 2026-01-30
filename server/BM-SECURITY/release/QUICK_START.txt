@@ -1,0 +1,75 @@
+BM SECURITY GUARD REPORT SYSTEM - QUICK START
+===============================================
+
+STEP 1: EXTRACT FILES
+---------------------
+Extract all files to: C:\BMSecurity\Reports\
+Keep all files together in the same folder.
+
+IMPORTANT: DO NOT DELETE OR MOVE ANY FILES!
+- guard-report-server.exe (main program)
+- START.bat (launcher)
+- .env (configuration with credentials)
+- assets/ folder (contains logo)
+- data/ folder (clients data)
+
+STEP 2: RUN APPLICATION
+-----------------------
+Double-click: START.bat
+
+The application will:
+✓ Start automatically
+✓ Open your browser to http://localhost:5000
+✓ Include BM Security logo in PDF reports
+✓ All settings are pre-configured
+
+STEP 3: VERIFY
+--------------
+- Browser should open automatically
+- If not, manually visit: http://localhost:5000
+- Check health at: http://localhost:5000/api/health
+- Check logo at: assets/BM SECURITY LOGO.jpg exists
+
+TROUBLESHOOTING
+---------------
+✗ Port 5000 in use?
+  → Close other applications or restart computer
+
+✗ Logo not appearing in PDF reports?
+  → Ensure "assets/BM SECURITY LOGO.jpg" file exists
+  → Keep all files in same folder
+
+✗ Database connection failed?
+  → Ensure SQL Server is running
+  → Verify server is "localhost" or correct IP
+
+✗ Can't access BM Security API?
+  → Check internet connection
+  → Verify credentials are correct in .env
+
+✗ Emails not sending?
+  → Check EMAIL_USER and EMAIL_PASS in .env
+  → Ensure ENABLE_EMAIL_SENDING=true
+
+IMPORTANT NOTES
+---------------
+- Database: localhost, _Datos database
+- API URL: https://bmsecurity.ultrasecuritysolution.com
+- Email: alerts@bmsecurity.com (Office 365)
+- Timezone: Africa/Nairobi
+- Logo: assets/BM SECURITY LOGO.jpg
+- All credentials are pre-configured
+
+LOGO LOCATIONS CHECKED BY THE SYSTEM:
+-------------------------------------
+1. assets/BM SECURITY LOGO.jpg (primary)
+2. server/assets/BM SECURITY LOGO.jpg
+3. ./assets/BM SECURITY LOGO.jpg
+4. process.cwd()/assets/BM SECURITY LOGO.jpg
+
+SUPPORT
+-------
+For issues, contact your system administrator.
+
+Version: 3.0.0
+Build Date: 2026-01-29

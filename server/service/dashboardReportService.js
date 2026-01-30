@@ -1,17 +1,17 @@
 // server/service/dashboardReportService.js - FIXED VERSION WITH CORRECT CALCULATIONS
-import { fetchWeeklyReport } from '../models/reportModel.js'; 
-import { sql, poolPromise } from "../config/database.js";
-import pdfService from './pdfService.js';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const { fetchWeeklyReport } = require('../models/reportModel.js'); 
+const { sql, poolPromise } = require("../config/database.js");
+const pdfService = require('./pdfService.js');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 // Enable timezone support
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
 // Import patrol schedule management functions
-import patrolScheduleService from '../scripts/managePatrolSchedules.js';
+const patrolScheduleService = require('../scripts/managePatrolSchedules.js');
 
 // Configuration
 const WEEKLY_DEFAULT_DAYS = 7;  // IMPORTANT: This is 7, not 8
@@ -123,7 +123,7 @@ function countActualPatrols(events = []) {
 /**
  * Clear all caches
  */
-export const clearAllCaches = () => {
+const clearAllCaches = () => {
   const accountSize = accountCache.size;
   const reportSize = reportCache.size;
   const scheduleSize = scheduleCache.size;
@@ -148,7 +148,7 @@ export const clearAllCaches = () => {
 /**
  * Get cache statistics
  */
-export const getCacheStats = () => {
+const getCacheStats = () => {
   const now = Date.now();
   
   const accountStats = Array.from(accountCache.entries()).map(([key, value]) => ({
@@ -1049,7 +1049,7 @@ function generateDashboardSummary(reportData, accountNumber, reportType = REPORT
 /**
  * Get dashboard summary with patrol schedule integration - FIXED VERSION
  */
-export const getDashboardSummary = async ({ 
+const getDashboardSummary = async ({ 
   clientId, 
   startDate, 
   endDate, 
@@ -1221,7 +1221,7 @@ export const getDashboardSummary = async ({
 /**
  * Get dashboard patrol events
  */
-export const getDashboardPatrolEvents = async ({ 
+const getDashboardPatrolEvents = async ({ 
   clientId, 
   startDate, 
   endDate, 
@@ -1311,7 +1311,7 @@ export const getDashboardPatrolEvents = async ({
 /**
  * Get client patrol schedule details
  */
-export const getClientPatrolSchedule = async (clientId) => {
+const getClientPatrolSchedule = async (clientId) => {
   try {
     const resolution = await resolveClientId(clientId);
     if (!resolution.success) {
@@ -1376,7 +1376,7 @@ export const getClientPatrolSchedule = async (clientId) => {
 /**
  * Get patrol compliance analysis - USING PDF SERVICE CALCULATIONS
  */
-export const getPatrolCompliance = async (clientId, startDate, endDate) => {
+const getPatrolCompliance = async (clientId, startDate, endDate) => {
   try {
     const resolution = await resolveClientId(clientId);
     if (!resolution.success) {
@@ -1497,7 +1497,7 @@ function generateComplianceRecommendations(complianceRate, actualPatrols, expect
 
 // ========== PRESET REPORT FUNCTIONS ==========
 
-export const getWeeklySummary = async (clientId) => {
+const getWeeklySummary = async (clientId) => {
   const dateRange = generateDateRangeForReportType(REPORT_TYPES.WEEKLY);
   return await getDashboardSummary({
     clientId,
@@ -1508,7 +1508,7 @@ export const getWeeklySummary = async (clientId) => {
   });
 };
 
-export const getLast30DaysSummary = async (clientId) => {
+const getLast30DaysSummary = async (clientId) => {
   const dateRange = generateDateRangeForReportType(REPORT_TYPES.LAST30);
   return await getDashboardSummary({
     clientId,
@@ -1519,11 +1519,11 @@ export const getLast30DaysSummary = async (clientId) => {
   });
 };
 
-export const getLast7DaysSummary = async (clientId) => {
+const getLast7DaysSummary = async (clientId) => {
   return await getWeeklySummary(clientId);
 };
 
-export const getDailySummary = async (clientId) => {
+const getDailySummary = async (clientId) => {
   const dateRange = generateDateRangeForReportType(REPORT_TYPES.DAILY);
   return await getDashboardSummary({
     clientId,
@@ -1534,7 +1534,7 @@ export const getDailySummary = async (clientId) => {
   });
 };
 
-export const getCustomRangeSummary = async (clientId, startDate, endDate) => {
+const getCustomRangeSummary = async (clientId, startDate, endDate) => {
   return await getDashboardSummary({
     clientId,
     startDate,
@@ -1544,13 +1544,13 @@ export const getCustomRangeSummary = async (clientId, startDate, endDate) => {
   });
 };
 
-export const getMonthlySummary = async (clientId) => {
+const getMonthlySummary = async (clientId) => {
   return await getLast30DaysSummary(clientId);
 };
 
 // ========== PDF GENERATION ==========
 
-export const generateDashboardPDF = async ({ 
+const generateDashboardPDF = async ({ 
   clientId, 
   startDate, 
   endDate, 
@@ -1631,7 +1631,7 @@ export const generateDashboardPDF = async ({
 
 // ========== UTILITY FUNCTIONS ==========
 
-export const warmupCache = async (clientId, reportType = REPORT_TYPES.WEEKLY) => {
+const warmupCache = async (clientId, reportType = REPORT_TYPES.WEEKLY) => {
   try {
     console.log(`[Dashboard] Warming up cache for ${clientId} (${reportType})...`);
     
@@ -1671,7 +1671,7 @@ export const warmupCache = async (clientId, reportType = REPORT_TYPES.WEEKLY) =>
   }
 };
 
-export const getAvailableReportTypes = () => {
+const getAvailableReportTypes = () => {
   return {
     reportTypes: REPORT_TYPES,
     defaults: {
@@ -1692,7 +1692,7 @@ export const getAvailableReportTypes = () => {
 
 // ========== DEFAULT EXPORT ==========
 
-export default {
+module.exports = {
   // Main functions
   getDashboardPatrolEvents,
   getDashboardSummary,

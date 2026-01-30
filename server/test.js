@@ -1,5 +1,5 @@
-import fs from 'fs';
-import { generateWeeklyReportPDF } from './service/reportService.js'; // Adjust path
+const fs = require('fs');
+const { generateWeeklyReportPDF } = require('./service/reportService.js'); // Adjust path
 
 async function test() {
   const clientName = 'BM HQ'; // Pick a client you know has data

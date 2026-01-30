@@ -1,17 +1,9 @@
 // server/routes/auth.js - FIXED: Role from database + Confidence-based account linking
-import express from "express";
-import jwt from "jsonwebtoken";
-import {
-  createClient,
-  validateClientLogin,
-  getClientById,
-  linkAccountNumber
-} from "../service/clientStorage.js";
-import {
-  discoverAccountNumber,
-  validateAccountNumber
-} from "../service/accountDiscovery.js";
-import { requireAuth } from "../middleware/requireAuth.js";
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const clientStorage = require("../service/clientStorage.js");
+const accountDiscovery = require("../service/accountDiscovery.js");
+const { requireAuth } = require("../middleware/requireAuth.js"); // ✅ Fixed import
 
 const router = express.Router();
 
@@ -49,7 +41,7 @@ router.post("/signup", async (req, res) => {
     }
 
     // Create client account (accountNumber = null initially)
-    const createResult = await createClient({
+    const createResult = await clientStorage.createClient({
       email,
       password,
       companyName
@@ -67,13 +59,13 @@ router.post("/signup", async (req, res) => {
     // 🔥 AUTOMATIC ACCOUNT DISCOVERY
     console.log(`\n🎯 Starting auto-discovery for new user: ${email}`);
     
-    const discoveryResult = await discoverAccountNumber(email, companyName);
+    const discoveryResult = await accountDiscovery.discoverAccountNumber(email, companyName);
 
     if (discoveryResult) {
       console.log(`✅ Account discovered: ${discoveryResult.accountNumber} (${discoveryResult.confidence} confidence)`);
 
       // Validate the discovered account
-      const validationResult = await validateAccountNumber(discoveryResult.accountNumber);
+      const validationResult = await accountDiscovery.validateAccountNumber(discoveryResult.accountNumber);
 
       // 🔴 FIX #3: ENFORCE CONFIDENCE RULES
       // Only auto-link if confidence is "very_high" or "high"
@@ -84,7 +76,7 @@ router.post("/signup", async (req, res) => {
         console.log(`✅ Confidence level acceptable (${discoveryResult.confidence}), proceeding with auto-link`);
 
         // Link account number to client
-        const linkResult = await linkAccountNumber(
+        const linkResult = await clientStorage.linkAccountNumber(
           client.id,
           validationResult.normalizedAccountNumber
         );
@@ -93,7 +85,7 @@ router.post("/signup", async (req, res) => {
           console.log(`✅ Account linked automatically!\n`);
 
           // Get updated client with role
-          const updatedClient = await getClientById(client.id);
+          const updatedClient = await clientStorage.getClientById(client.id);
 
           // Generate JWT with account number and role from database
           const token = jwt.sign(
@@ -190,7 +182,7 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const validation = await validateClientLogin(email, password);
+    const validation = await clientStorage.validateClientLogin(email, password);
 
     if (!validation.valid) {
       return res.status(401).json({
@@ -205,10 +197,10 @@ router.post("/login", async (req, res) => {
     if (client.status === "pending_link" && !client.accountNumber) {
       console.log(`\n🎯 Retrying auto-discovery for: ${email}`);
 
-      const discoveryResult = await discoverAccountNumber(email, client.companyName);
+      const discoveryResult = await accountDiscovery.discoverAccountNumber(email, client.companyName);
 
       if (discoveryResult) {
-        const validationResult = await validateAccountNumber(discoveryResult.accountNumber);
+        const validationResult = await accountDiscovery.validateAccountNumber(discoveryResult.accountNumber);
 
         // 🔴 FIX #3: ENFORCE CONFIDENCE RULES
         if (
@@ -217,7 +209,7 @@ router.post("/login", async (req, res) => {
         ) {
           console.log(`✅ Confidence level acceptable (${discoveryResult.confidence}), linking account`);
 
-          const linkResult = await linkAccountNumber(
+          const linkResult = await clientStorage.linkAccountNumber(
             client.id,
             validationResult.normalizedAccountNumber
           );
@@ -233,7 +225,7 @@ router.post("/login", async (req, res) => {
     }
 
     // Get fresh client data to ensure we have the latest role
-    const freshClient = await getClientById(client.id);
+    const freshClient = await clientStorage.getClientById(client.id);
 
     // Generate JWT with role from database
     const token = jwt.sign(
@@ -316,7 +308,7 @@ router.post("/verify", (req, res) => {
  */
 router.get("/me", requireAuth, async (req, res) => {
   try {
-    const client = await getClientById(req.user.userId);
+    const client = await clientStorage.getClientById(req.user.userId);
 
     if (!client) {
       return res.status(404).json({
@@ -344,7 +336,7 @@ router.get("/me", requireAuth, async (req, res) => {
  */
 router.post("/retry-discovery", requireAuth, async (req, res) => {
   try {
-    const client = await getClientById(req.user.userId);
+    const client = await clientStorage.getClientById(req.user.userId);
 
     if (!client) {
       return res.status(404).json({
@@ -363,7 +355,7 @@ router.post("/retry-discovery", requireAuth, async (req, res) => {
 
     console.log(`\n🎯 Manual discovery retry for: ${client.email}`);
 
-    const discoveryResult = await discoverAccountNumber(client.email, client.companyName);
+    const discoveryResult = await accountDiscovery.discoverAccountNumber(client.email, client.companyName);
 
     if (!discoveryResult) {
       return res.json({
@@ -372,7 +364,7 @@ router.post("/retry-discovery", requireAuth, async (req, res) => {
       });
     }
 
-    const validationResult = await validateAccountNumber(discoveryResult.accountNumber);
+    const validationResult = await accountDiscovery.validateAccountNumber(discoveryResult.accountNumber);
 
     if (!validationResult.valid) {
       return res.json({
@@ -392,7 +384,7 @@ router.post("/retry-discovery", requireAuth, async (req, res) => {
       });
     }
 
-    const linkResult = await linkAccountNumber(
+    const linkResult = await clientStorage.linkAccountNumber(
       client.id,
       validationResult.normalizedAccountNumber
     );
@@ -405,7 +397,7 @@ router.post("/retry-discovery", requireAuth, async (req, res) => {
     }
 
     // Get updated client with role
-    const updatedClient = await getClientById(client.id);
+    const updatedClient = await clientStorage.getClientById(client.id);
 
     // Generate new token with account number and role from database
     const token = jwt.sign(
@@ -462,7 +454,7 @@ router.post("/change-password", requireAuth, async (req, res) => {
     }
 
     // Validate current password
-    const validation = await validateClientLogin(req.user.email, currentPassword);
+    const validation = await clientStorage.validateClientLogin(req.user.email, currentPassword);
 
     if (!validation.valid) {
       return res.status(401).json({
@@ -471,8 +463,17 @@ router.post("/change-password", requireAuth, async (req, res) => {
       });
     }
 
-    // Update password (Note: readClients and writeClients should be imported if needed)
-    // This section might need adjustment based on your clientStorage implementation
+    // Update password
+    // Note: This depends on your clientStorage implementation
+    // You might need to add a method like clientStorage.updatePassword()
+    const updateResult = await clientStorage.updatePassword(req.user.userId, newPassword);
+
+    if (!updateResult.success) {
+      return res.status(400).json({
+        success: false,
+        message: updateResult.error || "Failed to update password"
+      });
+    }
 
     res.json({
       success: true,
@@ -499,4 +500,4 @@ router.post("/logout", (req, res) => {
   });
 });
 
-export default router;
+module.exports = router;

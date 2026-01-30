@@ -1,5 +1,5 @@
 // server/service/accountDiscovery.js
-import bmSecurityAPI from "./bmSecurityAPI.js";
+const bmSecurityAPI = require("./bmSecurityAPI.js");
 
 /**
  * 🚀 OPTIMIZED ACCOUNT DISCOVERY ENGINE
@@ -191,7 +191,7 @@ function findByKeywords(companyName, allAccounts) {
  * 🚀 MAIN DISCOVERY FUNCTION - OPTIMIZED
  * Fetches all accounts ONCE, then runs all strategies in memory
  */
-export async function discoverAccountNumber(email, companyName) {
+async function discoverAccountNumber(email, companyName) {
   const startTime = Date.now();
   
   console.log(`\n🔍 Starting optimized account discovery...`);
@@ -275,7 +275,7 @@ export async function discoverAccountNumber(email, companyName) {
 /**
  * Validates discovered account number
  */
-export async function validateAccountNumber(accountNumber) {
+async function validateAccountNumber(accountNumber) {
   try {
     console.log(`[Validation] Checking account: ${accountNumber}`);
 
@@ -299,3 +299,8 @@ export async function validateAccountNumber(accountNumber) {
     return { valid: false, error: error.message };
   }
 }
+
+module.exports = {
+  discoverAccountNumber,
+  validateAccountNumber
+};

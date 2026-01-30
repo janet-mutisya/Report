@@ -10,7 +10,7 @@
  *   const accountNumber = req.user.apiClientAccount;
  * });
  */
-export function requireLinkedAccount(req, res, next) {
+function requireLinkedAccount(req, res, next) {
   // Ensure requireAuth was called first
   if (!req.user) {
     return res.status(401).json({
@@ -53,7 +53,7 @@ export function requireLinkedAccount(req, res, next) {
  *   // Works for both active and pending accounts
  * });
  */
-export function allowPending(req, res, next) {
+function allowPending(req, res, next) {
   if (!req.user) {
     return res.status(401).json({
       success: false,
@@ -74,3 +74,9 @@ export function allowPending(req, res, next) {
 
   next();
 }
+
+// Export functions
+module.exports = {
+  requireLinkedAccount,
+  allowPending
+};

@@ -1,8 +1,8 @@
 // server/service/bmSecurityAPICache.js - PRODUCTION READY (OPTIMIZED)
-import bmSecurityAPI from './bmSecurityAPI.js';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const bmSecurityAPI = require('./bmSecurityAPI.js');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 // Setup dayjs with timezone
 dayjs.extend(utc);
@@ -130,7 +130,7 @@ async function throttledGetPatrolEvents(accountNumber, startDate, endDate) {
   );
 }
 
-export async function getCachedPatrolEvents(clientId, startDate, endDate, accountNumber = null) {
+async function getCachedPatrolEvents(clientId, startDate, endDate, accountNumber = null) {
   cacheMetrics.total++;
   
   // ✅ FIX #1: Use normalized dates
@@ -332,7 +332,7 @@ async function performSilentRefresh(clientId, startDate, endDate, accountNumber)
   }
 }
 
-export async function smartWarmup(clientId, accountNumber = null) {
+async function smartWarmup(clientId, accountNumber = null) {
   console.log(`[API Cache] 🔥 Smart warmup for client ${clientId}...`);
   
   const today = new Date();
@@ -373,7 +373,7 @@ export async function smartWarmup(clientId, accountNumber = null) {
   };
 }
 
-export async function warmupDateRange(clientId, startDate, endDate, accountNumber = null) {
+async function warmupDateRange(clientId, startDate, endDate, accountNumber = null) {
   console.log(`[API Cache] 🔥 Warming range: ${startDate} → ${endDate} for client ${clientId}`);
   try {
     await getCachedPatrolEvents(clientId, startDate, endDate, accountNumber);
@@ -384,7 +384,7 @@ export async function warmupDateRange(clientId, startDate, endDate, accountNumbe
   }
 }
 
-export function clearAPICache() {
+function clearAPICache() {
   const rawSize = rawAPICache.size;
   const processedSize = processedCache.size;
   
@@ -413,7 +413,7 @@ export function clearAPICache() {
   };
 }
 
-export function getAPICacheStats() {
+function getAPICacheStats() {
   const now = Date.now();
   
   const rawEntries = Array.from(rawAPICache.entries()).map(([key, value]) => ({
@@ -466,7 +466,7 @@ export function getAPICacheStats() {
 }
 
 // ✅ FIX #1 & #2: Use normalized dates in forceRefresh
-export async function forceRefresh(clientId, startDate, endDate, accountNumber = null) {
+async function forceRefresh(clientId, startDate, endDate, accountNumber = null) {
   console.log(`[API Cache] 🔄 Force refresh: ${clientId}`);
   
   const normalizedStart = normalizeDate(startDate);
@@ -488,7 +488,7 @@ export async function forceRefresh(clientId, startDate, endDate, accountNumber =
 }
 
 // ✅ Multi-tenant isolation helper
-export function clearClientCache(clientId) {
+function clearClientCache(clientId) {
   let cleared = 0;
   
   for (const [key] of processedCache.entries()) {
@@ -503,7 +503,7 @@ export function clearClientCache(clientId) {
 }
 
 // ✅ Health check
-export async function healthCheck() {
+async function healthCheck() {
   return {
     status: 'healthy',
     cacheStats: getAPICacheStats(),
@@ -548,7 +548,7 @@ function cleanupExpiredCache() {
 // Run cleanup every 5 minutes
 setInterval(cleanupExpiredCache, 5 * 60 * 1000);
 
-export default {
+module.exports = {
   getCachedPatrolEvents,
   smartWarmup,
   warmupDateRange,

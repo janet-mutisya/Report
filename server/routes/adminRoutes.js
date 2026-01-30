@@ -1,16 +1,10 @@
-//routes for manual account linking
-import express from "express";
-import { requireAuth } from "../middleware/requireAuth.js";
-import { requireAdmin } from "../middleware/requireAdmin.js";
-import {
-  getAllClients,
-  getClientById,
-  linkAccountNumber,
-  unlinkAccount,
-  updateClientStatus
-} from "../service/clientStorage.js";
-import { validateAccountNumber } from "../service/accountDiscovery.js";
-import bmSecurityAPI from "../service/bmSecurityAPI.js";
+// routes for manual account linking
+const express = require("express");
+const { requireAuth } = require("../middleware/requireAuth.js");
+const { requireAdmin } = require("../middleware/requireAdmin.js");
+const clientStorage = require("../service/clientStorage.js");
+const accountDiscovery = require("../service/accountDiscovery.js");
+const bmSecurityAPI = require("../service/bmSecurityAPI.js");
 
 const router = express.Router();
 
@@ -20,7 +14,7 @@ const router = express.Router();
  */
 router.get("/clients", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const clients = await getAllClients();
+    const clients = await clientStorage.getAllClients();
 
     res.json({
       success: true,
@@ -90,7 +84,7 @@ router.post("/link-account", requireAuth, requireAdmin, async (req, res) => {
     }
 
     // Validate the account exists
-    const validationResult = await validateAccountNumber(accountNumber);
+    const validationResult = await accountDiscovery.validateAccountNumber(accountNumber);
 
     if (!validationResult.valid) {
       return res.status(400).json({
@@ -100,7 +94,7 @@ router.post("/link-account", requireAuth, requireAdmin, async (req, res) => {
     }
 
     // Link the account
-    const linkResult = await linkAccountNumber(
+    const linkResult = await clientStorage.linkAccountNumber(
       clientId,
       validationResult.normalizedAccountNumber
     );
@@ -144,7 +138,7 @@ router.post("/unlink-account", requireAuth, requireAdmin, async (req, res) => {
       });
     }
 
-    const result = await unlinkAccount(clientId);
+    const result = await clientStorage.unlinkAccount(clientId);
 
     if (!result.success) {
       return res.status(400).json({
@@ -193,7 +187,7 @@ router.post("/update-status", requireAuth, requireAdmin, async (req, res) => {
       });
     }
 
-    const result = await updateClientStatus(clientId, status);
+    const result = await clientStorage.updateClientStatus(clientId, status);
 
     if (!result.success) {
       return res.status(400).json({
@@ -225,7 +219,7 @@ router.post("/update-status", requireAuth, requireAdmin, async (req, res) => {
  */
 router.get("/client/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const client = await getClientById(req.params.id);
+    const client = await clientStorage.getClientById(req.params.id);
 
     if (!client) {
       return res.status(404).json({
@@ -262,7 +256,7 @@ router.get("/client/:id", requireAuth, requireAdmin, async (req, res) => {
  */
 router.get("/stats", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const clients = await getAllClients();
+    const clients = await clientStorage.getAllClients();
 
     const stats = {
       total: clients.length,
@@ -333,4 +327,4 @@ router.post("/search-accounts", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;

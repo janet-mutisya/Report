@@ -1,8 +1,8 @@
-import express from "express";
-import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { sql, poolPromise } from "../config/database.js";
+const express = require("express");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const database = require("../config/database.js");
 
 const router = express.Router();
 
@@ -37,7 +37,7 @@ const upload = multer({
 // GET /api/backup/history - Get upload history
 router.get("/history", async (req, res) => {
   try {
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     
     // Create backup_history table if it doesn't exist
     await pool.request().query(`
@@ -78,11 +78,11 @@ router.get("/history", async (req, res) => {
 router.delete("/history/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
 
     // Check if record exists
     const checkResult = await pool.request()
-      .input('id', sql.Int, id)
+      .input('id', database.sql.Int, id)
       .query('SELECT * FROM backup_history WHERE id = @id');
 
     if (checkResult.recordset.length === 0) {
@@ -96,7 +96,7 @@ router.delete("/history/:id", async (req, res) => {
 
     // Delete the record
     await pool.request()
-      .input('id', sql.Int, id)
+      .input('id', database.sql.Int, id)
       .query('DELETE FROM backup_history WHERE id = @id');
 
     console.log(`🗑️ Deleted backup record: ${record.filename} (ID: ${id})`);
@@ -130,7 +130,7 @@ router.post("/sync", upload.single("file"), async (req, res) => {
       });
     }
 
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
 
     // Check if there are existing backups
     const historyCount = await pool.request().query(`
@@ -220,11 +220,11 @@ router.post("/sync", upload.single("file"), async (req, res) => {
 
     // 6️⃣ Save to history
     await pool.request()
-      .input('filename', sql.NVarChar, req.file.originalname)
-      .input('fileSize', sql.NVarChar, `${(req.file.size / 1024 / 1024).toFixed(2)} MB`)
-      .input('recordsFound', sql.Int, recordsToMerge)
-      .input('recordsMerged', sql.Int, recordsMerged)
-      .input('duplicatesSkipped', sql.Int, recordsToMerge - recordsMerged)
+      .input('filename', database.sql.NVarChar, req.file.originalname)
+      .input('fileSize', database.sql.NVarChar, `${(req.file.size / 1024 / 1024).toFixed(2)} MB`)
+      .input('recordsFound', database.sql.Int, recordsToMerge)
+      .input('recordsMerged', database.sql.Int, recordsMerged)
+      .input('duplicatesSkipped', database.sql.Int, recordsToMerge - recordsMerged)
       .query(`
         INSERT INTO backup_history (filename, fileSize, recordsFound, recordsMerged, duplicatesSkipped)
         VALUES (@filename, @fileSize, @recordsFound, @recordsMerged, @duplicatesSkipped)
@@ -250,7 +250,7 @@ router.post("/sync", upload.single("file"), async (req, res) => {
     // Clean up staging DB if it was created
     if (stagingDB) {
       try {
-        const pool = await poolPromise;
+        const pool = await database.poolPromise;
         await pool.request().query(`
           IF EXISTS (SELECT name FROM sys.databases WHERE name = N'${stagingDB}')
           DROP DATABASE [${stagingDB}]
@@ -295,7 +295,7 @@ router.post("/sync", upload.single("file"), async (req, res) => {
 // GET /api/backup/status - Check backup sync capability
 router.get("/status", async (req, res) => {
   try {
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     
     // Check database connection
     await pool.request().query("SELECT 1");
@@ -330,4 +330,4 @@ router.get("/status", async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;

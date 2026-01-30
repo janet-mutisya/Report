@@ -1,22 +1,60 @@
-// server/routes/reportRoutes.js - UPDATED WITH PDF SERVICE ENDPOINTS
-import express from 'express';
-import {
-  getWeeklyReportPDF,
-  getDashboardPDF,          // NEW: PDF Service endpoint
-  getComprehensivePDF,      // NEW: Comprehensive PDF with choice
-  getPatrolReport,
-  getWeeklyReport,
-  getClientShifts,
-  testReportData,
-  testReportGeneration,
-  testPDFServices,          // NEW: Test both PDF services
-  getComprehensiveClientReport,
-  getClientPerformanceTrends,
-  getAllClientsList,
-  searchClients,
-  debugPerformanceCalc,
-  healthCheck
-} from '../controllers/reportController.js';
+// routes/reportRoutes.js - FIXED WITH ASCII ENCODING SUPPORT
+// 🔧 CRITICAL: ASCII ENCODING FIX - MUST BE FIRST, BEFORE ANY IMPORTS
+if (typeof global.TextDecoder === 'undefined' || !global.__ascii_encoding_fixed__) {
+  const { StringDecoder } = require('string_decoder');
+  
+  global.TextDecoder = class TextDecoder {
+    constructor(encoding = 'utf-8') {
+      const enc = String(encoding).toLowerCase().replace(/[-_\s]/g, '');
+      const map = {
+        'utf8': 'utf8', 'utf-8': 'utf8', 'utf8': 'utf8',
+        'ascii': 'ascii', 'usascii': 'ascii', 'ansi': 'latin1',
+        'latin1': 'latin1', 'iso88591': 'latin1', 'iso-8859-1': 'latin1',
+        'binary': 'latin1', 'base64': 'base64', 'hex': 'hex',
+        'ucs2': 'ucs2', 'ucs-2': 'ucs2', 'utf16le': 'utf16le', 'utf-16le': 'utf16le'
+      };
+      this.encoding = encoding;
+      this.nodeEncoding = map[enc] || 'utf8';
+      try {
+        this.decoder = new StringDecoder(this.nodeEncoding);
+      } catch (error) {
+        this.decoder = new StringDecoder('utf8');
+        this.nodeEncoding = 'utf8';
+      }
+    }
+    
+    decode(input, options = {}) {
+      if (!input) return '';
+      if (typeof input === 'string') return input;
+      try {
+        let buffer;
+        if (Buffer.isBuffer(input)) {
+          buffer = input;
+        } else if (input instanceof ArrayBuffer) {
+          buffer = Buffer.from(input);
+        } else if (ArrayBuffer.isView(input)) {
+          buffer = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+        } else {
+          buffer = Buffer.from(input);
+        }
+        return buffer.toString(this.nodeEncoding);
+      } catch (error) {
+        return '';
+      }
+    }
+  };
+  
+  global.TextEncoder = class TextEncoder {
+    constructor() { this.encoding = 'utf-8'; }
+    encode(input = '') { return Buffer.from(String(input), 'utf8'); }
+  };
+  
+  global.__ascii_encoding_fixed__ = true;
+}
+
+// NOW the original imports
+const express = require('express');
+const reportController = require('../controllers/reportController.js');
 
 const router = express.Router();
 
@@ -30,7 +68,7 @@ const router = express.Router();
  * Controller: getWeeklyReportPDF()
  * Service: reportService.js (weekly report format)
  */
-router.get('/weekly/pdf', getWeeklyReportPDF);
+router.get('/weekly/pdf', reportController.getWeeklyReportPDF);
 
 /**
  * Download Dashboard PDF (pdfService.js version)
@@ -38,7 +76,7 @@ router.get('/weekly/pdf', getWeeklyReportPDF);
  * Controller: getDashboardPDF()
  * Service: pdfService.js (dashboard format with incidents)
  */
-router.get('/dashboard-pdf', getDashboardPDF);
+router.get('/dashboard-pdf', reportController.getDashboardPDF);
 
 /**
  * Download Comprehensive PDF with service choice
@@ -46,7 +84,7 @@ router.get('/dashboard-pdf', getDashboardPDF);
  * Controller: getComprehensivePDF()
  * Service: pdfService.js OR reportService.js based on type
  */
-router.get('/comprehensive-pdf', getComprehensivePDF);
+router.get('/comprehensive-pdf', reportController.getComprehensivePDF);
 
 // =====================================================
 // 📊 DATA REPORT ROUTES
@@ -57,14 +95,14 @@ router.get('/comprehensive-pdf', getComprehensivePDF);
  * Query params: client, startDateTime/startDate, endDateTime/endDate, shiftType
  * Controller: getPatrolReport()
  */
-router.get('/patrol', getPatrolReport);
+router.get('/patrol', reportController.getPatrolReport);
 
 /**
  * Get weekly report (alias for patrol report)
  * Same as /patrol endpoint
  * Controller: getWeeklyReport() → getPatrolReport()
  */
-router.get('/weekly', getWeeklyReport);
+router.get('/weekly', reportController.getWeeklyReport);
 
 /**
  * Get comprehensive client report
@@ -72,7 +110,7 @@ router.get('/weekly', getWeeklyReport);
  * Query params: period, customStart, customEnd
  * Controller: getComprehensiveClientReport()
  */
-router.get('/comprehensive/:clientName', getComprehensiveClientReport);
+router.get('/comprehensive/:clientName', reportController.getComprehensiveClientReport);
 
 /**
  * Get client performance trends
@@ -80,7 +118,7 @@ router.get('/comprehensive/:clientName', getComprehensiveClientReport);
  * Query param: months
  * Controller: getClientPerformanceTrends()
  */
-router.get('/performance-trends/:clientName', getClientPerformanceTrends);
+router.get('/performance-trends/:clientName', reportController.getClientPerformanceTrends);
 
 // =====================================================
 // 👥 CLIENT MANAGEMENT ROUTES
@@ -91,14 +129,14 @@ router.get('/performance-trends/:clientName', getClientPerformanceTrends);
  * No parameters needed
  * Controller: getAllClientsList()
  */
-router.get('/clients', getAllClientsList);
+router.get('/clients', reportController.getAllClientsList);
 
 /**
  * Search clients by name
  * Query param: query (search term)
  * Controller: searchClients()
  */
-router.get('/clients/search', searchClients);
+router.get('/clients/search', reportController.searchClients);
 
 // =====================================================
 // ⚙️ CLIENT CONFIGURATION ROUTES
@@ -109,8 +147,8 @@ router.get('/clients/search', searchClients);
  * Query param: client OR Route param: :client
  * Controller: getClientShifts()
  */
-router.get('/shifts', getClientShifts); // Query param version
-router.get('/shifts/:client', getClientShifts); // Route param version
+router.get('/shifts', reportController.getClientShifts); // Query param version
+router.get('/shifts/:client', reportController.getClientShifts); // Route param version
 
 // =====================================================
 // 🧪 TESTING & DEBUGGING ROUTES
@@ -121,14 +159,14 @@ router.get('/shifts/:client', getClientShifts); // Route param version
  * Query params: clientName, startDate, endDate
  * Controller: testReportData()
  */
-router.get('/test', testReportData);
+router.get('/test', reportController.testReportData);
 
 /**
  * Test PDF services (BOTH reportService.js AND pdfService.js)
  * Query params: clientName, startDate, endDate
  * Controller: testPDFServices()
  */
-router.get('/test-pdf-services', testPDFServices);
+router.get('/test-pdf-services', reportController.testPDFServices);
 
 /**
  * Test report generation for specific client
@@ -136,15 +174,15 @@ router.get('/test-pdf-services', testPDFServices);
  * Query params (GET) / Body params (POST): startDate, endDate, shiftType
  * Controller: testReportGeneration()
  */
-router.get('/test/:clientName', testReportGeneration);
-router.post('/test/:clientName', testReportGeneration);
+router.get('/test/:clientName', reportController.testReportGeneration);
+router.post('/test/:clientName', reportController.testReportGeneration);
 
 /**
  * Debug performance calculations
  * Query params: clientName, startDate, endDate
  * Controller: debugPerformanceCalc()
  */
-router.get('/debug', debugPerformanceCalc);
+router.get('/debug', reportController.debugPerformanceCalc);
 
 // =====================================================
 // 🏠 HEALTH CHECK ROUTES
@@ -155,7 +193,7 @@ router.get('/debug', debugPerformanceCalc);
  * No parameters needed
  * Controller: healthCheck()
  */
-router.get('/health', healthCheck);
+router.get('/health', reportController.healthCheck);
 
 // =====================================================
 // 📋 ROOT ENDPOINT WITH DOCUMENTATION
@@ -513,4 +551,4 @@ router.use('/', (req, res) => {
   });
 });
 
-export default router;
+module.exports = router;

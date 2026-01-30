@@ -1,15 +1,20 @@
 // server/config/production.js
 // Production configuration for Report Patrol
 
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
+const dotenv = require('dotenv');
+const path = require('path');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// ✅ FIX: Load environment variables from the server/.env file
+const envPath = path.join(__dirname, '..', '.env');
+console.log('🔧 [production.js] Loading .env from:', envPath);
+const envResult = dotenv.config({ path: envPath });
 
-// Load environment variables
-dotenv.config();
+if (envResult.error) {
+  console.warn('⚠️  Could not load .env file from', envPath);
+  console.warn('⚠️  Relying on system environment variables:', Object.keys(process.env).filter(key => key.startsWith('DB_') || key.startsWith('EMAIL_') || key.startsWith('JWT_')));
+} else {
+  console.log('✅ Environment variables loaded successfully');
+}
 
 const productionConfig = {
   // Server Configuration
@@ -20,25 +25,14 @@ const productionConfig = {
     nodeVersion: process.version
   },
 
-  // Database Configuration
+  // Database Configuration - ✅ REMOVED DUPLICATION
+  // Note: Database configuration is handled in server/database.js
+  // This config only references what's needed for validation
   database: {
-    user: process.env.DB_USER || '',
-    password: process.env.DB_PASSWORD || '',
-    server: process.env.DB_SERVER || 'localhost',
-    database: process.env.DB_DATABASE || '',
-    port: parseInt(process.env.DB_PORT) || 1433,
-    options: {
-      encrypt: process.env.DB_ENCRYPT === 'true',
-      trustServerCertificate: process.env.DB_TRUST_SERVER_CERTIFICATE === 'true',
-      enableArithAbort: true,
-      connectTimeout: 30000,
-      requestTimeout: 30000
-    },
-    pool: {
-      max: 10,
-      min: 0,
-      idleTimeoutMillis: 30000
-    }
+    // Only include minimal info for validation purposes
+    isConfigured: !!(process.env.DB_SERVER && process.env.DB_DATABASE),
+    server: process.env.DB_SERVER,
+    name: process.env.DB_DATABASE
   },
 
   // Email Configuration
@@ -50,7 +44,7 @@ const productionConfig = {
     secure: process.env.EMAIL_SECURE === 'true',
     auth: {
       user: process.env.EMAIL_USER || '',
-      pass: process.env.EMAIL_PASS || ''
+      pass: process.env.EMAIL_PASS ? '***' + process.env.EMAIL_PASS.slice(-3) : '(not set)' // Hide password
     },
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER || '',
     retryAttempts: 3,
@@ -76,7 +70,6 @@ const productionConfig = {
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
     bcryptSaltRounds: 10,
     sessionSecret: process.env.SESSION_SECRET || 'session-secret-change-in-production',
-    // ✅ RATE LIMITING REMOVED - Was causing 429 errors with multiple workers
     cors: {
       origin: process.env.FRONTEND_URL || 'https://reports-97dm.onrender.com',
       credentials: true
@@ -157,51 +150,83 @@ const productionConfig = {
   }
 };
 
-// Validation function to ensure critical configs are set
-export function validateConfig() {
+// Enhanced validation function
+function validateConfig() {
   const errors = [];
   const warnings = [];
 
+  console.log('\n🔍 [production.js] Validating configuration...');
+  
   // Critical validations
-  if (!productionConfig.database.server) {
-    errors.push('Database server (DB_SERVER) is not configured');
+  if (!process.env.DB_SERVER) {
+    errors.push('DB_SERVER environment variable is not set');
+  } else {
+    console.log(`   ✅ DB_SERVER: ${process.env.DB_SERVER}`);
   }
 
-  if (!productionConfig.database.database) {
-    errors.push('Database name (DB_DATABASE) is not configured');
+  if (!process.env.DB_DATABASE) {
+    errors.push('DB_DATABASE environment variable is not set');
+  } else {
+    console.log(`   ✅ DB_DATABASE: ${process.env.DB_DATABASE}`);
   }
 
-  if (productionConfig.email.enabled && !productionConfig.email.auth.user) {
+  if (!process.env.DB_USER) {
+    warnings.push('DB_USER environment variable is not set');
+  } else {
+    console.log(`   ✅ DB_USER: ${process.env.DB_USER}`);
+  }
+
+  if (!process.env.DB_PASSWORD) {
+    warnings.push('DB_PASSWORD environment variable is not set');
+  } else {
+    console.log(`   ✅ DB_PASSWORD: ********`);
+  }
+
+  if (productionConfig.email.enabled && !process.env.EMAIL_USER) {
     errors.push('Email is enabled but EMAIL_USER is not configured');
+  } else if (productionConfig.email.enabled) {
+    console.log(`   ✅ EMAIL_USER: ${process.env.EMAIL_USER}`);
   }
 
   if (productionConfig.security.jwtSecret === 'your-secret-key-change-in-production') {
-    warnings.push('JWT_SECRET is using default value - should be changed in production');
+    errors.push('JWT_SECRET is using default value - MUST be changed in production');
+  } else if (process.env.JWT_SECRET) {
+    console.log(`   ✅ JWT_SECRET: ******** (${process.env.JWT_SECRET.length} chars)`);
   }
 
   // Display validation results
   if (errors.length > 0) {
-    console.error('❌ CRITICAL CONFIGURATION ERRORS:');
+    console.error('\n❌ CRITICAL CONFIGURATION ERRORS:');
     errors.forEach(error => console.error(`   - ${error}`));
+    
+    // Only exit if in strict mode
     if (process.env.STRICT_CONFIG === 'true') {
+      console.error('   Exiting due to strict mode...');
       process.exit(1);
+    } else {
+      console.error('   ⚠️  Continuing despite errors (strict mode disabled)');
     }
   }
 
   if (warnings.length > 0) {
-    console.warn('⚠️  CONFIGURATION WARNINGS:');
+    console.warn('\n⚠️  CONFIGURATION WARNINGS:');
     warnings.forEach(warning => console.warn(`   - ${warning}`));
   }
 
   if (errors.length === 0 && warnings.length === 0) {
-    console.log('✅ Configuration validation passed');
+    console.log('\n✅ All configuration checks passed');
   }
 
-  return { valid: errors.length === 0, errors, warnings };
+  return { 
+    valid: errors.length === 0, 
+    errors, 
+    warnings,
+    hasDatabaseConfig: !!(process.env.DB_SERVER && process.env.DB_DATABASE && process.env.DB_USER && process.env.DB_PASSWORD)
+  };
 }
 
 // Helper function to get config value with fallback
-export function getConfig(path, defaultValue = null) {
+function getConfig(path, defaultValue = null) {
   const keys = path.split('.');
   let value = productionConfig;
   
@@ -217,43 +242,49 @@ export function getConfig(path, defaultValue = null) {
 }
 
 // Helper to check if a feature is enabled
-export function isFeatureEnabled(featureName) {
+function isFeatureEnabled(featureName) {
   return productionConfig.features[featureName] === true;
 }
 
 // Display configuration summary
-export function displayConfigSummary() {
+function displayConfigSummary() {
+  const dbStatus = productionConfig.database.isConfigured ? '✅ Configured' : '❌ Not Configured';
+  const emailStatus = productionConfig.email.enabled ? '✅ Enabled' : '❌ Disabled';
+  const schedulerStatus = productionConfig.scheduler.enabled ? '✅ Enabled' : '❌ Disabled';
+  const authStatus = productionConfig.features.authentication ? '✅ Enabled' : '❌ Disabled';
+  
   console.log('\n' + '='.repeat(70));
   console.log('📋 PRODUCTION CONFIGURATION SUMMARY');
   console.log('='.repeat(70));
   console.log(`🚀 Server:        Port ${productionConfig.server.port} (${productionConfig.server.environment})`);
-  console.log(`🗄️  Database:      ${productionConfig.features.useDatabase ? '✅ Enabled' : '❌ Disabled'} - ${productionConfig.database.server}`);
-  console.log(`📧 Email:         ${productionConfig.email.enabled ? '✅ Enabled' : '❌ Disabled'} - ${productionConfig.email.auth.user || 'Not configured'}`);
-  console.log(`⏰ Scheduler:     ${productionConfig.scheduler.enabled ? '✅ Enabled' : '❌ Disabled'} - ${productionConfig.scheduler.timezone}`);
-  console.log(`🔐 Auth:          ✅ Enabled - JWT expires in ${productionConfig.security.jwtExpiresIn}`);
-  console.log(`🛡️  Security:      Rate limiting disabled`);
+  console.log(`🗄️  Database:      ${dbStatus} - ${process.env.DB_SERVER || 'Not set'}`);
+  console.log(`📧 Email:         ${emailStatus} - ${process.env.EMAIL_USER || 'No user configured'}`);
+  console.log(`⏰ Scheduler:     ${schedulerStatus} - ${productionConfig.scheduler.timezone}`);
+  console.log(`🔐 Auth:          ${authStatus} - JWT expires in ${productionConfig.security.jwtExpiresIn}`);
   console.log(`📊 Monitoring:    ${productionConfig.monitoring.metricsEnabled ? '✅ Enabled' : '❌ Disabled'}`);
   console.log(`🌐 CORS Origin:   ${productionConfig.security.cors.origin}`);
   console.log(`📁 Temp Storage:  ${productionConfig.storage.savePdfToDisk ? '✅ Enabled' : '❌ Disabled'}`);
   console.log(`⚙️  Workers:       ${productionConfig.performance.cluster.enabled ? productionConfig.performance.cluster.maxWorkers : 1} worker(s)`);
+  console.log(`🔑 Env Loaded:    ${envResult && !envResult.error ? '✅ From .env file' : '⚠️ From system/env vars'}`);
   console.log('='.repeat(70) + '\n');
 }
 
-// Export default config
-export default productionConfig;
+// Export default config and functions
+module.exports = productionConfig;
+module.exports.validateConfig = validateConfig;
+module.exports.getConfig = getConfig;
+module.exports.isFeatureEnabled = isFeatureEnabled;
+module.exports.displayConfigSummary = displayConfigSummary;
 
 // Export individual config sections for easier imports
-export const {
-  server,
-  database,
-  email,
-  scheduler,
-  security,
-  logging,
-  performance,
-  network,
-  storage,
-  api,
-  features,
-  monitoring
-} = productionConfig;
+module.exports.server = productionConfig.server;
+module.exports.email = productionConfig.email;
+module.exports.scheduler = productionConfig.scheduler;
+module.exports.security = productionConfig.security;
+module.exports.logging = productionConfig.logging;
+module.exports.performance = productionConfig.performance;
+module.exports.network = productionConfig.network;
+module.exports.storage = productionConfig.storage;
+module.exports.api = productionConfig.api;
+module.exports.features = productionConfig.features;
+module.exports.monitoring = productionConfig.monitoring;

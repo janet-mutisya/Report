@@ -1,9 +1,9 @@
 // server/scripts/managePatrolSchedules.js - FIXED WITH CONSISTENT CONFIGURATION USAGE
-import sql from 'mssql';
-import { poolPromise } from '../config/database.js';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const sql = require('mssql');
+const { poolPromise } = require('../config/database.js');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 // Enable timezone support
 dayjs.extend(utc);
@@ -953,8 +953,8 @@ async function getPatrolScheduleConfig(clientId) {
   }
 }
 
-// Single export block - no duplicates
-export {
+// Export all functions
+module.exports = {
   getClientPatrols,
   getClientSchedule,
   listAllSchedules,
@@ -970,8 +970,8 @@ export {
   clearScheduleCache
 };
 
-// Default export
-export default {
+// Keep default export for compatibility
+module.exports.default = {
   getClientPatrols,
   getClientSchedule,
   listAllSchedules,

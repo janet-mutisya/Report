@@ -1,80 +1,421 @@
-// server.js - FIXED VERSION: Reduced scheduler frequency and improved rate limiting
-import express from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import helmet from "helmet";
-import compression from "compression";
-import rateLimit from "express-rate-limit";
-import NodeCache from "node-cache";
-import path from "path";
-import { fileURLToPath } from "url";
-import fs from "fs";
+// server-final.js - PRODUCTION-READY WITH DOTENV SILENCE, ASCII FIX & AUTO-BROWSER
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const compression = require("compression");
+const rateLimit = require("express-rate-limit");
+const NodeCache = require("node-cache");
+const path = require("path");
+const fs = require("fs");
 
-// ES Module dirname workaround
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// =============================================
+// 🔇 SILENT DOTENV CONFIGURATION
+// =============================================
+// Load environment variables COMPLETELY SILENTLY
+require('dotenv').config({ 
+  silent: true,
+  debug: false,
+  override: false
+});
 
-// Load environment variables FIRST
-dotenv.config();
+// Suppress dotenv console pollution globally
+if (process.env.DOTENV_CONFIG_DEBUG === undefined) {
+  process.env.DOTENV_CONFIG_DEBUG = 'false';
+}
+
+// Initialize logger AFTER env is loaded
+const logger = require('./logger');
+
+// Clear console for clean production start
+if (process.env.NODE_ENV === 'production') {
+  logger.clearConsole();
+}
+
+// =============================================
+// 🎯 CRITICAL FIX: APPLY ASCII ENCODING FIX BEFORE ANY MODULES ARE LOADED
+// =============================================
+// This MUST happen before ANY other modules (especially routes) are loaded
+// because they might import PDFKit which needs these polyfills
+
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const IS_PKG = typeof process.pkg !== 'undefined' || 
+               (process.argv[0] && process.argv[0].includes('guard-report-server.exe')) ||
+               (process.execPath && process.execPath.includes('guard-report-server.exe')) ||
+               __dirname.includes('snapshot');
+
+// =============================================
+// 🔧 ALWAYS APPLY BUFFER-BASED ENCODING FIXES
+// =============================================
+// We'll apply these fixes even in development to ensure consistency
+
+logger.debug('🔄 Applying Buffer-based encoding fixes...');
+
+const patchesApplied = {
+  textDecoder: false,
+  textEncoder: false,
+  abortSignal: false,
+  abortController: false
+};
+
+// 🎯 CRITICAL FIX 1: TextDecoder using ONLY Buffer (NO StringDecoder)
+if (typeof global.TextDecoder === 'undefined' || IS_PKG) {
+  // Remove existing TextDecoder to ensure clean state
+  delete global.TextDecoder;
+  
+  global.TextDecoder = class TextDecoder {
+    constructor(encoding = 'utf-8') {
+      // Normalize encoding name - remove dashes, underscores, spaces
+      const normalized = String(encoding).toLowerCase()
+        .replace(/[-_\s]/g, '')
+        .replace(/[^a-z0-9]/g, '');
+      
+      // Map to Node.js Buffer-supported encodings
+      // Buffer.toString() supports: 'utf8', 'ascii', 'latin1', 'base64', 'hex', 'utf16le'
+      const encodingMap = {
+        // UTF variants
+        'utf8': 'utf8',
+        'utf-8': 'utf8',
+        // ASCII variants
+        'ascii': 'ascii',
+        'usascii': 'ascii',
+        'ansi': 'latin1',
+        // Latin variants
+        'latin1': 'latin1',
+        'iso88591': 'latin1',
+        'iso-8859-1': 'latin1',
+        'binary': 'latin1',
+        // Other encodings
+        'base64': 'base64',
+        'base64url': 'base64',
+        'hex': 'hex',
+        'ucs2': 'utf16le',
+        'ucs-2': 'utf16le',
+        'utf16le': 'utf16le',
+        'utf-16le': 'utf16le',
+        'utf16': 'utf16le',
+        // Default
+        '': 'utf8'
+      };
+      
+      this._encoding = encoding;
+      this._nodeEncoding = encodingMap[normalized] || 'utf8';
+      
+      logger.debug(`TextDecoder created: ${encoding} -> ${this._nodeEncoding}`);
+    }
+    
+    decode(input, options = {}) {
+      if (!input) return '';
+      if (typeof input === 'string') return input;
+      
+      try {
+        let buffer;
+        
+        // Convert input to Buffer
+        if (Buffer.isBuffer(input)) {
+          buffer = input;
+        } else if (input instanceof ArrayBuffer) {
+          buffer = Buffer.from(input);
+        } else if (ArrayBuffer.isView(input)) {
+          buffer = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+        } else if (Array.isArray(input)) {
+          buffer = Buffer.from(input);
+        } else if (typeof input === 'object' && input.length !== undefined) {
+          buffer = Buffer.from(Array.from(input));
+        } else {
+          buffer = Buffer.from(String(input));
+        }
+        
+        // Use Buffer.toString directly - this always works in Node.js
+        // Buffer.toString() natively supports 'ascii' encoding
+        try {
+          const result = buffer.toString(this._nodeEncoding);
+          return result;
+        } catch (err) {
+          // Fallback to utf8 if the encoding fails
+          logger.warn(`TextDecoder: Failed to decode as ${this._nodeEncoding}, using utf8: ${err.message}`);
+          return buffer.toString('utf8');
+        }
+        
+      } catch (error) {
+        logger.warn(`TextDecoder: Failed to decode input: ${error.message}`);
+        return '';
+      }
+    }
+    
+    get encoding() {
+      return this._encoding || 'utf-8';
+    }
+    
+    set encoding(value) {
+      this._encoding = value;
+    }
+  };
+  
+  patchesApplied.textDecoder = true;
+  logger.debug('✅ TextDecoder polyfill loaded (Pure Buffer-based)');
+}
+
+// 🎯 FIX 2: TextEncoder polyfill
+if (typeof global.TextEncoder === 'undefined' || IS_PKG) {
+  global.TextEncoder = class TextEncoder {
+    constructor() {
+      this.encoding = 'utf-8';
+    }
+    
+    encode(input = '') {
+      try {
+        return Buffer.from(String(input), 'utf8');
+      } catch (error) {
+        logger.warn(`TextEncoder: Failed to encode: ${error.message}`);
+        return Buffer.from('');
+      }
+    }
+    
+    encodeInto(source, destination) {
+      const buffer = this.encode(source);
+      const length = Math.min(buffer.length, destination.length);
+      for (let i = 0; i < length; i++) {
+        destination[i] = buffer[i];
+      }
+      return { read: source.length, written: length };
+    }
+  };
+  patchesApplied.textEncoder = true;
+  logger.debug('✅ TextEncoder polyfill loaded');
+}
+
+// 🎯 FIX 3: AbortSignal.any polyfill
+if (typeof AbortSignal !== 'undefined' && !AbortSignal.any) {
+  AbortSignal.any = function(signals) {
+    const controller = new AbortController();
+    for (const signal of signals) {
+      if (signal && signal.aborted) {
+        controller.abort(signal.reason);
+        break;
+      }
+      if (signal) {
+        signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+      }
+    }
+    return controller.signal;
+  };
+  patchesApplied.abortSignal = true;
+  logger.debug('✅ AbortSignal.any polyfill loaded');
+}
+
+// 🎯 FIX 4: AbortController polyfill
+if (typeof global.AbortController === 'undefined') {
+  global.AbortController = class AbortController {
+    constructor() {
+      this.signal = {
+        aborted: false,
+        reason: undefined,
+        onabort: null,
+        _listeners: [],
+        
+        addEventListener(event, handler, options) {
+          if (event === 'abort') {
+            this._listeners.push({ handler, options });
+          }
+        },
+        
+        removeEventListener(event, handler) {
+          if (event === 'abort') {
+            this._listeners = this._listeners.filter(l => l.handler !== handler);
+          }
+        }
+      };
+    }
+    
+    abort(reason) {
+      if (this.signal.aborted) return;
+      this.signal.aborted = true;
+      this.signal.reason = reason;
+      
+      if (this.signal.onabort) {
+        try {
+          this.signal.onabort();
+        } catch (error) {
+          logger.warn('Error in onabort handler');
+        }
+      }
+      
+      this.signal._listeners.forEach(({ handler }) => {
+        try {
+          handler();
+        } catch (error) {
+          logger.warn('Error in abort event listener');
+        }
+      });
+      
+      this.signal._listeners = [];
+    }
+  };
+  patchesApplied.abortController = true;
+  logger.debug('✅ AbortController polyfill loaded');
+}
+
+// Mark as patched globally
+global.__pdfkit_patched__ = true;
+global.__ascii_encoding_fixed__ = true;
+global.__buffer_based_encoding__ = true;
+
+logger.debug('Encoding patches applied', patchesApplied);
+
+// 🔧 Test the polyfills immediately
+try {
+  const testDecoder = new TextDecoder('ascii');
+  const testEncoder = new TextEncoder();
+  const testData = testEncoder.encode('Test123 ASCII: !@#$%^&*()');
+  const testResult = testDecoder.decode(testData);
+  
+  if (testResult === 'Test123 ASCII: !@#$%^&*()') {
+    logger.debug(`✅ ASCII encoding test PASSED: "${testResult}"`);
+  } else {
+    logger.warn(`⚠️ ASCII encoding test mismatch: got "${testResult}"`);
+  }
+} catch (error) {
+  logger.error(`❌ ASCII encoding test FAILED: ${error.message}`);
+}
+
+// =============================================
+// 🌐 AUTO-OPEN BROWSER FUNCTION (Cross-platform) - FIXED
+// =============================================
+function openBrowser(url) {
+  const { exec } = require('child_process');
+  const platform = process.platform;
+  
+  let command;
+  if (platform === 'win32') {
+    command = `start "" "${url}"`; // Windows
+  } else if (platform === 'darwin') {
+    command = `open "${url}"`; // macOS
+  } else {
+    command = `xdg-open "${url}"`; // Linux
+  }
+  
+  exec(command, (error, stdout, stderr) => {
+    if (error) {
+      logger.debug(`Could not auto-open browser: ${error.message}`);
+      // Try alternative methods
+      tryAlternativeBrowserOpen(url);
+    } else {
+      logger.info(`✅ Browser opened: ${url}`);
+    }
+  });
+}
+
+// Alternative method for opening browser
+function tryAlternativeBrowserOpen(url) {
+  const { exec } = require('child_process');
+  const platform = process.platform;
+  
+  let altCommand;
+  if (platform === 'win32') {
+    altCommand = `cmd /c start "${url}"`;
+  } else if (platform === 'darwin') {
+    altCommand = `open -a "Google Chrome" "${url}" || open -a "Safari" "${url}" || open -a "Firefox" "${url}"`;
+  } else {
+    altCommand = `which google-chrome && google-chrome "${url}" || which firefox && firefox "${url}" || which xdg-open && xdg-open "${url}"`;
+  }
+  
+  exec(altCommand, (error) => {
+    if (error) {
+      logger.debug(`Alternative browser open also failed: ${error.message}`);
+    } else {
+      logger.info(`✅ Browser opened via alternative method: ${url}`);
+    }
+  });
+}
 
 // =============================================
 // 🚀 CONFIGURATION & CACHE SETUP
 // =============================================
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT || 5000;
 
-// Initialize global cache (5 minute TTL)
+// Initialize global cache
 global.apiCache = new NodeCache({ 
-  stdTTL: 300, // 5 minutes
-  checkperiod: 60, // Check for expired items every minute
-  useClones: false // Better performance
+  stdTTL: 300,
+  checkperiod: 60,
+  useClones: false
 });
 
-// 🛑 EMAIL KILL SWITCH - GLOBAL CONTROL
+// 🛑 EMAIL KILL SWITCH
 const EMAIL_ENABLED = process.env.ENABLE_EMAIL_SENDING === 'true';
 global.EMAIL_SENDING_ENABLED = EMAIL_ENABLED;
 
-// 🛑 SIGNIFICANTLY REDUCE SCHEDULER FREQUENCY TO PREVENT 429 ERRORS
-const SCHEDULER_INTERVAL = IS_PRODUCTION ? 600000 : 300000; // 10 min in prod, 5 min in dev
-console.log(`⏰ Scheduler interval: ${SCHEDULER_INTERVAL/1000}s (${SCHEDULER_INTERVAL/60000}min)`);
+// Convert milliseconds to cron pattern
+function msToCronPattern(ms) {
+  const minutes = Math.floor(ms / 60000);
+  
+  if (minutes < 1) {
+    return '* * * * *';
+  } else if (minutes === 1) {
+    return '* * * * *';
+  } else if (minutes <= 59) {
+    return `*/${minutes} * * * *`;
+  } else {
+    const hours = Math.floor(minutes / 60);
+    if (hours <= 23) {
+      return `0 */${hours} * * *`;
+    } else {
+      return '0 0 * * *';
+    }
+  }
+}
+
+// Scheduler configuration
+const SCHEDULER_INTERVAL_MS = process.env.SCHEDULER_INTERVAL 
+  ? parseInt(process.env.SCHEDULER_INTERVAL) 
+  : (IS_PRODUCTION ? 600000 : 300000);
+
+const SCHEDULER_CRON_PATTERN = process.env.SCHEDULER_CRON_PATTERN || msToCronPattern(SCHEDULER_INTERVAL_MS);
+
+logger.debug(`Scheduler interval: ${SCHEDULER_INTERVAL_MS/1000}s (Cron: "${SCHEDULER_CRON_PATTERN}")`);
 
 // Track scheduler status
 global.schedulerStatus = {
   running: false,
   lastRun: null,
-  interval: SCHEDULER_INTERVAL,
-  callsInLastMinute: 0
+  interval: SCHEDULER_INTERVAL_MS,
+  cronPattern: SCHEDULER_CRON_PATTERN,
+  callsInLastMinute: 0,
+  nextRun: null,
+  error: null
 };
 
 // Rate limiting helper
 const resetRateCounters = () => {
   setInterval(() => {
     global.schedulerStatus.callsInLastMinute = 0;
-  }, 60000); // Reset every minute
+  }, 60000);
 };
-
 resetRateCounters();
 
-console.log(`
-╔════════════════════════════════════════════╗
-║     📧 EMAIL SENDING STATUS                ║
-║     ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}                         ║
-║     🔄 SCHEDULER INTERVAL: ${SCHEDULER_INTERVAL/60000}min                ║
-║     🚫 RATE LIMIT PROTECTION: ACTIVE       ║
-╚════════════════════════════════════════════╝
-`);
+// =============================================
+// 🎯 STARTUP BANNER - CLEAN & PROFESSIONAL
+// =============================================
+logger.banner([
+  '═'.repeat(60),
+  '    📊 GUARD REPORT SERVER v3.0.0',
+  '═'.repeat(60),
+  `    🌐 Port:          ${PORT}`,
+  `    📧 Email:         ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`,
+  `    ⏰ Scheduler:     ${SCHEDULER_INTERVAL_MS/60000} min interval`,
+  `    📦 Mode:          ${IS_PKG ? 'Production (PKG)' : 'Development'}`,
+  `    🔧 Environment:   ${process.env.NODE_ENV || 'development'}`,
+  `    🌐 Auto-Browser:  ${(IS_PKG || IS_PRODUCTION) ? '✅ ENABLED' : '🛑 DISABLED'}`,
+  `    🔤 ASCII Fix:     ${global.__ascii_encoding_fixed__ ? '✅ BUFFER-BASED' : '⚠️ DEFAULT'}`,
+  '═'.repeat(60)
+]);
 
 // =============================================
 // 🔧 CACHE MIDDLEWARE
 // =============================================
 const createCacheMiddleware = (duration = 300) => {
   return (req, res, next) => {
-    // Skip non-GET requests
-    if (req.method !== 'GET') {
-      return next();
-    }
+    if (req.method !== 'GET') return next();
     
-    // Skip certain endpoints
     const skipPaths = [
       '/api/health',
       '/api/email/status', 
@@ -84,22 +425,18 @@ const createCacheMiddleware = (duration = 300) => {
       '/api/scheduler/status'
     ];
     
-    if (skipPaths.some(path => req.path.startsWith(path))) {
-      return next();
-    }
+    if (skipPaths.some(p => req.path.startsWith(p))) return next();
     
     const cacheKey = `${req.method}:${req.originalUrl}`;
     const cached = global.apiCache.get(cacheKey);
     
     if (cached) {
-      console.log(`📦 Cache hit: ${cacheKey}`);
+      logger.debug(`Cache hit: ${cacheKey}`);
       return res.json(cached);
     }
     
-    // Override res.json to cache responses
     const originalJson = res.json;
     res.json = function(data) {
-      // Only cache successful responses
       if (res.statusCode >= 200 && res.statusCode < 300) {
         global.apiCache.set(cacheKey, data, duration);
       }
@@ -115,33 +452,21 @@ const createCacheMiddleware = (duration = 300) => {
 // =============================================
 const requestLogger = (req, res, next) => {
   const start = Date.now();
+  const skipPaths = ['/api/health', '/favicon.ico'];
   
-  // Skip logging for health checks and scheduler checks
-  const skipPaths = ['/api/health', '/api/backup/history', '/api/scheduler'];
-  if (skipPaths.some(path => req.path.includes(path))) {
-    return next();
-  }
+  if (skipPaths.some(p => req.path.includes(p))) return next();
   
-  // Track scheduler calls
   if (req.path.includes('/scheduler') && req.method === 'GET') {
     global.schedulerStatus.callsInLastMinute++;
     if (global.schedulerStatus.callsInLastMinute > 10) {
-      console.warn(`⚠️ High scheduler call rate: ${global.schedulerStatus.callsInLastMinute} calls/min`);
+      logger.warn(`High scheduler call rate: ${global.schedulerStatus.callsInLastMinute}/min`);
     }
   }
   
-  // Log slow requests
   res.on('finish', () => {
     const duration = Date.now() - start;
-    const method = req.method;
-    const path = req.path;
-    const status = res.statusCode;
-    
-    if (duration > 1000) { // Log requests slower than 1s
-      console.log(`🐢 SLOW REQUEST: ${method} ${path} - ${duration}ms - ${status}`);
-    } else if (IS_PRODUCTION && path.startsWith('/api')) {
-      // Only log API requests in production for debugging
-      console.log(`[${new Date().toISOString().substring(11, 19)}] ${method} ${path} - ${duration}ms`);
+    if (duration > 1000) {
+      logger.warn(`SLOW REQUEST: ${req.method} ${req.path} - ${duration}ms`);
     }
   });
   
@@ -149,70 +474,66 @@ const requestLogger = (req, res, next) => {
 };
 
 // =============================================
-// 🎯 LOAD ROUTES WITH CACHING
+// 🎯 FRONTEND SERVING HELPER
 // =============================================
-const routeCache = new Map();
-async function loadRoute(routePath) {
-  if (routeCache.has(routePath)) {
-    return routeCache.get(routePath);
+function setupFrontendServing(app) {
+  logger.debug('Setting up frontend serving...');
+  
+  let frontendDistPath;
+  
+  if (IS_PKG) {
+    const possiblePaths = [
+      path.join(path.dirname(process.execPath), 'dist'),
+      path.join(__dirname, 'dist'),
+      path.join(process.cwd(), 'dist'),
+      path.join(path.dirname(process.execPath), 'client', 'reports', 'dist'),
+      path.join(__dirname, '..', 'client', 'reports', 'dist')
+    ];
+    
+    for (const p of possiblePaths) {
+      try {
+        const indexPath = path.join(p, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          frontendDistPath = p;
+          logger.debug(`Found frontend at: ${p}`);
+          break;
+        }
+      } catch (error) {
+        // Continue searching
+      }
+    }
+  } else {
+    frontendDistPath = path.join(__dirname, '..', 'client', 'reports', 'dist');
   }
   
-  try {
-    const module = await import(routePath);
-    routeCache.set(routePath, module.default);
-    return module.default;
-  } catch (error) {
-    console.error(`❌ Failed to load route: ${routePath}`, error.message);
-    throw error;
+  if (!frontendDistPath || !fs.existsSync(path.join(frontendDistPath, 'index.html'))) {
+    logger.warn(`Frontend not found at: ${frontendDistPath || 'unknown location'}`);
+    logger.info('Running in API-only mode');
+    return false;
   }
-}
-
-// =============================================
-// 🔐 INITIALIZE BM SECURITY API
-// =============================================
-async function initializeBMSecurityAPI() {
-  console.log('\n🔐 Initializing BMSecurity API service...');
   
-  try {
-    const bmSecurityAPI = await import('./service/bmSecurityAPI.js');
-    
-    console.log('⚡ BMSecurity API Service initialized');
-    
-    // Test login with timeout
-    console.log('🔐 Attempting API login...');
-    
-    const loginPromise = bmSecurityAPI.default.ensureAuthenticated();
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Login timeout after 30s')), 30000)
-    );
-    
-    const token = await Promise.race([loginPromise, timeoutPromise]);
-    
-    if (token) {
-      console.log('✅ BMSecurity API login successful');
-      return { 
-        success: true, 
-        apiInstance: bmSecurityAPI.default,
-        status: 'authenticated'
-      };
+  logger.info(`Serving React from: ${frontendDistPath}`);
+  
+  app.use(express.static(frontendDistPath, {
+    maxAge: IS_PRODUCTION ? '1d' : '0',
+    etag: true,
+    lastModified: true
+  }));
+  
+  app.get('/', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    if (req.path.match(/\.[a-zA-Z0-9]{2,}$/)) {
+      const filePath = path.join(frontendDistPath, req.path);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+      return next();
     }
     
-    console.warn('⚠️  BMSecurity API login failed');
-    return { 
-      success: false, 
-      apiInstance: bmSecurityAPI.default,
-      status: 'login_failed'
-    };
-    
-  } catch (error) {
-    console.warn('⚠️  BMSecurity API initialization error:', error.message);
-    return { 
-      success: false, 
-      apiInstance: null, 
-      status: 'initialization_error',
-      error: error.message 
-    };
-  }
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+  });
+  
+  return true;
 }
 
 // =============================================
@@ -227,7 +548,6 @@ async function createApp() {
   // =============================================
   const corsOptions = {
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true);
       
       const allowedOrigins = [
@@ -241,22 +561,19 @@ async function createApp() {
       ];
       
       if (IS_PRODUCTION) {
-        // In production, only allow specific origins
         if (allowedOrigins.includes(origin) || origin === process.env.FRONTEND_URL) {
           return callback(null, true);
         }
-        console.log(`❌ CORS blocked in production: ${origin}`);
+        logger.warn(`CORS blocked: ${origin}`);
         return callback(new Error('Not allowed by CORS'), false);
       }
       
-      // In development, allow all
       callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
-    exposedHeaders: ['Content-Length', 'X-Request-Id'],
-    maxAge: 86400 // 24 hours
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    maxAge: 86400
   };
 
   app.use(cors(corsOptions));
@@ -266,11 +583,11 @@ async function createApp() {
     contentSecurityPolicy: IS_PRODUCTION ? {
       directives: {
         defaultSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'", "https:"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "https:"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:", "https:"],
-        fontSrc: ["'self'", "https:", "data:"],
-        connectSrc: ["'self'", "ws:", "http://localhost:*"],
+        fontSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
       },
     } : false,
     crossOriginEmbedderPolicy: false,
@@ -280,88 +597,45 @@ async function createApp() {
   app.use(compression({ level: 6 }));
 
   // =============================================
-  // ⚠️ OPTIMIZED RATE LIMITING - PREVENT 429 ERRORS
+  // ⚠️ RATE LIMITING
   // =============================================
   const generalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
+    windowMs: 15 * 60 * 1000,
     max: 250,
-    message: {
-      success: false,
-      error: "Too many requests, please try again later",
-      retryAfter: "15 minutes"
-    },
+    message: { success: false, error: "Too many requests" },
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
-      // Skip rate limiting for these paths
-      const skipPaths = [
-        '/api/health', 
-        '/api/email/status', 
-        '/api/scheduler/health',
-        '/api/scheduler/status',
-        '/favicon.ico'
-      ];
-      return skipPaths.some(path => req.path.startsWith(path));
+      const skipPaths = ['/api/health', '/api/email/status', '/favicon.ico'];
+      return skipPaths.some(p => req.path.startsWith(p));
     }
   });
 
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 10,
-    message: {
-      success: false,
-      error: "Too many login attempts, please try again later"
-    },
-    standardHeaders: true,
-    legacyHeaders: false
+    message: { success: false, error: "Too many login attempts" }
   });
 
-  const dashboardLimiter = rateLimit({
+  const schedulerLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 30,
-    message: {
-      success: false,
-      error: "Too many dashboard requests, please slow down"
-    },
-    standardHeaders: true,
-    legacyHeaders: false
+    message: { success: false, error: "Scheduler rate limited" }
   });
 
-  // Special limiter for scheduler endpoints to prevent self-DDoS
-  const schedulerLimiter = rateLimit({
-    windowMs: 60 * 1000, // 1 minute window
-    max: 5, // Only 5 requests per minute to scheduler
-    message: {
-      success: false,
-      error: "Scheduler endpoint rate limited. Please wait before trying again."
-    },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => {
-      // Skip rate limiting for health checks
-      return req.path.includes('/health') || req.path.includes('/status');
-    }
-  });
-
-  // Apply rate limits
   app.use('/api/auth', authLimiter);
-  app.use('/api/dashboard', dashboardLimiter);
-  app.use('/api/scheduler', schedulerLimiter); // Add scheduler-specific limiter
+  app.use('/api/scheduler', schedulerLimiter);
   app.use('/api', generalLimiter);
 
   // =============================================
-  // 📝 BODY PARSING
+  // 📝 BODY PARSING & LOGGING
   // =============================================
   app.use(express.json({ limit: '5mb' }));
   app.use(express.urlencoded({ extended: true, limit: '5mb' }));
-
-  // =============================================
-  // 📊 REQUEST LOGGING
-  // =============================================
   app.use(requestLogger);
 
   // =============================================
-  // 🎯 BASIC API ROUTES WITH CACHE
+  // 🎯 BASIC API ROUTES
   // =============================================
   app.get('/api/health', (req, res) => {
     res.json({
@@ -371,14 +645,16 @@ async function createApp() {
       environment: process.env.NODE_ENV || 'development',
       port: PORT,
       emailSending: EMAIL_ENABLED,
-      server: 'ready',
-      status: 'running',
       startupTime: Date.now() - serverStartTime,
       scheduler: global.schedulerStatus,
-      cache: {
-        enabled: true,
-        stats: global.apiCache.getStats()
-      }
+      cache: { stats: global.apiCache.getStats() },
+      packaged: IS_PKG,
+      platform: process.platform,
+      nodeVersion: process.version,
+      pdfkitPatched: !!global.__pdfkit_patched__,
+      asciiFixed: !!global.__ascii_encoding_fixed__,
+      bufferBased: !!global.__buffer_based_encoding__,
+      autoBrowser: (IS_PKG || IS_PRODUCTION) ? 'enabled' : 'disabled'
     });
   });
 
@@ -388,216 +664,352 @@ async function createApp() {
       running: global.schedulerStatus.running,
       lastRun: global.schedulerStatus.lastRun,
       interval: global.schedulerStatus.interval,
+      cronPattern: global.schedulerStatus.cronPattern,
       callsInLastMinute: global.schedulerStatus.callsInLastMinute,
       nextRunEstimate: global.schedulerStatus.lastRun 
         ? new Date(new Date(global.schedulerStatus.lastRun).getTime() + global.schedulerStatus.interval).toISOString()
         : null,
-      message: `Scheduler running every ${global.schedulerStatus.interval/60000} minutes`
+      error: global.schedulerStatus.error
     });
   });
 
-  app.get('/api/backup/history', createCacheMiddleware(30), (req, res) => {
+  app.get('/api/email/status', (req, res) => {
     res.json({
-      success: true,
-      data: [],
-      message: 'Backup history endpoint',
+      emailSending: EMAIL_ENABLED,
+      status: EMAIL_ENABLED ? 'enabled' : 'disabled',
+      message: EMAIL_ENABLED ? '✅ Email sending ENABLED' : '🛑 Email sending DISABLED',
       timestamp: new Date().toISOString()
     });
   });
 
   app.get("/api", (req, res) => {
     res.json({
-      message: "📊 Guard Report API is running",
-      version: "3.0.0",
+      message: "📊 Guard Report API v3.0.0",
       production: IS_PRODUCTION,
       emailSending: EMAIL_ENABLED ? "enabled" : "DISABLED",
-      cache: "enabled (5 min TTL)",
-      scheduler: `running every ${SCHEDULER_INTERVAL/60000} minutes`,
-      rateLimit: "optimized to prevent 429 errors",
+      scheduler: `${SCHEDULER_INTERVAL_MS/60000}min interval`,
+      schedulerCron: SCHEDULER_CRON_PATTERN,
+      packaged: IS_PKG,
+      asciiFixed: !!global.__ascii_encoding_fixed__,
+      bufferBased: !!global.__buffer_based_encoding__,
+      autoBrowser: (IS_PKG || IS_PRODUCTION) ? "enabled" : "disabled",
       endpoints: {
+        health: "/api/health",
         auth: "/api/auth",
         dashboard: "/api/dashboard",
         admin: "/api/admin",
         clients: "/api/clients",
         reports: "/api/reports",
         scheduler: "/api/scheduler",
-        schedulerStatus: "/api/scheduler/status",
         incidents: "/api/incidents",
-        health: "/api/health",
-        emailStatus: "/api/email/status"
+        emailStatus: "/api/email/status",
+        sync: "/api/sync",
+        backup: "/api/backup",
+        patrolSchedules: "/api/patrol-schedules",
+        events: "/api/events"
       }
     });
   });
 
-  app.get('/api/email/status', createCacheMiddleware(60), (req, res) => {
-    res.json({
-      emailSending: EMAIL_ENABLED,
-      status: EMAIL_ENABLED ? 'enabled' : 'disabled',
-      message: EMAIL_ENABLED 
-        ? '✅ Email sending is ENABLED'
-        : '🛑 Email sending is DISABLED',
-      timestamp: new Date().toISOString()
-    });
-  });
+  // =============================================
+  // 📦 LOAD ALL ROUTES (ASCII FIX IS ALREADY APPLIED)
+  // =============================================
+  logger.info('Loading API routes...');
+  
+  const loadRoute = async (config) => {
+    try {
+      const routePath = path.join(__dirname, 'routes', config.file);
+      if (!fs.existsSync(routePath)) {
+        logger.debug(`Route file not found: ${config.file}`);
+        app.use(config.path, (req, res) => {
+          res.status(503).json({
+            success: false,
+            error: `Route ${config.file} not available`,
+            message: "Route file not found"
+          });
+        });
+        return false;
+      }
 
-  // =============================================
-  // 📦 LOAD ALL ROUTES
-  // =============================================
-  console.log('\n🔄 Loading API routes...');
+      logger.debug(`Loading: ${config.file}...`);
+      
+      if (!IS_PRODUCTION && require.cache[routePath]) {
+        delete require.cache[routePath];
+      }
+
+      // ASCII fix is already applied globally, so routes should load fine
+      const route = require(routePath);
+      app.use(config.path, route);
+      logger.debug(`Loaded: ${config.path} -> ${config.file}`);
+      return true;
+      
+    } catch (error) {
+      logger.warn(`Failed to load ${config.file}: ${error.message}`);
+      
+      // Check if it's an encoding error (shouldn't happen since fix is applied)
+      if (error.message.includes('ascii') || error.message.includes('encoding') || 
+          error.message.includes('TextDecoder') || error.message.includes('FontKit')) {
+        logger.error(`ASCII encoding error in ${config.file} - global fix should have prevented this`);
+        logger.error('Check that TextDecoder/TextEncoder polyfills are properly applied');
+      }
+      
+      app.use(config.path, (req, res) => {
+        res.status(503).json({
+          success: false,
+          error: `Route ${config.file} temporarily unavailable`,
+          message: error.message,
+          timestamp: new Date().toISOString()
+        });
+      });
+      return false;
+    }
+  };
+
+  const routeConfig = [
+    { file: "testRoute.js", path: "/api/test" },
+    { file: "schedularRoutes.js", path: "/api/scheduler" },
+    { file: "reportRoutes.js", path: "/api/reports" },
+    { file: "clientRoutes.js", path: "/api/clients" },
+    { file: "dataSyncRoutes.js", path: "/api/sync" },
+    { file: "backupSyncRoute.js", path: "/api/backup" },
+    { file: "managePatrolScheduleRoutes.js", path: "/api/patrol-schedules" },
+    { file: "eventsRoutes.js", path: "/api/events" },
+    { file: "auth.js", path: "/api/auth" },
+    { file: "dashboard.js", path: "/api/dashboard" },
+    { file: "adminRoutes.js", path: "/api/admin" }
+  ];
+
+  const loadPromises = routeConfig.map(config => loadRoute(config));
+  const results = await Promise.allSettled(loadPromises);
+  
+  const successCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+  logger.info(`Routes loaded: ${successCount}/${routeConfig.length} successful`);
+
+  // Load incident routes if available
+  try {
+    const incidentModelPath = path.join(__dirname, 'models', 'incidentModel.js');
+    if (fs.existsSync(incidentModelPath)) {
+      logger.debug('Loading incident routes...');
+      const incidentModel = require(incidentModelPath);
+      if (typeof incidentModel.createIncidentAPI === 'function') {
+        incidentModel.createIncidentAPI(app);
+        logger.info('Incident routes registered');
+      }
+    }
+  } catch (error) {
+    logger.warn('Incident routes not available');
+  }
+
+  // Initialize BMSecurity API
+  logger.debug('Initializing BMSecurity API...');
+  global.bmSecurityAPIStatus = { status: 'initializing' };
   
   try {
-    // Load routes in parallel for faster startup
-    const routePromises = [
-      loadRoute("./routes/testRoute.js"),
-      loadRoute('./routes/schedularRoutes.js'),
-      loadRoute("./routes/reportRoutes.js"),
-      loadRoute("./routes/clientRoutes.js"),
-      loadRoute("./routes/dataSyncRoutes.js"),
-      loadRoute("./routes/backupSyncRoute.js"),
-      loadRoute("./routes/managePatrolScheduleRoutes.js"),
-      loadRoute('./routes/eventsRoutes.js'),
-      loadRoute("./routes/auth.js"),
-      loadRoute("./routes/dashboard.js"),
-      loadRoute("./routes/adminRoutes.js")
-    ];
-
-    const routes = await Promise.all(routePromises);
-    
-    // Register routes
-    app.use("/api/test", routes[0]);
-    app.use("/api/scheduler", routes[1]);
-    app.use("/api/reports", routes[2]);
-    app.use("/api/clients", routes[3]);
-    app.use("/api/sync", routes[4]);
-    app.use("/api/backup", routes[5]);
-    app.use("/api/patrol-schedules", routes[6]);
-    app.use('/api/events', routes[7]);
-    app.use("/api/auth", routes[8]);
-    app.use("/api/dashboard", routes[9]);
-    app.use("/api/admin", routes[10]);
-    
-    console.log('✅ All API routes registered!');
-    
-    // Load incident routes
-    try {
-      const incidentModel = await import('./models/incidentModel.js');
-      console.log('📊 Registering incident API routes...');
-      incidentModel.default.createIncidentAPI(app);
-      console.log('✅ Incident routes registered');
-    } catch (error) {
-      console.warn('⚠️ Incident routes not available:', error.message);
+    const bmSecurityAPIPath = path.join(__dirname, 'service', 'bmSecurityAPI.js');
+    if (fs.existsSync(bmSecurityAPIPath)) {
+      const bmSecurityAPI = require(bmSecurityAPIPath);
+      const token = await bmSecurityAPI.ensureAuthenticated().catch(() => null);
+      global.bmSecurityAPIStatus = token ? 
+        { success: true, status: 'authenticated' } : 
+        { success: false, status: 'login_failed' };
+      logger.info(`BMSecurity API: ${global.bmSecurityAPIStatus.status}`);
+    } else {
+      logger.debug('BMSecurity API file not found');
+      global.bmSecurityAPIStatus = { success: false, status: 'file_not_found' };
     }
-    
-    // Initialize BMSecurity API in background
-    console.log('🔄 Starting background services...');
-    
-    global.bmSecurityAPIStatus = { 
-      success: false, 
-      status: 'initializing',
-      message: 'BMSecurity API is initializing...'
-    };
-    
-    // Start BMSecurity API with timeout
-    const apiInitPromise = initializeBMSecurityAPI()
-      .then(apiStatus => {
-        global.bmSecurityAPIStatus = apiStatus;
-        console.log('✅ BMSecurity API initialized:', apiStatus.status);
-      })
-      .catch(error => {
-        console.error('❌ BMSecurity API initialization failed:', error.message);
-        global.bmSecurityAPIStatus = { 
-          success: false, 
-          status: 'error',
-          error: error.message 
-        };
-      });
-
-    // Start scheduler with SIGNIFICANTLY REDUCED frequency
-    const schedulerPromise = import("./service/scheduler.js")
-      .then(async (schedulerModule) => {
-        console.log('✅ Scheduler module loaded');
-        
-        // Set scheduler to run less frequently - FIX FOR 429 ERRORS
-        if (schedulerModule.default && schedulerModule.default.updateSchedulerInterval) {
-          schedulerModule.default.updateSchedulerInterval(SCHEDULER_INTERVAL);
-          console.log(`⏰ Scheduler interval set to ${SCHEDULER_INTERVAL/60000} minutes`);
-          
-          // Update global status
-          global.schedulerStatus.running = true;
-          global.schedulerStatus.interval = SCHEDULER_INTERVAL;
-          global.schedulerStatus.lastRun = new Date().toISOString();
-        } else {
-          console.warn('⚠️ Scheduler module does not have updateSchedulerInterval method');
-          console.log('ℹ️ Check ./service/scheduler.js for hardcoded interval');
-        }
-        return schedulerModule;
-      })
-      .catch(error => {
-        console.error('❌ Scheduler failed to start:', error.message);
-        return null;
-      });
-
-    // Wait for critical services
-    await Promise.allSettled([apiInitPromise, schedulerPromise]);
-    
-    console.log('✅ Background services started');
-    
   } catch (error) {
-    console.error('❌ Error loading routes:', error.message);
-    throw error;
+    global.bmSecurityAPIStatus = { success: false, status: 'error', error: error.message };
+    logger.warn(`BMSecurity API error: ${error.message}`);
   }
 
   // =============================================
-  // 🎨 STATIC FILES & FRONTEND SERVING
+  // 🕒 SCHEDULER LOADING
   // =============================================
-  const frontendDistPath = path.join(__dirname, 'client', 'reports', 'dist');
-  const frontendExists = fs.existsSync(path.join(frontendDistPath, 'index.html'));
-
-  if (frontendExists) {
-    console.log(`📁 Serving frontend from: ${frontendDistPath}`);
-    app.use(express.static(frontendDistPath, {
-      maxAge: IS_PRODUCTION ? '1d' : '0',
-      etag: true,
-      lastModified: true,
-      index: false,
-      setHeaders: (res, path) => {
-        if (path.endsWith('.html')) {
-          res.setHeader('Cache-Control', 'no-cache');
+  logger.debug('Loading scheduler...');
+  
+  setTimeout(async () => {
+    try {
+      const schedulerPath = path.join(__dirname, 'service', 'scheduler.js');
+      if (fs.existsSync(schedulerPath)) {
+        if (!IS_PRODUCTION) {
+          delete require.cache[require.resolve(schedulerPath)];
         }
+        
+        const schedulerModule = require(schedulerPath);
+        logger.debug('Scheduler module loaded');
+        
+        if (schedulerModule.initializeScheduler) {
+          schedulerModule.initializeScheduler(SCHEDULER_CRON_PATTERN);
+        } else if (schedulerModule.default?.initializeScheduler) {
+          schedulerModule.default.initializeScheduler(SCHEDULER_CRON_PATTERN);
+        } else if (schedulerModule.init) {
+          schedulerModule.init(SCHEDULER_CRON_PATTERN);
+        }
+        
+        global.schedulerStatus.running = true;
+        global.schedulerStatus.lastRun = new Date().toISOString();
+        
+        logger.info(`Scheduler initialized (${SCHEDULER_INTERVAL_MS/60000} min interval)`);
+        
+        if (schedulerModule.getSchedulerStatus) {
+          const status = schedulerModule.getSchedulerStatus();
+          logger.debug(`Scheduler status: ${status.status}`);
+        }
+        
+      } else {
+        logger.warn('Scheduler file not found, running without scheduler');
+        global.schedulerStatus.running = false;
+        global.schedulerStatus.error = 'File not found';
       }
-    }));
-    
-    // Serve index.html for all non-API routes
-    app.get('', (req, res, next) => {
-      if (req.path.startsWith('/api')) {
-        return next();
-      }
-      res.sendFile(path.join(frontendDistPath, 'index.html'));
-    });
-  } else {
-    console.log(`⚠️  Frontend not found at: ${frontendDistPath}`);
-    
-    app.get('/', (req, res) => {
+    } catch (error) {
+      logger.error(`Scheduler failed to load: ${error.message}`);
+      global.schedulerStatus.running = false;
+      global.schedulerStatus.error = error.message;
+    }
+  }, 3000);
+
+  app.use('/api', createCacheMiddleware());
+
+  // =============================================
+  // 🌐 SETUP FRONTEND SERVING
+  // =============================================
+  const frontendReady = setupFrontendServing(app);
+  
+  if (!frontendReady) {
+    app.get('/', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      
       res.send(`
         <!DOCTYPE html>
         <html>
           <head>
             <title>Guard Report API</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
-              body { font-family: Arial, sans-serif; padding: 40px; text-align: center; }
-              h1 { color: #333; }
-              .status { color: green; font-weight: bold; }
-              code { background: #f5f5f5; padding: 2px 5px; border-radius: 3px; }
-              .warning { color: orange; font-weight: bold; }
+              body { 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                margin: 0;
+                padding: 20px;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+              }
+              .container { 
+                background: white; 
+                padding: 40px; 
+                border-radius: 20px; 
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 800px; 
+                width: 100%;
+                text-align: center;
+              }
+              h1 { 
+                color: #333; 
+                margin-bottom: 10px;
+                font-size: 2.5em;
+              }
+              .status { 
+                color: #28a745; 
+                font-weight: bold; 
+                font-size: 1.2em;
+                margin: 20px 0;
+                padding: 10px;
+                background: #d4edda;
+                border-radius: 10px;
+              }
+              .error { 
+                color: #721c24; 
+                background: #f8d7da; 
+                padding: 20px; 
+                border-radius: 10px; 
+                margin: 20px 0; 
+                border-left: 5px solid #f5c6cb;
+              }
+              .api-link { 
+                display: inline-block; 
+                margin: 10px; 
+                padding: 15px 30px; 
+                background: #007bff; 
+                color: white; 
+                text-decoration: none; 
+                border-radius: 50px;
+                font-weight: bold;
+                transition: all 0.3s;
+                box-shadow: 0 4px 6px rgba(0,123,255,0.3);
+              }
+              .api-link:hover { 
+                background: #0056b3; 
+                transform: translateY(-2px);
+                box-shadow: 0 6px 12px rgba(0,123,255,0.4);
+              }
+              .info-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 25px 0;
+                text-align: left;
+              }
+              .info-item {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 10px;
+                border-left: 4px solid #007bff;
+              }
+              .info-label {
+                font-weight: bold;
+                color: #666;
+                font-size: 0.9em;
+              }
+              .info-value {
+                font-size: 1.1em;
+                margin-top: 5px;
+              }
             </style>
           </head>
           <body>
-            <h1>📊 Guard Report API</h1>
-            <p class="status">✅ Server is running on port ${PORT}</p>
-            <p>API is available at <code>/api</code> endpoints</p>
-            <p>📧 Email sending: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}</p>
-            <p>⏰ Scheduler: Running every ${SCHEDULER_INTERVAL/60000} minutes</p>
-            <p class="warning">⚠️ Frontend not built yet. Build with: <code>cd client/reports && npm run build</code></p>
+            <div class="container">
+              <h1>📊 Guard Report API</h1>
+              <p class="status">✅ Server running on port ${PORT}</p>
+              <div class="error">
+                <strong>⚠️ Frontend not found!</strong><br>
+                <p>The React frontend files were not found in the expected location.</p>
+                <p>Running in API-only mode.</p>
+              </div>
+              
+              <div class="info-grid">
+                <div class="info-item">
+                  <div class="info-label">Mode</div>
+                  <div class="info-value">${IS_PKG ? '📦 PKG' : '🔧 Development'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Email Sending</div>
+                  <div class="info-value">${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Scheduler Interval</div>
+                  <div class="info-value">${SCHEDULER_INTERVAL_MS/60000} minutes</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">ASCII Support</div>
+                  <div class="info-value">${global.__ascii_encoding_fixed__ ? '✅ BUFFER-BASED' : '⚠️ DEFAULT'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Auto-Browser</div>
+                  <div class="info-value">${(IS_PKG || IS_PRODUCTION) ? '✅ ENABLED' : '🛑 DISABLED'}</div>
+                </div>
+              </div>
+              
+              <div style="margin-top: 30px;">
+                <p>Useful API endpoints:</p>
+                <a class="api-link" href="/api/health">API Health</a>
+                <a class="api-link" href="/api">API Endpoints</a>
+                <a class="api-link" href="/api/scheduler/status">Scheduler Status</a>
+                <a class="api-link" href="/api/email/status">Email Status</a>
+              </div>
+            </div>
           </body>
         </html>
       `);
@@ -605,67 +1017,36 @@ async function createApp() {
   }
 
   // =============================================
-  // 🚨 404 HANDLER
+  // 🚨 404 & ERROR HANDLERS
   // =============================================
-  app.use('/api//', (req, res) => {
+  app.use('/api/', (req, res) => {
     res.status(404).json({
       success: false,
       error: "API endpoint not found",
       requested: req.originalUrl,
-      availableEndpoints: [
-        '/api/auth/login',
-        '/api/auth/register',
-        '/api/dashboard',
-        '/api/admin',
-        '/api/clients',
-        '/api/reports',
-        '/api/events',
-        '/api/scheduler',
-        '/api/scheduler/status',
-        '/api/health',
-        '/api/email/status'
-      ]
+      timestamp: new Date().toISOString()
     });
   });
 
-  // =============================================
-  // 🚨 ERROR HANDLING
-  // =============================================
   app.use((err, req, res, next) => {
-    console.error(`❌ Error: ${err.message}`);
-    
-    // Handle specific error types
-    if (err.message.includes('CORS')) {
-      return res.status(403).json({
-        success: false,
-        error: "CORS Error",
-        message: "Cross-Origin Request Blocked",
-        origin: req.headers.origin,
-        timestamp: new Date().toISOString()
-      });
-    }
+    logger.error(`Error: ${err.message}`);
     
     if (err.statusCode === 429) {
       return res.status(429).json({
         success: false,
         error: "Rate limit exceeded",
         message: "Too many requests, please try again later",
-        retryAfter: "15 minutes",
-        timestamp: new Date().toISOString(),
-        suggestion: "Scheduler running too frequently. Check scheduler interval settings."
+        retryAfter: "15 minutes"
       });
     }
     
-    const statusCode = err.statusCode || err.status || 500;
-    const errorMessage = IS_PRODUCTION && statusCode === 500 
-      ? 'Internal server error' 
-      : err.message;
-    
+    const statusCode = err.statusCode || 500;
     res.status(statusCode).json({ 
       success: false,
-      error: errorMessage,
+      error: IS_PRODUCTION && statusCode === 500 ? 'Internal server error' : err.message,
       timestamp: new Date().toISOString(),
-      ...(IS_PRODUCTION ? {} : { stack: err.stack })
+      path: req.path,
+      ...(!IS_PRODUCTION && { stack: err.stack })
     });
   });
 
@@ -677,52 +1058,65 @@ async function createApp() {
 // =============================================
 async function startServer() {
   try {
-    console.log('\n🚀 Starting Guard Report API Server...');
-    console.log('📊 Environment:', process.env.NODE_ENV || 'development');
-    console.log('📧 Email Status:', EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED');
-    console.log('⏰ Scheduler Interval:', SCHEDULER_INTERVAL/60000, 'minutes');
-    console.log('🚫 Rate Limit Protection: ACTIVE');
+    logger.info('Starting Guard Report API Server...');
     
-    const startTime = Date.now();
-    
-    // Create app
     const app = await createApp();
     
-    // Start server
     const server = app.listen(PORT, "0.0.0.0", () => {
-      console.log("=".repeat(60));
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`📧 Email Sending: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
-      console.log(`⏰ Scheduler: Every ${SCHEDULER_INTERVAL/60000} minutes`);
-      console.log(`🚫 Rate Limit: Optimized to prevent 429 errors`);
-      console.log(`🔗 API Base URL: http://localhost:${PORT}/api`);
-      console.log(`🔗 Health Check: http://localhost:${PORT}/api/health`);
-      console.log(`🔗 Scheduler Status: http://localhost:${PORT}/api/scheduler/status`);
-      console.log(`📦 Cache: ENABLED (5 min TTL)`);
-      console.log(`⏰ Startup Time: ${Date.now() - startTime}ms`);
-      console.log("=".repeat(60));
-      console.log('\n✅ Server is ready!');
+      logger.banner([
+        '',
+        '═'.repeat(60),
+        '    ✅ SERVER READY',
+        '═'.repeat(60),
+        `    🌐 Web UI:        http://localhost:${PORT}/`,
+        `    📡 API:           http://localhost:${PORT}/api`,
+        `    📧 Email:         ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`,
+        `    ⏰ Scheduler:     ${SCHEDULER_INTERVAL_MS/60000} min interval`,
+        `    📦 Packaged:      ${IS_PKG ? 'Yes' : 'No'}`,
+        `    🔧 Environment:   ${process.env.NODE_ENV || 'development'}`,
+        `    🔤 ASCII Fix:     ${global.__ascii_encoding_fixed__ ? 'BUFFER-BASED ✅' : 'NOT NEEDED ✅'}`,
+        `    🌐 Auto-Browser:  ${(IS_PKG || IS_PRODUCTION) ? '✅ ENABLED' : '🛑 DISABLED'}`,
+        '═'.repeat(60),
+        '',
+        '    Press Ctrl+C to stop the server',
+        ''
+      ]);
+      
+      // 🌐 AUTO-OPEN BROWSER (Only in Production/PKG mode)
+      if (IS_PKG || IS_PRODUCTION) {
+        setTimeout(() => {
+          const url = `http://localhost:${PORT}`;
+          logger.info(`🌐 Opening browser in 1.5 seconds: ${url}`);
+          
+          // Give server a moment to fully initialize
+          setTimeout(() => {
+            try {
+              openBrowser(url);
+            } catch (browserError) {
+              logger.warn(`Failed to open browser: ${browserError.message}`);
+              logger.info(`Please manually open: ${url}`);
+            }
+          }, 1500);
+        }, 500); // Initial delay
+      } else {
+        logger.info(`🌐 Server ready at: http://localhost:${PORT}`);
+        logger.info('   (Auto-browser disabled in development mode)');
+      }
     });
 
     // Graceful shutdown
     const gracefulShutdown = async () => {
-      console.log(`\n⚠️  Received shutdown signal`);
+      logger.info('Shutting down gracefully...');
+      global.schedulerStatus.running = false;
       
-      // Close server
       server.close(() => {
-        console.log(`✅ HTTP server closed`);
-        
-        // Clear cache
         global.apiCache.flushAll();
-        console.log(`✅ Cache cleared`);
-        
+        logger.info('Server stopped');
         process.exit(0);
       });
       
-      // Force shutdown after 10 seconds
       setTimeout(() => {
-        console.error(`❌ Could not close connections in time, forcing shutdown`);
+        logger.error('Forcing shutdown');
         process.exit(1);
       }, 10000);
     };
@@ -730,25 +1124,26 @@ async function startServer() {
     process.on('SIGTERM', gracefulShutdown);
     process.on('SIGINT', gracefulShutdown);
     
-    // Handle uncaught errors
-    process.on('uncaughtException', (error) => {
-      console.error('❌ Uncaught Exception:', error);
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        logger.error(`Port ${PORT} is already in use`);
+        logger.info(`Try: kill $(lsof -t -i:${PORT}) or use a different port`);
+        process.exit(1);
+      } else {
+        logger.error('Server error:', error);
+      }
     });
     
-    process.on('unhandledRejection', (reason, promise) => {
-      console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-    });
-
     return server;
     
   } catch (error) {
-    console.error('❌ Failed to start server:', error.message);
-    console.error(error.stack);
+    logger.error('Failed to start server:', error);
     process.exit(1);
   }
 }
 
-// Start the server
-startServer();
+if (require.main === module) {
+  startServer();
+}
 
-export default startServer;
+module.exports = { startServer, createApp };

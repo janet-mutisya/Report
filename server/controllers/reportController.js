@@ -1,13 +1,13 @@
 // server/controllers/reportController.js - UPDATED WITH PDF SERVICE IMPORT
-import { generateWeeklyReportPDF } from "../service/reportService.js";
-import { generatePDFReport, generateDashboardPDF } from "../service/pdfService.js"; // ADDED PDF SERVICE
-import { fetchWeeklyReport } from "../models/reportModel.js";
-import { getClientSchedule } from "../scripts/managePatrolSchedules.js";
-import { sql, poolPromise } from "../config/database.js";
-import nodemailer from "nodemailer";
-import dayjs from "dayjs";
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const { generateWeeklyReportPDF } = require("../service/reportService.js");
+const { generatePDFReport, generateDashboardPDF } = require("../service/pdfService.js"); // ADDED PDF SERVICE
+const { fetchWeeklyReport } = require("../models/reportModel.js");
+const { getClientSchedule } = require("../scripts/managePatrolSchedules.js");
+const { sql, poolPromise } = require("../config/database.js");
+const nodemailer = require("nodemailer");
+const dayjs = require("dayjs");
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -175,7 +175,7 @@ async function getAllClients() {
  * 📄 Generate and download PDF report (reportService version)
  * Uses: generateWeeklyReportPDF from reportService.js
  */
-export const getWeeklyReportPDF = async (req, res) => {
+const getWeeklyReportPDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate, shiftType = "Day/Night" } = req.query;
     
@@ -252,7 +252,7 @@ export const getWeeklyReportPDF = async (req, res) => {
  * 📄 Generate Dashboard PDF (pdfService version)
  * NEW ENDPOINT: Uses generateDashboardPDF from pdfService.js
  */
-export const getDashboardPDF = async (req, res) => {
+const getDashboardPDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
     
@@ -332,7 +332,7 @@ export const getDashboardPDF = async (req, res) => {
  * 📄 Generate Comprehensive PDF with choice of service
  * NEW ENDPOINT: Allows choosing between reportService and pdfService
  */
-export const getComprehensivePDF = async (req, res) => {
+const getComprehensivePDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate, type = 'dashboard' } = req.query;
     
@@ -430,7 +430,7 @@ export const getComprehensivePDF = async (req, res) => {
  * 📊 Get patrol report data
  * Uses: fetchWeeklyReport from reportModel.js
  */
-export const getPatrolReport = async (req, res) => {
+const getPatrolReport = async (req, res) => {
   try {
     const { 
       client, 
@@ -599,7 +599,7 @@ export const getPatrolReport = async (req, res) => {
 /**
  * 🔄 Get available shifts and schedule configuration
  */
-export const getClientShifts = async (req, res) => {
+const getClientShifts = async (req, res) => {
   try {
     const { client } = req.query;
 
@@ -685,7 +685,7 @@ export const getClientShifts = async (req, res) => {
 /**
  * 🧪 Test PDF services
  */
-export const testPDFServices = async (req, res) => {
+const testPDFServices = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
 
@@ -788,7 +788,7 @@ export const testPDFServices = async (req, res) => {
 /**
  * 🧪 Test report data
  */
-export const testReportData = async (req, res) => {
+const testReportData = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
 
@@ -920,7 +920,7 @@ export const testReportData = async (req, res) => {
 /**
  * 🧪 Test report generation
  */
-export const testReportGeneration = async (req, res) => {
+const testReportGeneration = async (req, res) => {
   try {
     const { clientName } = req.params;
     const { startDate, endDate } = req.body;
@@ -1059,7 +1059,7 @@ export const testReportGeneration = async (req, res) => {
 /**
  * 📊 Get comprehensive client report
  */
-export const getComprehensiveClientReport = async (req, res) => {
+const getComprehensiveClientReport = async (req, res) => {
   try {
     const { clientName } = req.params;
     const { 
@@ -1215,7 +1215,7 @@ export const getComprehensiveClientReport = async (req, res) => {
 /**
  * 📈 Get client performance trends
  */
-export const getClientPerformanceTrends = async (req, res) => {
+const getClientPerformanceTrends = async (req, res) => {
   try {
     const { clientName } = req.params;
     const { months = 6 } = req.query;
@@ -1323,7 +1323,7 @@ export const getClientPerformanceTrends = async (req, res) => {
 /**
  * 👥 Get all clients list
  */
-export const getAllClientsList = async (req, res) => {
+const getAllClientsList = async (req, res) => {
   try {
     const clients = await getAllClients();
     
@@ -1358,7 +1358,7 @@ export const getAllClientsList = async (req, res) => {
 /**
  * 🔍 Search clients by name
  */
-export const searchClients = async (req, res) => {
+const searchClients = async (req, res) => {
   try {
     const { query } = req.query;
     
@@ -1404,7 +1404,7 @@ export const searchClients = async (req, res) => {
 /**
  * 🧪 Debug performance calculations
  */
-export const debugPerformanceCalc = async (req, res) => {
+const debugPerformanceCalc = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
     
@@ -1485,7 +1485,7 @@ export const debugPerformanceCalc = async (req, res) => {
 /**
  * 🏠 Health check endpoint
  */
-export const healthCheck = async (req, res) => {
+const healthCheck = async (req, res) => {
   try {
     const pool = await poolPromise;
     await pool.request().query('SELECT 1 as test');
@@ -1537,7 +1537,7 @@ export const healthCheck = async (req, res) => {
 /**
  * 📋 Get Weekly Report - Alias for getPatrolReport
  */
-export const getWeeklyReport = async (req, res) => {
+const getWeeklyReport = async (req, res) => {
   try {
     console.log("📋 [CONTROLLER] Weekly Report Alias - Using getPatrolReport...");
     return await getPatrolReport(req, res);
@@ -1555,18 +1555,40 @@ export const getWeeklyReport = async (req, res) => {
 // 🎯 EXPORT HELPER FUNCTIONS
 // =====================================================
 
-export {
+// Export all functions
+module.exports = {
+  // Main endpoints
+  getWeeklyReportPDF,
+  getDashboardPDF,          // NEW: PDF Service endpoint
+  getComprehensivePDF,      // NEW: Comprehensive PDF with choice
+  getPatrolReport,
+  getWeeklyReport,
+  getClientShifts,
+  
+  // Testing endpoints
+  testReportData,
+  testReportGeneration,
+  testPDFServices,          // NEW: Test both PDF services
+  
+  // Client endpoints
+  getComprehensiveClientReport,
+  getClientPerformanceTrends,
+  getAllClientsList,
+  searchClients,
+  
+  // Debug endpoints
+  debugPerformanceCalc,
+  healthCheck,
+  
+  // Helper functions
   calculateWeeklyTotal,
   getPerformanceRating,
   getPerformanceStatus,
   getShiftDescription
 };
 
-// =====================================================
-// 📦 DEFAULT EXPORT
-// =====================================================
-
-export default {
+// Keep default export for compatibility
+module.exports.default = {
   // Main endpoints
   getWeeklyReportPDF,
   getDashboardPDF,          // NEW: PDF Service endpoint

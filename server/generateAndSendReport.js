@@ -1,4 +1,4 @@
-import { Connection } from 'tedious';
+const { Connection } = require('tedious');
 
 const config = {
   userName: 'sa',

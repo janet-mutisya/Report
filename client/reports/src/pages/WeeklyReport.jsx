@@ -1,4 +1,4 @@
-// SecurityDashboard.jsx - SIMPLIFIED VERSION WITH BACKEND PDF SERVICES
+// SecurityDashboard.jsx - FINAL FIXED VERSION
 import { useEffect, useState, useCallback } from "react";
 import {
   AlertCircle,
@@ -55,9 +55,10 @@ export default function SecurityDashboard() {
   const [pdfError, setPdfError] = useState("");
   const [clientScheduleInfo, setClientScheduleInfo] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [allClients, setAllClients] = useState([]); // Store all clients for filtering
 
   // Use localhost backend URL
-  const API_BASE = "http://localhost:5000/api";
+  const API_BASE = "http://localhost:5000";
 
   // getShiftLabel function
   const getShiftLabel = useCallback((shiftValue) => {
@@ -168,35 +169,73 @@ export default function SecurityDashboard() {
     };
   }, [isValidZoneName]);
 
-  // Fetch clients with search capability
-  const fetchClients = useCallback(async (search = "") => {
+  // FIXED: Load all clients once, then filter locally
+  const fetchClients = useCallback(async () => {
     try {
       setErrorMessage("");
-      const url = search && search.length >= 2 
-        ? `${API_BASE}/reports/clients/search?query=${encodeURIComponent(search)}`
-        : `${API_BASE}/reports/clients`;
+      
+      const url = `${API_BASE}/api/clients`;
       
       const response = await fetch(url);
       
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        console.error(`HTTP Error: ${response.status}`);
+        setErrorMessage(`Server error: ${response.status} ${response.statusText}`);
+        setClients([]);
+        setAllClients([]);
+        return;
       }
       
       const data = await response.json();
       
-      if (data.success && Array.isArray(data.clients)) {
-        setClients(data.clients);
-        if (data.clients.length === 0) {
-          setErrorMessage("No clients found. Please try a different search term.");
-        }
+      if (data.success === true && Array.isArray(data.clients)) {
+        console.log(`✅ Loaded ${data.clients.length} clients from API`);
+        setAllClients(data.clients); // Store all clients
+        setClients(data.clients); // Initially show all clients
+        setErrorMessage(""); // Clear any errors
       } else {
-        throw new Error("Invalid response format from server");
+        console.warn("Unexpected response format:", data);
+        setErrorMessage("Server returned unexpected format. No clients loaded.");
+        setClients([]);
+        setAllClients([]);
       }
+      
     } catch (error) {
-      setErrorMessage("Failed to load clients: " + (error?.message || String(error)));
-      console.error("Client fetch error:", error);
+      console.error("Fetch error:", error);
+      setErrorMessage("Failed to load clients: " + error.message);
+      setClients([]);
+      setAllClients([]);
     }
   }, [API_BASE]);
+
+  // Filter clients based on search query
+  const filterClients = useCallback((query) => {
+    if (!query || query.trim().length < 2) {
+      // If search is empty or less than 2 chars, show all clients
+      setClients(allClients);
+      return;
+    }
+    
+    const searchTerm = query.toLowerCase().trim();
+    const filtered = allClients.filter(clientItem => {
+      const name = clientItem.name || clientItem.cue_cnombre || "";
+      const account = clientItem.accountNumber || "";
+      return name.toLowerCase().includes(searchTerm) || 
+             account.toLowerCase().includes(searchTerm);
+    });
+    
+    console.log(`🔍 Filtered to ${filtered.length} clients for: "${query}"`);
+    setClients(filtered);
+  }, [allClients]);
+
+  // Handle search input change with debouncing
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      filterClients(searchQuery);
+    }, 300); // 300ms debounce
+    
+    return () => clearTimeout(timer);
+  }, [searchQuery, filterClients]);
 
   // Fetch client schedule info
   const fetchClientScheduleInfo = useCallback(async (clientName) => {
@@ -208,7 +247,7 @@ export default function SecurityDashboard() {
     }
     
     try {
-      const response = await fetch(`${API_BASE}/reports/shifts?client=${encodeURIComponent(clientName)}`);
+      const response = await fetch(`${API_BASE}/api/reports/shifts?client=${encodeURIComponent(clientName)}`);
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -242,10 +281,13 @@ export default function SecurityDashboard() {
     }
   }, [API_BASE]);
 
+  // Initialize - load clients on mount
   useEffect(() => {
+    console.log("🚀 Component mounted, loading clients...");
     fetchClients();
   }, [fetchClients]);
 
+  // Handle client selection
   useEffect(() => {
     if (client) {
       fetchClientScheduleInfo(client);
@@ -382,7 +424,7 @@ export default function SecurityDashboard() {
     setReport(null);
 
     try {
-      const url = `${API_BASE}/reports/patrol?client=${encodeURIComponent(
+      const url = `${API_BASE}/api/reports/patrol?client=${encodeURIComponent(
         client
       )}&startDateTime=${encodeURIComponent(startDateTime)}&endDateTime=${encodeURIComponent(
         endDateTime
@@ -428,7 +470,7 @@ export default function SecurityDashboard() {
         shiftType
       });
 
-      const endpoint = `${API_BASE}/reports/dashboard-pdf`;
+      const endpoint = `${API_BASE}/api/reports/dashboard-pdf`;
       const url = `${endpoint}?${params.toString()}`;
 
       const response = await fetch(url);
@@ -577,6 +619,19 @@ export default function SecurityDashboard() {
     if (!endDate) setEndDate(today);
   }, [startDate, endDate]);
 
+  // Handle manual refresh
+  const handleRefresh = () => {
+    console.log("🔄 Refreshing clients...");
+    fetchClients();
+    setSearchQuery(""); // Clear search on refresh
+  };
+
+  // Handle clear search
+  const handleClearSearch = () => {
+    setSearchQuery("");
+    setClients(allClients); // Show all clients
+  };
+
   return (
     <div className="min-h-screen bg-linear-to-b from-gray-50 to-blue-50 p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
@@ -593,12 +648,12 @@ export default function SecurityDashboard() {
             </div>
             <div className="flex items-center gap-4 shrink-0">
               <button
-                onClick={() => fetchClients(searchQuery)}
+                onClick={handleRefresh}
                 className="flex items-center gap-2 bg-blue-500 hover:bg-blue-400 px-4 py-2 rounded-lg transition-all shrink-0"
                 title="Refresh clients"
               >
                 <RefreshCw className="w-4 h-4 shrink-0" />
-                Refresh
+                Refresh Clients
               </button>
               <div className="bg-blue-500 bg-opacity-50 rounded-lg px-6 py-3 shrink-0">
                 <div className="text-sm text-blue-100">Last Updated</div>
@@ -615,49 +670,85 @@ export default function SecurityDashboard() {
             Report Configuration
           </h2>
           
-          {/* Search Box */}
-          <div className="mb-4">
+          {/* Search Box - FIXED with Search button */}
+          <div className="mb-6">
             <label className="block text-sm font-medium text-gray-700 mb-2">
               <Search className="inline w-4 h-4 mr-1 shrink-0" />
-              Search Clients
+              Search Clients ({clients.length} loaded)
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Type client name (min 2 characters)..."
+                placeholder="Type client name or account number..."
                 className="flex-1 border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchQuery.trim().length >= 2) {
+                    filterClients(searchQuery);
+                  }
+                }}
               />
               <button
-                onClick={() => fetchClients(searchQuery)}
-                disabled={searchQuery.length < 2}
-                className="bg-blue-600 text-white rounded-lg px-4 py-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shrink-0"
+                onClick={() => filterClients(searchQuery)}
+                disabled={!searchQuery || searchQuery.trim().length < 2}
+                className="flex items-center gap-2 bg-blue-600 text-white rounded-lg px-4 py-2.5 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shrink-0"
               >
+                <Search className="w-4 h-4 shrink-0" />
                 Search
               </button>
+              <button
+                onClick={handleClearSearch}
+                disabled={!searchQuery}
+                className="flex items-center gap-2 bg-gray-200 text-gray-700 rounded-lg px-4 py-2.5 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 transition-all shrink-0"
+              >
+                <XCircle className="w-4 h-4 shrink-0" />
+                Clear
+              </button>
             </div>
+            <p className="text-xs text-gray-500 mt-1">
+              {searchQuery && searchQuery.trim().length >= 2 
+                ? `Showing ${clients.length} of ${allClients.length} clients matching "${searchQuery}"`
+                : `Showing all ${allClients.length} clients`}
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            {/* Client Selector */}
             <div className="lg:col-span-1">
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 <Building2 className="inline w-4 h-4 mr-1 shrink-0" />
-                Select Client ({clients.length} found)
+                Select Client *
               </label>
               <select
                 value={client}
-                onChange={(event) => setClient(event.target.value)}
+                onChange={(e) => {
+                  console.log("Selected client:", e.target.value);
+                  setClient(e.target.value);
+                }}
                 className="w-full border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                disabled={loading || clients.length === 0}
+                disabled={loading}
               >
-                <option value="">{clients.length === 0 ? "No clients found" : "Select Client"}</option>
-                {clients.map((clientItem) => (
-                  <option key={clientItem.id} value={clientItem.name}>
-                    {clientItem.name}
+                <option value="">{clients.length === 0 ? "Loading..." : "-- Select Client --"}</option>
+                {clients.map((clientItem, index) => (
+                  <option 
+                    key={clientItem.id || index} 
+                    value={clientItem.name || clientItem.cue_cnombre}
+                  >
+                    {clientItem.name || clientItem.cue_cnombre} 
+                    {clientItem.accountNumber ? ` (${clientItem.accountNumber})` : ""}
                   </option>
                 ))}
               </select>
+              <div className="mt-1 text-sm">
+                {clients.length > 0 ? (
+                  <span className="text-green-600">✓ {clients.length} clients loaded</span>
+                ) : errorMessage ? (
+                  <span className="text-red-500">✗ {errorMessage}</span>
+                ) : (
+                  <span className="text-gray-500">Loading clients...</span>
+                )}
+              </div>
             </div>
 
             <div className="lg:col-span-2">
@@ -719,12 +810,12 @@ export default function SecurityDashboard() {
                 value={shiftType}
                 onChange={(event) => setShiftType(event.target.value)}
                 className="w-full border border-gray-300 rounded-lg p-2.5 focus:ring-2 focus:ring-blue-500"
-                disabled={loading || (client && availableShifts.length === 0)}
+                disabled={loading || !client}
               >
                 {!client ? (
                   <option value="">Select client first</option>
                 ) : availableShifts.length === 0 ? (
-                  <option value="">Loading...</option>
+                  <option value="">Loading shifts...</option>
                 ) : (
                   availableShifts.map((shift) => (
                     <option key={shift.value} value={shift.value}>
@@ -797,6 +888,7 @@ export default function SecurityDashboard() {
           )}
         </div>
 
+        {/* Error Messages */}
         {errorMessage && (
           <div className="bg-red-50 border-l-4 border-red-500 rounded-lg p-4 mb-6 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
@@ -817,7 +909,7 @@ export default function SecurityDashboard() {
           </div>
         )}
 
-        {/* Export Options - Only shown when data is available */}
+        {/* Export Options */}
         {hasData && (
           <div className="bg-white rounded-xl shadow-lg p-6 mb-6 border border-gray-200">
             <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
@@ -826,7 +918,6 @@ export default function SecurityDashboard() {
             </h3>
             
             <div className="flex flex-col md:flex-row gap-4">
-              {/* Export Info */}
               <div className="flex-1">
                 <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
                   <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
@@ -835,15 +926,10 @@ export default function SecurityDashboard() {
                   </h4>
                   <p className="text-sm text-blue-700">
                     PDFs are generated server-side using pdfService.js. 
-                    This ensures consistent formatting and reduces browser memory usage.
                   </p>
-                  <div className="mt-2 text-xs text-blue-600">
-                    Includes: Executive summary, incident reports, visual analytics, and detailed performance metrics.
-                  </div>
                 </div>
               </div>
 
-              {/* Export Buttons */}
               <div className="flex flex-col gap-2 shrink-0">
                 <button
                   onClick={downloadPDF}
@@ -893,16 +979,6 @@ export default function SecurityDashboard() {
                       {report.period.daysInRange} days
                     </span>
                   )}
-                  {metrics.validZonesCount && (
-                    <span className="ml-2 px-2 py-1 bg-green-100 text-green-800 rounded-md text-xs font-medium shrink-0">
-                      {metrics.validZonesCount} security posts
-                    </span>
-                  )}
-                  {metrics.expectedPerZone && (
-                    <span className="ml-2 px-2 py-1 bg-purple-100 text-purple-800 rounded-md text-xs font-medium shrink-0">
-                      {metrics.expectedPerZone} expected per zone
-                    </span>
-                  )}
                 </p>
               </div>
             </div>
@@ -912,11 +988,6 @@ export default function SecurityDashboard() {
               <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
                 Security Incidents & Guard Reports
-                {metrics.totalIncidents > 0 && (
-                  <span className="ml-2 px-2 py-1 bg-red-100 text-red-800 rounded-md text-xs font-medium shrink-0">
-                    {metrics.totalIncidents} incident{metrics.totalIncidents !== 1 ? 's' : ''}
-                  </span>
-                )}
               </h3>
               
               {metrics.totalIncidents > 0 && metrics.guardReportsData ? (
@@ -1007,7 +1078,6 @@ export default function SecurityDashboard() {
 
             {/* Charts Section */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-              {/* Performance Distribution Pie Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <Target className="w-5 h-5 text-blue-600 shrink-0" />
@@ -1073,9 +1143,6 @@ export default function SecurityDashboard() {
                         />
                       </PieChart>
                     </ResponsiveContainer>
-                    <div className="mt-4 text-xs text-gray-600 text-center">
-                      Total Zones: {metrics.performanceData.length}
-                    </div>
                   </>
                 ) : (
                   <div className="h-80 flex items-center justify-center">
@@ -1084,7 +1151,6 @@ export default function SecurityDashboard() {
                 )}
               </div>
 
-              {/* Performance Trend Line Chart */}
               <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
                 <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
                   <BarChart3 className="w-5 h-5 text-blue-600 shrink-0" />
@@ -1110,7 +1176,6 @@ export default function SecurityDashboard() {
                 <h3 className="text-lg font-bold text-gray-900">Detailed Performance Summary</h3>
                 <div className="text-sm text-gray-600">
                   Showing {report.summary.length} security post{report.summary.length !== 1 ? 's' : ''}
-                  {metrics.expectedPerZone && ` • ${metrics.expectedPerZone} expected per zone`}
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -1160,17 +1225,6 @@ export default function SecurityDashboard() {
                   </tbody>
                 </table>
               </div>
-              {report.schedule && (
-                <div className="mt-4 p-3 bg-gray-50 rounded-lg text-sm text-gray-600">
-                  <strong>Calculation Method:</strong> {metrics.calculationMethod || 'FULL expected patrols per zone (NOT divided)'}
-                  <br />
-                  <strong>Schedule:</strong> {report.schedule.patrolsPerDay} weekday / {report.schedule.weekendPatrols} weekend patrols per day.
-                  <br />
-                  <strong>Total Expected:</strong> {metrics.totalExpected} patrols for period across {metrics.validZonesCount} zones.
-                  <br />
-                  <strong>Performance:</strong> Based on actual patrols completed vs expected requirements.
-                </div>
-              )}
             </div>
 
             {/* Patrol Events Log */}
@@ -1186,8 +1240,8 @@ export default function SecurityDashboard() {
                       <tr>
                         <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Date</th>
                         <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Time</th>
-                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase w-1/3">Event</th>
-                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase w-1/3">Zone</th>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Event</th>
+                        <th className="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase">Zone</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
@@ -1213,20 +1267,22 @@ export default function SecurityDashboard() {
         {!loading && !hasData && !errorMessage && (
           <div className="bg-white rounded-2xl shadow-xl p-12 text-center border border-gray-200">
             <Users className="w-16 h-16 text-gray-400 mx-auto mb-4 shrink-0" />
-            <h3 className="text-xl font-bold text-gray-900 mb-2">No Data Available</h3>
-            <p className="text-gray-600 mb-4">Select a client and date range to generate your dashboard</p>
-            <div className="text-sm text-gray-500 space-y-1">
-              <p>✓ Choose a client from the dropdown</p>
-              <p>✓ Set start and end dates</p>
-              <p>✓ Select shift type</p>
-              <p>✓ Click "Generate Report"</p>
-            </div>
-            <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200 max-w-md mx-auto">
-              <h4 className="font-semibold text-blue-800 mb-2">Backend PDF Generation</h4>
-              <p className="text-sm text-blue-700">
-                Once you have data, you can export it as a professionally formatted PDF generated server-side.
-              </p>
-            </div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">
+              {clients.length > 0 ? 'Ready to Generate Report' : 'Loading Dashboard'}
+            </h3>
+            <p className="text-gray-600 mb-4">
+              {clients.length > 0 
+                ? 'Select a client and date range to generate your dashboard' 
+                : 'Connecting to server...'}
+            </p>
+            {clients.length > 0 && (
+              <div className="text-sm text-gray-500 space-y-1">
+                <p>✓ {clients.length} clients loaded</p>
+                <p>✓ Set start and end dates</p>
+                <p>✓ Select shift type</p>
+                <p>✓ Click "Generate Report"</p>
+              </div>
+            )}
           </div>
         )}
 

@@ -1,0 +1,857 @@
+// server.js - FULLY OPTIMIZED & PKG COMPATIBLE VERSION
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const helmet = require("helmet");
+const compression = require("compression");
+const rateLimit = require("express-rate-limit");
+const NodeCache = require("node-cache");
+const path = require("path");
+const fs = require("fs");
+
+// Load environment variables FIRST
+dotenv.config();
+
+// =============================================
+// 🚀 CONFIGURATION & CACHE SETUP
+// =============================================
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const PORT = process.env.PORT || 5000;
+
+// Detect if running inside pkg executable
+const IS_PKG = typeof process.pkg !== 'undefined' || 
+               (process.argv[0] && process.argv[0].includes('guard-report-server.exe')) ||
+               (process.execPath && process.execPath.includes('guard-report-server.exe')) ||
+               __dirname.includes('snapshot'); // pkg snapshots
+
+// =============================================
+// 🔧 PKG COMPATIBILITY FIXES
+// =============================================
+// AbortSignal.any polyfill for PKG/older Node versions
+if (typeof AbortSignal !== 'undefined' && !AbortSignal.any) {
+  AbortSignal.any = function(signals) {
+    const controller = new AbortController();
+    for (const signal of signals) {
+      if (signal && signal.aborted) {
+        controller.abort(signal.reason);
+        break;
+      }
+      if (signal) {
+        signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+      }
+    }
+    return controller.signal;
+  };
+  console.log('✅ AbortSignal.any polyfill loaded');
+}
+
+// TextDecoder/TextEncoder polyfills for PKG
+if (IS_PKG) {
+  console.log('📦 Running in PKG mode - applying compatibility fixes...');
+  
+  // Ensure AbortController exists
+  if (typeof global.AbortController === 'undefined') {
+    global.AbortController = class AbortController {
+      constructor() {
+        this.signal = {
+          aborted: false,
+          reason: undefined,
+          addEventListener: function(event, handler, options) {
+            // Simplified event listener for compatibility
+            this._handlers = this._handlers || [];
+            this._handlers.push({ event, handler, options });
+          }
+        };
+      }
+      abort(reason) {
+        this.signal.aborted = true;
+        this.signal.reason = reason;
+        if (this.signal._handlers) {
+          this.signal._handlers.forEach(h => {
+            if (h.event === 'abort' && h.handler) h.handler();
+          });
+        }
+      }
+    };
+    console.log('✅ AbortController polyfill loaded');
+  }
+  
+  // TextDecoder polyfill
+  try {
+    const { StringDecoder } = require('string_decoder');
+    
+    if (typeof global.TextDecoder === 'undefined') {
+      global.TextDecoder = class TextDecoder {
+        constructor(encoding = 'utf-8') {
+          this.encoding = encoding.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const encodingMap = {
+            'utf8': 'utf8', 'utf-8': 'utf8', 'ascii': 'ascii',
+            'latin1': 'latin1', 'binary': 'binary', 'base64': 'base64', 'hex': 'hex'
+          };
+          this.nodeEncoding = encodingMap[this.encoding] || 'utf8';
+        }
+        decode(input) {
+          if (!input) return '';
+          if (typeof input === 'string') return input;
+          let buffer;
+          if (input instanceof ArrayBuffer) {
+            buffer = Buffer.from(input);
+          } else if (ArrayBuffer.isView(input)) {
+            buffer = Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+          } else if (Buffer.isBuffer(input)) {
+            buffer = input;
+          } else {
+            buffer = Buffer.from(input);
+          }
+          const decoder = new StringDecoder(this.nodeEncoding);
+          return decoder.end(buffer);
+        }
+      };
+      console.log('✅ TextDecoder polyfill loaded');
+    }
+
+    if (typeof global.TextEncoder === 'undefined') {
+      global.TextEncoder = class TextEncoder {
+        encode(input = '') {
+          return Buffer.from(input, 'utf8');
+        }
+      };
+      console.log('✅ TextEncoder polyfill loaded');
+    }
+  } catch (error) {
+    console.warn('⚠️ Failed to load string_decoder:', error.message);
+  }
+}
+
+// Initialize global cache (5 minute TTL)
+global.apiCache = new NodeCache({ 
+  stdTTL: 300,
+  checkperiod: 60,
+  useClones: false
+});
+
+// 🛑 EMAIL KILL SWITCH - GLOBAL CONTROL
+const EMAIL_ENABLED = process.env.ENABLE_EMAIL_SENDING === 'true';
+global.EMAIL_SENDING_ENABLED = EMAIL_ENABLED;
+
+// 🛑 REDUCE SCHEDULER FREQUENCY TO PREVENT 429 ERRORS
+const SCHEDULER_INTERVAL = process.env.SCHEDULER_INTERVAL 
+  ? parseInt(process.env.SCHEDULER_INTERVAL) 
+  : (IS_PRODUCTION ? 600000 : 300000); // 10 min in prod, 5 min in dev
+
+console.log(`⏰ Scheduler interval: ${SCHEDULER_INTERVAL/1000}s`);
+
+// Track scheduler status
+global.schedulerStatus = {
+  running: false,
+  lastRun: null,
+  interval: SCHEDULER_INTERVAL,
+  callsInLastMinute: 0,
+  nextRun: null,
+  error: null
+};
+
+// Rate limiting helper
+const resetRateCounters = () => {
+  setInterval(() => {
+    global.schedulerStatus.callsInLastMinute = 0;
+  }, 60000);
+};
+resetRateCounters();
+
+console.log(`
+╔════════════════════════════════════════════╗
+║     📧 EMAIL SENDING: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}                      ║
+║     🔄 SCHEDULER: ${SCHEDULER_INTERVAL/60000}min interval               ║
+║     🚫 RATE LIMIT: ACTIVE                   ║
+║     📦 PKG MODE: ${IS_PKG ? '✅ ENABLED' : '❌ DISABLED'}                    ║
+╚════════════════════════════════════════════╝
+`);
+
+// =============================================
+// 🔧 CACHE MIDDLEWARE
+// =============================================
+const createCacheMiddleware = (duration = 300) => {
+  return (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    
+    const skipPaths = [
+      '/api/health',
+      '/api/email/status', 
+      '/api/scheduler/health',
+      '/api/dashboard/patrol-events',
+      '/api/dashboard/summary',
+      '/api/scheduler/status'
+    ];
+    
+    if (skipPaths.some(p => req.path.startsWith(p))) return next();
+    
+    const cacheKey = `${req.method}:${req.originalUrl}`;
+    const cached = global.apiCache.get(cacheKey);
+    
+    if (cached) {
+      console.log(`📦 Cache hit: ${cacheKey}`);
+      return res.json(cached);
+    }
+    
+    const originalJson = res.json;
+    res.json = function(data) {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        global.apiCache.set(cacheKey, data, duration);
+      }
+      return originalJson.call(this, data);
+    };
+    
+    next();
+  };
+};
+
+// =============================================
+// 📊 REQUEST LOGGING MIDDLEWARE
+// =============================================
+const requestLogger = (req, res, next) => {
+  const start = Date.now();
+  const skipPaths = ['/api/health', '/favicon.ico'];
+  
+  if (skipPaths.some(p => req.path.includes(p))) return next();
+  
+  if (req.path.includes('/scheduler') && req.method === 'GET') {
+    global.schedulerStatus.callsInLastMinute++;
+    if (global.schedulerStatus.callsInLastMinute > 10) {
+      console.warn(`⚠️ High scheduler call rate: ${global.schedulerStatus.callsInLastMinute}/min`);
+    }
+  }
+  
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (duration > 1000) {
+      console.log(`🐢 SLOW: ${req.method} ${req.path} - ${duration}ms`);
+    }
+  });
+  
+  next();
+};
+
+// =============================================
+// 🎯 FRONTEND SERVING HELPER
+// =============================================
+function setupFrontendServing(app) {
+  console.log('\n🌐 Setting up frontend serving...');
+  
+  let frontendDistPath;
+  
+  if (IS_PKG) {
+    // Check multiple possible locations in PKG mode
+    const possiblePaths = [
+      path.join(path.dirname(process.execPath), 'dist'),
+      path.join(__dirname, 'dist'),
+      path.join(process.cwd(), 'dist'),
+      path.join(path.dirname(process.execPath), 'client', 'reports', 'dist'),
+      path.join(__dirname, '..', 'client', 'reports', 'dist')
+    ];
+    
+    for (const p of possiblePaths) {
+      try {
+        const indexPath = path.join(p, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          frontendDistPath = p;
+          console.log(`📦 Found frontend at: ${p}`);
+          break;
+        }
+      } catch (error) {
+        // Continue searching
+      }
+    }
+  } else {
+    // Development mode
+    frontendDistPath = path.join(__dirname, '..', 'client', 'reports', 'dist');
+  }
+  
+  if (!frontendDistPath || !fs.existsSync(path.join(frontendDistPath, 'index.html'))) {
+    console.log(`❌ Frontend not found at: ${frontendDistPath || 'unknown location'}`);
+    console.log('ℹ️ Running in API-only mode');
+    return false;
+  }
+  
+  console.log(`✅ Serving React from: ${frontendDistPath}`);
+  
+  // Serve static files
+  app.use(express.static(frontendDistPath, {
+    maxAge: IS_PRODUCTION ? '1d' : '0',
+    etag: true,
+    lastModified: true
+  }));
+  
+  // Handle SPA routing
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    if (req.path.match(/\.[a-zA-Z0-9]{2,}$/)) return next();
+    
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+  });
+  
+  return true;
+}
+
+// =============================================
+// 🚀 CREATE EXPRESS APP
+// =============================================
+async function createApp() {
+  const app = express();
+  const serverStartTime = Date.now();
+
+  // =============================================
+  // 🔒 SECURITY & CORS MIDDLEWARE
+  // =============================================
+  const corsOptions = {
+    origin: function (origin, callback) {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      const allowedOrigins = [
+        'http://localhost:5173',
+        'http://localhost:3000',
+        'http://localhost:5000',
+        'http://127.0.0.1:5173',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5000',
+        ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : [])
+      ];
+      
+      if (IS_PRODUCTION) {
+        if (allowedOrigins.includes(origin) || origin === process.env.FRONTEND_URL) {
+          return callback(null, true);
+        }
+        console.log(`❌ CORS blocked: ${origin}`);
+        return callback(new Error('Not allowed by CORS'), false);
+      }
+      
+      // In development, allow all origins
+      callback(null, true);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    maxAge: 86400
+  };
+
+  app.use(cors(corsOptions));
+  
+  // Handle OPTIONS pre-flight requests - FIXED for Express 5
+  //app.options('/:path*', cors(corsOptions));
+
+  app.use(helmet({
+    contentSecurityPolicy: IS_PRODUCTION ? {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https:"],
+        fontSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+      },
+    } : false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" }
+  }));
+
+  app.use(compression({ level: 6 }));
+
+  // =============================================
+  // ⚠️ OPTIMIZED RATE LIMITING
+  // =============================================
+  const generalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 250,
+    message: { success: false, error: "Too many requests" },
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => {
+      const skipPaths = ['/api/health', '/api/email/status', '/favicon.ico'];
+      return skipPaths.some(p => req.path.startsWith(p));
+    }
+  });
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { success: false, error: "Too many login attempts" }
+  });
+
+  const schedulerLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 5,
+    message: { success: false, error: "Scheduler rate limited" }
+  });
+
+  app.use('/api/auth', authLimiter);
+  app.use('/api/scheduler', schedulerLimiter);
+  app.use('/api', generalLimiter);
+
+  // =============================================
+  // 📝 BODY PARSING & LOGGING
+  // =============================================
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+  app.use(requestLogger);
+
+  // =============================================
+  // 🎯 BASIC API ROUTES
+  // =============================================
+  app.get('/api/health', (req, res) => {
+    res.json({
+      success: true,
+      message: 'API Server is healthy',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      port: PORT,
+      emailSending: EMAIL_ENABLED,
+      startupTime: Date.now() - serverStartTime,
+      scheduler: global.schedulerStatus,
+      cache: { stats: global.apiCache.getStats() },
+      packaged: IS_PKG,
+      platform: process.platform,
+      nodeVersion: process.version
+    });
+  });
+
+  app.get('/api/scheduler/status', (req, res) => {
+    res.json({
+      success: true,
+      running: global.schedulerStatus.running,
+      lastRun: global.schedulerStatus.lastRun,
+      interval: global.schedulerStatus.interval,
+      callsInLastMinute: global.schedulerStatus.callsInLastMinute,
+      nextRunEstimate: global.schedulerStatus.lastRun 
+        ? new Date(new Date(global.schedulerStatus.lastRun).getTime() + global.schedulerStatus.interval).toISOString()
+        : null,
+      error: global.schedulerStatus.error
+    });
+  });
+
+  app.get('/api/email/status', (req, res) => {
+    res.json({
+      emailSending: EMAIL_ENABLED,
+      status: EMAIL_ENABLED ? 'enabled' : 'disabled',
+      message: EMAIL_ENABLED ? '✅ Email sending ENABLED' : '🛑 Email sending DISABLED',
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.get("/api", (req, res) => {
+    res.json({
+      message: "📊 Guard Report API v3.0.0",
+      production: IS_PRODUCTION,
+      emailSending: EMAIL_ENABLED ? "enabled" : "DISABLED",
+      scheduler: `${SCHEDULER_INTERVAL/60000}min interval`,
+      packaged: IS_PKG,
+      endpoints: {
+        health: "/api/health",
+        auth: "/api/auth",
+        dashboard: "/api/dashboard",
+        admin: "/api/admin",
+        clients: "/api/clients",
+        reports: "/api/reports",
+        scheduler: "/api/scheduler",
+        incidents: "/api/incidents",
+        emailStatus: "/api/email/status",
+        sync: "/api/sync",
+        backup: "/api/backup",
+        patrolSchedules: "/api/patrol-schedules",
+        events: "/api/events"
+      }
+    });
+  });
+
+  // =============================================
+  // 📦 LOAD ALL ROUTES
+  // =============================================
+  console.log('\n🔄 Loading API routes...');
+  
+  try {
+    // Load routes with better error handling
+    const routeConfig = [
+      { file: "testRoute.js", path: "/api/test" },
+      { file: "schedularRoutes.js", path: "/api/scheduler" },
+      { file: "reportRoutes.js", path: "/api/reports" },
+      { file: "clientRoutes.js", path: "/api/clients" },
+      { file: "dataSyncRoutes.js", path: "/api/sync" },
+      { file: "backupSyncRoute.js", path: "/api/backup" },
+      { file: "managePatrolScheduleRoutes.js", path: "/api/patrol-schedules" },
+      { file: "eventsRoutes.js", path: "/api/events" },
+      { file: "auth.js", path: "/api/auth" },
+      { file: "dashboard.js", path: "/api/dashboard" },
+      { file: "adminRoutes.js", path: "/api/admin" }
+    ];
+    
+    for (const config of routeConfig) {
+      try {
+        const routePath = path.join(__dirname, 'routes', config.file);
+        if (fs.existsSync(routePath)) {
+          // Clear cache if in development
+          if (!IS_PRODUCTION) {
+            delete require.cache[require.resolve(routePath)];
+          }
+          
+          const route = require(routePath);
+          app.use(config.path, route);
+          console.log(`✅ Loaded: ${config.path} -> ${config.file}`);
+        } else {
+          console.log(`ℹ️ Route file not found: ${config.file}`);
+          // Create a placeholder route
+          app.use(config.path, (req, res) => {
+            res.status(503).json({
+              success: false,
+              error: `Route ${config.file} not available`,
+              message: "Route file not found"
+            });
+          });
+        }
+      } catch (error) {
+        console.warn(`⚠️ Failed to load ${config.file}:`, error.message);
+        // Create a placeholder route to avoid 404s
+        app.use(config.path, (req, res) => {
+          res.status(503).json({
+            success: false,
+            error: `Route ${config.file} temporarily unavailable`,
+            message: error.message
+          });
+        });
+      }
+    }
+    
+    // Load incident routes if available
+    try {
+      const incidentModelPath = path.join(__dirname, 'models', 'incidentModel.js');
+      if (fs.existsSync(incidentModelPath)) {
+        const incidentModel = require(incidentModelPath);
+        if (typeof incidentModel.createIncidentAPI === 'function') {
+          incidentModel.createIncidentAPI(app);
+          console.log('✅ Incident routes registered');
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️ Incident routes not available:', error.message);
+    }
+    
+    // Initialize BMSecurity API
+    console.log('🔄 Initializing BMSecurity API...');
+    global.bmSecurityAPIStatus = { status: 'initializing' };
+    
+    try {
+      const bmSecurityAPIPath = path.join(__dirname, 'service', 'bmSecurityAPI.js');
+      if (fs.existsSync(bmSecurityAPIPath)) {
+        const bmSecurityAPI = require(bmSecurityAPIPath);
+        const token = await bmSecurityAPI.ensureAuthenticated().catch(() => null);
+        global.bmSecurityAPIStatus = token ? 
+          { success: true, status: 'authenticated' } : 
+          { success: false, status: 'login_failed' };
+        console.log(`✅ BMSecurity API: ${global.bmSecurityAPIStatus.status}`);
+      } else {
+        console.warn('ℹ️ BMSecurity API file not found');
+        global.bmSecurityAPIStatus = { success: false, status: 'file_not_found' };
+      }
+    } catch (error) {
+      global.bmSecurityAPIStatus = { success: false, status: 'error', error: error.message };
+      console.warn('⚠️ BMSecurity API error:', error.message);
+    }
+    
+    // Load scheduler with timeout protection
+    console.log('\n🔄 Loading scheduler...');
+    setTimeout(async () => {
+      try {
+        const schedulerPath = path.join(__dirname, 'service', 'scheduler.js');
+        if (fs.existsSync(schedulerPath)) {
+          // Clear module cache
+          if (!IS_PRODUCTION) {
+            delete require.cache[require.resolve(schedulerPath)];
+          }
+          
+          const schedulerModule = require(schedulerPath);
+          console.log('✅ Scheduler module loaded');
+          
+          global.schedulerStatus.running = true;
+          global.schedulerStatus.lastRun = new Date().toISOString();
+          
+          // Set interval if available
+          if (schedulerModule.updateSchedulerInterval) {
+            schedulerModule.updateSchedulerInterval(SCHEDULER_INTERVAL);
+          } else if (schedulerModule.default?.updateSchedulerInterval) {
+            schedulerModule.default.updateSchedulerInterval(SCHEDULER_INTERVAL);
+          }
+          
+          console.log(`⏰ Scheduler interval: ${SCHEDULER_INTERVAL/60000}min`);
+        } else {
+          console.log('ℹ️ Scheduler file not found, running without scheduler');
+          global.schedulerStatus.running = false;
+          global.schedulerStatus.error = 'File not found';
+        }
+      } catch (error) {
+        console.warn('⚠️ Scheduler failed to load:', error.message);
+        global.schedulerStatus.running = false;
+        global.schedulerStatus.error = error.message;
+      }
+    }, 2000); // Delay scheduler loading
+    
+  } catch (error) {
+    console.error('❌ Error loading routes:', error.message);
+  }
+
+  // Apply cache middleware after all routes are loaded
+  app.use('/api', createCacheMiddleware());
+
+  // =============================================
+  // 🌐 SETUP FRONTEND SERVING
+  // =============================================
+  const frontendReady = setupFrontendServing(app);
+  
+  if (!frontendReady) {
+    // Show helpful error page for web requests
+    app.get('(.*)', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      if (req.path.match(/\.[a-zA-Z0-9]{2,}$/)) return next();
+      
+      res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Guard Report API</title>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+              body { 
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                margin: 0;
+                padding: 20px;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+              }
+              .container { 
+                background: white; 
+                padding: 40px; 
+                border-radius: 20px; 
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 800px; 
+                width: 100%;
+                text-align: center;
+              }
+              h1 { 
+                color: #333; 
+                margin-bottom: 10px;
+                font-size: 2.5em;
+              }
+              .status { 
+                color: #28a745; 
+                font-weight: bold; 
+                font-size: 1.2em;
+                margin: 20px 0;
+                padding: 10px;
+                background: #d4edda;
+                border-radius: 10px;
+              }
+              .error { 
+                color: #721c24; 
+                background: #f8d7da; 
+                padding: 20px; 
+                border-radius: 10px; 
+                margin: 20px 0; 
+                border-left: 5px solid #f5c6cb;
+              }
+              .api-link { 
+                display: inline-block; 
+                margin: 10px; 
+                padding: 15px 30px; 
+                background: #007bff; 
+                color: white; 
+                text-decoration: none; 
+                border-radius: 50px;
+                font-weight: bold;
+                transition: all 0.3s;
+                box-shadow: 0 4px 6px rgba(0,123,255,0.3);
+              }
+              .api-link:hover { 
+                background: #0056b3; 
+                transform: translateY(-2px);
+                box-shadow: 0 6px 12px rgba(0,123,255,0.4);
+              }
+              .info-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin: 25px 0;
+                text-align: left;
+              }
+              .info-item {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 10px;
+                border-left: 4px solid #007bff;
+              }
+              .info-label {
+                font-weight: bold;
+                color: #666;
+                font-size: 0.9em;
+              }
+              .info-value {
+                font-size: 1.1em;
+                margin-top: 5px;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>📊 Guard Report API</h1>
+              <p class="status">✅ Server running on port ${PORT}</p>
+              <div class="error">
+                <strong>⚠️ Frontend not found!</strong><br>
+                <p>The React frontend files were not found in the expected location.</p>
+                <p>Running in API-only mode.</p>
+              </div>
+              
+              <div class="info-grid">
+                <div class="info-item">
+                  <div class="info-label">Mode</div>
+                  <div class="info-value">${IS_PKG ? '📦 PKG' : '🔧 Development'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Email Sending</div>
+                  <div class="info-value">${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Scheduler Interval</div>
+                  <div class="info-value">${SCHEDULER_INTERVAL/60000} minutes</div>
+                </div>
+                <div class="info-item">
+                  <div class="info-label">Environment</div>
+                  <div class="info-value">${process.env.NODE_ENV || 'development'}</div>
+                </div>
+              </div>
+              
+              <div style="margin-top: 30px;">
+                <p>Useful API endpoints:</p>
+                <a class="api-link" href="/api/health">API Health</a>
+                <a class="api-link" href="/api">API Endpoints</a>
+                <a class="api-link" href="/api/scheduler/status">Scheduler Status</a>
+                <a class="api-link" href="/api/email/status">Email Status</a>
+              </div>
+            </div>
+          </body>
+        </html>
+      `);
+    });
+  }
+
+  // =============================================
+  // 🚨 404 & ERROR HANDLERS
+  // =============================================
+  app.use('/api/', (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: "API endpoint not found",
+      requested: req.originalUrl,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.use((err, req, res, next) => {
+    console.error(`❌ Error: ${err.message}`);
+    console.error(err.stack);
+    
+    if (err.statusCode === 429) {
+      return res.status(429).json({
+        success: false,
+        error: "Rate limit exceeded",
+        message: "Too many requests, please try again later",
+        retryAfter: "15 minutes"
+      });
+    }
+    
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({ 
+      success: false,
+      error: IS_PRODUCTION && statusCode === 500 ? 'Internal server error' : err.message,
+      timestamp: new Date().toISOString(),
+      path: req.path
+    });
+  });
+
+  return app;
+}
+
+// =============================================
+// 🚀 START SERVER
+// =============================================
+async function startServer() {
+  try {
+    console.log('\n🚀 Starting Guard Report API Server...');
+    console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`📦 PKG Mode: ${IS_PKG ? 'Yes' : 'No'}`);
+    console.log(`📧 Email: ${EMAIL_ENABLED ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`⏰ Scheduler: ${SCHEDULER_INTERVAL/60000}min interval`);
+    console.log(`🌐 Port: ${PORT}`);
+    
+    const app = await createApp();
+    
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log("=".repeat(60));
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`📦 Packaged: ${IS_PKG ? 'Yes' : 'No'}`);
+      console.log(`📧 Email: ${EMAIL_ENABLED ? '✅ ENABLED' : '🛑 DISABLED'}`);
+      console.log(`⏰ Scheduler: ${SCHEDULER_INTERVAL/60000}min interval`);
+      console.log(`🔗 API: http://localhost:${PORT}/api`);
+      console.log(`🔗 Web: http://localhost:${PORT}/`);
+      console.log(`📦 Cache: ENABLED`);
+      console.log(`📊 Node: ${process.version}`);
+      console.log("=".repeat(60));
+      console.log('\n✅ Server ready!');
+    });
+
+    // Graceful shutdown
+    const gracefulShutdown = async () => {
+      console.log(`\n⚠️  Shutting down gracefully...`);
+      global.schedulerStatus.running = false;
+      
+      server.close(() => {
+        global.apiCache.flushAll();
+        console.log(`✅ Server stopped`);
+        process.exit(0);
+      });
+      
+      setTimeout(() => {
+        console.error(`❌ Forcing shutdown`);
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGTERM', gracefulShutdown);
+    process.on('SIGINT', gracefulShutdown);
+    
+    // Error handling for server
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use`);
+        process.exit(1);
+      } else {
+        console.error('❌ Server error:', error);
+      }
+    });
+    
+    return server;
+    
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    console.error(error.stack);
+    process.exit(1);
+  }
+}
+
+// Start server if not being required as module
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { startServer, createApp };

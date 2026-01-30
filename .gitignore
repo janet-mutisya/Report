@@ -3,3 +3,8 @@
 node_modules/
 server/release/*.exe
 server/release/
+deployment/windows/guard-report-server.exe
+server/BM-SECURITY/release/guard-report-server.exe
+server/SecurityReport.exe
+*.zip
+deployment/windows/*.exe

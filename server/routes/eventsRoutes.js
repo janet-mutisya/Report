@@ -1,8 +1,8 @@
 // server/routes/eventsRoutes.js - FULLY FIXED VERSION
-import express from 'express';
-import { sql, poolPromise } from '../config/database.js';
-import dayjs from 'dayjs';
-import bmSecurityAPI from '../service/bmSecurityAPI.js';
+const express = require('express');
+const database = require('../config/database.js');
+const dayjs = require('dayjs');
+const bmSecurityAPI = require('../service/bmSecurityAPI.js');
 
 const router = express.Router();
 
@@ -152,7 +152,7 @@ router.get('/live', async (req, res) => {
       console.log('💾 Fetching from database...');
       
       try {
-        const pool = await poolPromise;
+        const pool = await database.poolPromise;
         
         // Convert dates to CST for database query
         const dbStartDate = toCST(actualStartDate).format('YYYY-MM-DD HH:mm:ss');
@@ -217,11 +217,11 @@ router.get('/live', async (req, res) => {
         query += ` ORDER BY rec_tfechahora DESC`;
         
         const request = pool.request()
-          .input('startDate', sql.DateTime, actualStartDate)
-          .input('endDate', sql.DateTime, actualEndDate);
+          .input('startDate', database.sql.DateTime, actualStartDate)
+          .input('endDate', database.sql.DateTime, actualEndDate);
         
         if (clientId) {
-          request.input('clientId', sql.Int, parseInt(clientId));
+          request.input('clientId', database.sql.Int, parseInt(clientId));
         }
         
         const result = await request.query(query);
@@ -389,15 +389,15 @@ router.get('/stats', async (req, res) => {
     // Fallback to database if API failed or not enabled
     if (stats.dataSource === 'unknown' || stats.total === 0) {
       try {
-        const pool = await poolPromise;
+        const pool = await database.poolPromise;
         const tableName = getTableName(startDate);
         
         const dbStartDate = toCST(startDate).format('YYYY-MM-DD HH:mm:ss');
         const dbEndDate = toCST(endDate).format('YYYY-MM-DD HH:mm:ss');
         
         const result = await pool.request()
-          .input('startDate', sql.DateTime, dbStartDate)
-          .input('endDate', sql.DateTime, dbEndDate)
+          .input('startDate', database.sql.DateTime, dbStartDate)
+          .input('endDate', database.sql.DateTime, dbEndDate)
           .query(`
             SELECT 
               COUNT(*) as total,
@@ -454,7 +454,7 @@ router.get('/test', async (req, res) => {
     // Test database connection
     let dbStatus = 'unknown';
     try {
-      const pool = await poolPromise;
+      const pool = await database.poolPromise;
       const result = await pool.request().query('SELECT 1 as test');
       dbStatus = result.recordset.length > 0 ? 'connected' : 'no data';
     } catch (dbError) {
@@ -506,4 +506,4 @@ router.get('/test', async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;

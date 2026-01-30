@@ -1,43 +1,8 @@
-// routes/schedulerRoutes.js - FIXED & ALIGNED WITH OPTIMIZED CONTROLLER
-import express from "express";
-import { poolPromise } from '../config/database.js';
-import sql from 'mssql';
-import {
-  // Schedule CRUD
-  getAllSchedules,
-  getScheduleById,
-  updateSchedule,
-  createSchedule,
-  deleteSchedule,
-  
-  // Manual Triggers
-  triggerDynamicReports,
-  triggerPatrolReports,
-  
-  // Analytics & Status
-  getSchedulerStatus,
-  getAllClientsPerformance,
-  
-  // Testing & Diagnostics
-  diagnosticServices,
-  toggleEmailSending,
-  testReportModel,
-  
-  // Date Range Functions
-  getDateRangeForPeriod,
-  getCustomDateRange,
-  getHistoricalDateRange,
-  getPreviousWeekRange,
-  
-  // Data Fetching (using optimized report model)
-  getClientHistoricalPatrols,
-  getClientPatrols,
-  
-  // Helper Functions
-  parseEmails,
-  formatEmailsForDisplay,
-  calculateNightsInRange
-} from "../controllers/schedulerController.js";
+// routes/schedulerRoutes.js - COMPLETELY FIXED & ALIGNED WITH OPTIMIZED CONTROLLER
+const express = require("express");
+const database = require('../config/database.js');
+const sql = require('mssql');
+const schedulerController = require("../controllers/schedulerController.js");
 
 const router = express.Router();
 
@@ -67,7 +32,9 @@ router.get('/health', async (req, res) => {
         'Filtered Events (VIGICONTROL only)',
         'PDF Generation Service',
         'Multiple Email Recipients',
-        'Email Kill Switch (Global Toggle)'
+        'Email Kill Switch (Global Toggle)',
+        'Duplicate Report Prevention',
+        '60-second Email Timeouts'
       ],
       dataModel: {
         primary: 'Optimized Report Model',
@@ -110,7 +77,7 @@ router.get('/health', async (req, res) => {
  * @route   GET /api/scheduler/status
  * @desc    Get scheduler system status with email statistics
  */
-router.get("/status", getSchedulerStatus);
+router.get("/status", schedulerController.getSchedulerStatus);
 
 // =============================================
 // DIAGNOSTIC & TESTING ROUTES
@@ -120,13 +87,13 @@ router.get("/status", getSchedulerStatus);
  * @route   GET /api/scheduler/diagnostic/services
  * @desc    Check services and integrations
  */
-router.get('/diagnostic/services', diagnosticServices);
+router.get('/diagnostic/services', schedulerController.diagnosticServices);
 
 /**
  * @route   POST /api/scheduler/test/report-model
  * @desc    Test optimized report model
  */
-router.post('/test/report-model', testReportModel);
+router.post('/test/report-model', schedulerController.testReportModel);
 
 // =============================================
 // EMAIL KILL SWITCH ROUTE
@@ -137,7 +104,7 @@ router.post('/test/report-model', testReportModel);
  * @desc    Enable/disable email sending globally
  * @body    {boolean} enabled - true to enable, false to disable
  */
-router.post('/toggle-email', toggleEmailSending);
+router.post('/toggle-email', schedulerController.toggleEmailSending);
 
 // =============================================
 // EMAIL UTILITY ROUTES
@@ -158,8 +125,8 @@ router.post('/utils/parse-emails', async (req, res) => {
       });
     }
 
-    const parsedEmails = parseEmails(emailString);
-    const formattedDisplay = formatEmailsForDisplay(emailString);
+    const parsedEmails = schedulerController.parseEmails(emailString);
+    const formattedDisplay = schedulerController.formatEmailsForDisplay(emailString);
 
     res.status(200).json({
       success: true,
@@ -193,7 +160,7 @@ router.post('/utils/parse-emails', async (req, res) => {
  */
 router.get('/utils/email-stats', async (req, res) => {
   try {
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     
     const result = await pool.request().query(`
       SELECT 
@@ -249,7 +216,7 @@ router.get('/utils/email-stats', async (req, res) => {
  * @route   GET /api/scheduler/clients
  * @desc    Get all clients with performance metrics and email configuration
  */
-router.get('/clients', getAllClientsPerformance);
+router.get('/clients', schedulerController.getAllClientsPerformance);
 
 /**
  * @route   GET /api/scheduler/clients/basic
@@ -257,7 +224,7 @@ router.get('/clients', getAllClientsPerformance);
  */
 router.get('/clients/basic', async (req, res) => {
   try {
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     const result = await pool.request().query(`
       SELECT 
         cue_iid AS ClientID,
@@ -298,7 +265,7 @@ router.get('/clients/:clientId/patrols', async (req, res) => {
 
     console.log(`📊 Fetching patrol data for client ${clientId} (${days} days)`);
 
-    const patrolData = await getClientPatrols(parseInt(clientId), parseInt(days));
+    const patrolData = await schedulerController.getClientPatrols(parseInt(clientId), parseInt(days));
 
     res.status(200).json({
       success: patrolData.metadata.success || false,
@@ -330,7 +297,7 @@ router.get('/clients/:clientId/email-config', async (req, res) => {
   try {
     const { clientId } = req.params;
 
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     
     const [scheduleResult, clientResult] = await Promise.all([
       pool.request()
@@ -345,8 +312,8 @@ router.get('/clients/:clientId/email-config', async (req, res) => {
     const clientEmail = clientResult.recordset[0]?.ClientEmail || '';
     const accountNumber = clientResult.recordset[0]?.AccountNumber || '';
 
-    const parsedScheduleEmails = parseEmails(scheduleEmail);
-    const parsedClientEmails = parseEmails(clientEmail);
+    const parsedScheduleEmails = schedulerController.parseEmails(scheduleEmail);
+    const parsedClientEmails = schedulerController.parseEmails(clientEmail);
 
     res.status(200).json({
       success: true,
@@ -357,18 +324,18 @@ router.get('/clients/:clientId/email-config', async (req, res) => {
           raw: scheduleEmail,
           parsed: parsedScheduleEmails,
           count: parsedScheduleEmails.length,
-          formatted: formatEmailsForDisplay(scheduleEmail)
+          formatted: schedulerController.formatEmailsForDisplay(scheduleEmail)
         },
         clientEmails: {
           raw: clientEmail,
           parsed: parsedClientEmails,
           count: parsedClientEmails.length,
-          formatted: formatEmailsForDisplay(clientEmail)
+          formatted: schedulerController.formatEmailsForDisplay(clientEmail)
         },
         defaultEmails: {
           env: process.env.TEST_EMAIL || '',
-          parsed: parseEmails(process.env.TEST_EMAIL || ''),
-          count: parseEmails(process.env.TEST_EMAIL || '').length
+          parsed: schedulerController.parseEmails(process.env.TEST_EMAIL || ''),
+          count: schedulerController.parseEmails(process.env.TEST_EMAIL || '').length
         },
         recommendations: {
           primary: parsedScheduleEmails.length > 0 ? 'schedule' : 
@@ -396,15 +363,58 @@ router.get('/clients/:clientId/email-config', async (req, res) => {
 
 /**
  * @route   POST /api/scheduler/trigger/dynamic-reports
- * @desc    Manually trigger dynamic reports
+ * @desc    Manually trigger dynamic reports (bulk scheduler run)
  */
-router.post("/trigger/dynamic-reports", triggerDynamicReports);
+router.post("/trigger/dynamic-reports", schedulerController.triggerDynamicReports);
 
 /**
  * @route   POST /api/scheduler/trigger/patrol-reports
- * @desc    Manually trigger patrol reports
+ * @desc    Manually trigger patrol reports (individual or bulk)
+ * @body    For individual: { clientId, recipientEmail, startDate, endDate }
+ * @body    For bulk: empty body or any object
  */
-router.post("/trigger/patrol-reports", triggerPatrolReports);
+router.post("/trigger/patrol-reports", schedulerController.triggerPatrolReports);
+
+/**
+ * @route   POST /api/scheduler/trigger/test-email
+ * @desc    Send a test email to verify SMTP configuration
+ */
+router.post('/trigger/test-email', async (req, res) => {
+  try {
+    const { to, subject = 'Test Email from Scheduler', message = 'This is a test email from the scheduler system.' } = req.body;
+    
+    if (!to) {
+      return res.status(400).json({
+        success: false,
+        message: 'Recipient email (to) is required'
+      });
+    }
+    
+    console.log(`📧 Sending test email to: ${to}`);
+    
+    const emailService = require('../service/emailService.js');
+    
+    const emailResult = await emailService.sendTestEmail({
+      to,
+      subject,
+      message
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'Test email sent successfully',
+      result: emailResult,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error sending test email:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to send test email',
+      error: error.message
+    });
+  }
+});
 
 // =============================================
 // ANALYTICS ROUTES
@@ -416,7 +426,7 @@ router.post("/trigger/patrol-reports", triggerPatrolReports);
  */
 router.get('/analytics/summary', async (req, res) => {
   try {
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     
     const [
       clientsResult, 
@@ -481,7 +491,8 @@ router.get('/analytics/summary', async (req, res) => {
           schedulerHealth: dueResult.recordset[0]?.dueReports > 0 ? 'needs_attention' : 'healthy',
           databaseHealth: 'connected',
           emailService: 'Office365 SMTP with multi-recipient support',
-          dataModel: 'Optimized Report Model (V05)'
+          dataModel: 'Optimized Report Model (V05)',
+          duplicateProtection: 'active (2-minute cooldown)'
         }
       }
     });
@@ -505,9 +516,9 @@ router.get('/analytics/client/:clientId', async (req, res) => {
     const { clientId } = req.params;
     const { days = 7 } = req.query;
 
-    const patrolData = await getClientPatrols(parseInt(clientId), parseInt(days));
+    const patrolData = await schedulerController.getClientPatrols(parseInt(clientId), parseInt(days));
     
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     const clientResult = await pool.request()
       .input('clientId', sql.Int, clientId)
       .query('SELECT cue_cnombre AS ClientName, cue_ncuenta AS AccountNumber FROM _Datos.dbo.m_cuentas WHERE cue_iid = @clientId');
@@ -559,14 +570,14 @@ router.get('/historical/:clientId', async (req, res) => {
 
     console.log(`📅 Fetching historical data for client ${clientId}`);
 
-    const dateRange = getHistoricalDateRange({
+    const dateRange = schedulerController.getHistoricalDateRange({
       startDate,
       endDate,
       monthsBack: monthsBack ? parseInt(monthsBack) : null,
       specificMonth
     });
 
-    const historicalData = await getClientHistoricalPatrols(
+    const historicalData = await schedulerController.getClientHistoricalPatrols(
       parseInt(clientId),
       dateRange.startDate,
       dateRange.endDate
@@ -608,10 +619,10 @@ router.get('/historical/:clientId', async (req, res) => {
 router.get('/historical/date-ranges', async (req, res) => {
   try {
     const ranges = {
-      previousWeek: getPreviousWeekRange(),
-      lastMonth: getHistoricalDateRange({ monthsBack: 1 }),
-      last3Months: getHistoricalDateRange({ monthsBack: 3 }),
-      last6Months: getHistoricalDateRange({ monthsBack: 6 }),
+      previousWeek: schedulerController.getPreviousWeekRange(),
+      lastMonth: schedulerController.getHistoricalDateRange({ monthsBack: 1 }),
+      last3Months: schedulerController.getHistoricalDateRange({ monthsBack: 3 }),
+      last6Months: schedulerController.getHistoricalDateRange({ monthsBack: 6 }),
       custom: {
         description: 'Use startDate and endDate parameters',
         example: '/api/scheduler/historical/28?startDate=2025-01-01&endDate=2025-01-31'
@@ -643,31 +654,31 @@ router.get('/historical/date-ranges', async (req, res) => {
  * @route   GET /api/scheduler
  * @desc    Get all schedules with email counts
  */
-router.get("/", getAllSchedules);
+router.get("/", schedulerController.getAllSchedules);
 
 /**
  * @route   POST /api/scheduler
  * @desc    Create a new schedule with multiple email support
  */
-router.post("/", createSchedule);
+router.post("/", schedulerController.createSchedule);
 
 /**
  * @route   GET /api/scheduler/:id
  * @desc    Get schedule by ID with email configuration
  */
-router.get("/:id", getScheduleById);
+router.get("/:id", schedulerController.getScheduleById);
 
 /**
  * @route   PUT /api/scheduler/:id
  * @desc    Update schedule with multiple email support
  */
-router.put("/:id", updateSchedule);
+router.put("/:id", schedulerController.updateSchedule);
 
 /**
  * @route   DELETE /api/scheduler/:id
  * @desc    Delete schedule
  */
-router.delete("/:id", deleteSchedule);
+router.delete("/:id", schedulerController.deleteSchedule);
 
 // =============================================
 // BULK OPERATIONS
@@ -688,7 +699,7 @@ router.post('/bulk/update-emails', async (req, res) => {
       });
     }
 
-    const pool = await poolPromise;
+    const pool = await database.poolPromise;
     const results = [];
 
     for (const update of updates) {
@@ -703,7 +714,7 @@ router.post('/bulk/update-emails', async (req, res) => {
         continue;
       }
 
-      const parsedEmails = parseEmails(emails);
+      const parsedEmails = schedulerController.parseEmails(emails);
       if (parsedEmails.length === 0) {
         results.push({
           scheduleId,
@@ -772,5 +783,168 @@ router.post('/bulk/update-emails', async (req, res) => {
     });
   }
 });
- 
-export default router;
+
+/**
+ * @route   POST /api/scheduler/bulk/reset-next-run
+ * @desc    Bulk reset next run times for multiple schedules
+ */
+router.post('/bulk/reset-next-run', async (req, res) => {
+  try {
+    const { scheduleIds } = req.body;
+
+    if (!Array.isArray(scheduleIds) || scheduleIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'scheduleIds array is required'
+      });
+    }
+
+    const pool = await database.poolPromise;
+    const results = [];
+
+    for (const scheduleId of scheduleIds) {
+      try {
+        // Get schedule info
+        const scheduleResult = await pool.request()
+          .input('id', sql.Int, scheduleId)
+          .query(`
+            SELECT rep_iidcuenta, rep_nfrecuencia, rep_nCadaUnidadTiempo
+            FROM _Datos.dbo.m_reportes_automaticos
+            WHERE rep_idKey = @id
+          `);
+
+        if (scheduleResult.recordset.length === 0) {
+          results.push({
+            scheduleId,
+            success: false,
+            error: 'Schedule not found'
+          });
+          continue;
+        }
+
+        const schedule = scheduleResult.recordset[0];
+        
+        // Calculate new next run time (tomorrow at 9:00 AM)
+        const now = new Date();
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(9, 0, 0, 0);
+        
+        const newNextRun = tomorrow.toISOString().slice(0, 19).replace('T', ' ');
+
+        // Update next run time
+        const updateResult = await pool.request()
+          .input('id', sql.Int, scheduleId)
+          .input('nextRun', sql.DateTime, newNextRun)
+          .query(`
+            UPDATE _Datos.dbo.m_reportes_automaticos
+            SET rep_tproximoenvio = @nextRun
+            WHERE rep_idKey = @id
+          `);
+
+        results.push({
+          scheduleId,
+          success: true,
+          newNextRun,
+          message: 'Next run time reset to tomorrow 09:00'
+        });
+      } catch (error) {
+        results.push({
+          scheduleId,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.filter(r => !r.success).length;
+
+    res.status(200).json({
+      success: true,
+      summary: {
+        total: scheduleIds.length,
+        success: successCount,
+        failure: failureCount
+      },
+      results,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in bulk reset next run:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Bulk reset failed',
+      error: error.message
+    });
+  }
+});
+
+// =============================================
+// TEST & DEBUGGING ROUTES
+// =============================================
+
+/**
+ * @route   GET /api/scheduler/debug/in-progress
+ * @desc    Get list of currently in-progress reports (for debugging)
+ */
+router.get('/debug/in-progress', async (req, res) => {
+  try {
+    const schedulerService = require('../service/scheduler.js');
+    const performanceStats = schedulerService.getPerformanceStats ? 
+      await schedulerService.getPerformanceStats() : 
+      { error: 'Performance stats not available' };
+
+    res.status(200).json({
+      success: true,
+      debug: {
+        inProgressReports: Array.from(schedulerController.inProgressReports || []),
+        performanceStats,
+        emailSendingEnabled: global.EMAIL_SENDING_ENABLED || false,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error getting debug info:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get debug info',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   POST /api/scheduler/debug/clear-locks
+ * @desc    Clear all duplicate protection locks (for debugging)
+ */
+router.post('/debug/clear-locks', async (req, res) => {
+  try {
+    if (schedulerController.inProgressReports) {
+      const count = schedulerController.inProgressReports.size;
+      schedulerController.inProgressReports.clear();
+      
+      res.status(200).json({
+        success: true,
+        message: `Cleared ${count} duplicate protection locks`,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      res.status(200).json({
+        success: true,
+        message: 'No locks to clear',
+        timestamp: new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error clearing locks:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to clear locks',
+      error: error.message
+    });
+  }
+});
+
+module.exports = router;

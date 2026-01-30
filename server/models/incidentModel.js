@@ -1,9 +1,9 @@
-// server/models/incidentModel.js - FIXED INCIDENT COUNTER - DATE HANDLING CORRECTED
-import dayjs from "dayjs";
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
-import customParseFormat from 'dayjs/plugin/customParseFormat.js';
-import { getCachedPatrolEvents } from '../service/bmSecurityAPICache.js';
+// server/models/incidentModel.js - FIXED WITH WORKING ROUTES
+const dayjs = require("dayjs");
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
+const customParseFormat = require('dayjs/plugin/customParseFormat.js');
+const { getCachedPatrolEvents } = require('../service/bmSecurityAPICache.js');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -33,6 +33,7 @@ function parseEventDate(rawDate) {
     
     // Try common formats
     const formats = [
+      'M/D/YYYY h:mm:ss A',  // 12/1/2025 12:04:46 AM
       'YYYY-MM-DD HH:mm:ss',
       'DD/MM/YYYY HH:mm:ss',
       'YYYY-MM-DD',
@@ -54,7 +55,7 @@ function parseEventDate(rawDate) {
 }
 
 /**
- * ✅ Safe date parsing for user input - ULTRA DEFENSIVE
+ * ✅ Safe date parsing for user input
  */
 function parseDateSafely(dateString, timezone) {
   try {
@@ -94,7 +95,7 @@ function parseDateSafely(dateString, timezone) {
 /**
  * 📊 Count V03 incidents from API events
  */
-export async function getIncidentCount(clientId, startDate, endDate) {
+async function getIncidentCount(clientId, startDate, endDate) {
   try {
     console.log(`🔍 [INCIDENT] Fetching incidents for client ${clientId}: ${startDate} → ${endDate}`);
     
@@ -112,26 +113,18 @@ export async function getIncidentCount(clientId, startDate, endDate) {
     
     console.log(`📅 [INCIDENT] Date range: ${startDateTime.format('YYYY-MM-DD HH:mm')} → ${endDateTime.format('YYYY-MM-DD HH:mm')}`);
     
-    // 🔥 CRITICAL FIX: Format dates as strings for the API
+    // Format dates as strings for the API
     const startStr = startDateTime.format('YYYY-MM-DD');
     const endStr = endDateTime.format('YYYY-MM-DD');
     
-    console.log(`🚀 [INCIDENT] Calling getCachedPatrolEvents with strings: ${startStr} → ${endStr}`);
+    console.log(`🚀 [INCIDENT] Calling getCachedPatrolEvents with: ${startStr} → ${endStr}`);
     
-    // 🔥 ADD THESE DEBUG LOGS
-    console.log(`🔥 [DEBUG] About to call getCachedPatrolEvents:`);
-    console.log(`   Client ID: ${clientId}`);
-    console.log(`   Start String: ${startStr}`);
-    console.log(`   End String: ${endStr}`);
-    console.log(`   Start DateTime object:`, startDateTime.toDate());
-    console.log(`   End DateTime object:`, endDateTime.toDate());
-    
-    // Fetch events from API using cache - USE STRING FORMAT
+    // Fetch events from API using cache
     const apiResult = await getCachedPatrolEvents(
       clientId,
-      startStr,  // 🔥 Changed from startDateTime.toDate()
-      endStr,    // 🔥 Changed from endDateTime.toDate()
-      null       // accountNumber
+      startStr,
+      endStr,
+      null // accountNumber
     );
     
     console.log(`📦 [INCIDENT] API Result:`, {
@@ -158,27 +151,26 @@ export async function getIncidentCount(clientId, startDate, endDate) {
       try {
         debugCount++;
         
-        // Debug first 5 events to see what we're getting
+        // Debug first 5 events
         if (debugCount <= 5) {
           console.log(`🔍 [INCIDENT] Event ${debugCount}:`, {
             clientId: event.rec_iidcuenta || event.cue_iid || event.clientId,
             alarmCode: event.rec_calarma || event.alarm_code,
-            date: event.rec_tfechahora || event.fecha,
-            zone: event.rec_czona || event.zon_ccodigo
+            date: event.rec_tfechahora || event.fecha
           });
         }
         
         // Check if it's the correct client
         const eventClientId = event.rec_iidcuenta || event.cue_iid || event.clientId;
         if (parseInt(eventClientId) !== parseInt(clientId)) {
-          if (debugCount <= 5) console.log(`  ❌ Wrong client: ${eventClientId} !== ${clientId}`);
+          if (debugCount <= 5) console.log(`  ❌ Wrong client`);
           continue;
         }
         
         // Check if it's a V03 incident
         const alarmCode = (event.rec_calarma || event.alarm_code || '').toString().trim().toUpperCase();
         if (alarmCode !== GUARD_REPORT_CODE) {
-          if (debugCount <= 5) console.log(`  ❌ Wrong code: "${alarmCode}" !== "${GUARD_REPORT_CODE}"`);
+          if (debugCount <= 5) console.log(`  ❌ Not V03: "${alarmCode}"`);
           continue;
         }
         
@@ -187,24 +179,22 @@ export async function getIncidentCount(clientId, startDate, endDate) {
         // Parse and validate date
         const eventDate = parseEventDate(event.rec_tfechahora || event.fecha);
         if (!eventDate || !eventDate.isValid()) {
-          console.warn(`  ⚠️ Invalid date for incident ${event.rec_iid}`);
+          console.warn(`  ⚠️ Invalid date for incident`);
           skippedEvents++;
           continue;
         }
         
         // Check if within date range
-    // ✅ FIXED: Ensure both dates are in the same timezone before comparing
-const eventDateInTz = eventDate.tz(TZ);
-const isInRange = eventDateInTz.isSameOrAfter(startDateTime) && 
-                  eventDateInTz.isSameOrBefore(endDateTime);
+        const eventDateInTz = eventDate.tz(TZ);
+        const isInRange = eventDateInTz.isSameOrAfter(startDateTime) && 
+                          eventDateInTz.isSameOrBefore(endDateTime);
 
-if (!isInRange) {
-  console.log(`  ⚠️ Incident outside date range:`);
-  console.log(`     Event: ${eventDateInTz.format('YYYY-MM-DD HH:mm:ss')} (${TZ})`);
-  console.log(`     Range: ${startDateTime.format('YYYY-MM-DD HH:mm:ss')} → ${endDateTime.format('YYYY-MM-DD HH:mm:ss')}`);
-  skippedEvents++;
-  continue;
-}
+        if (!isInRange) {
+          console.log(`  ⚠️ Incident outside date range`);
+          skippedEvents++;
+          continue;
+        }
+        
         // Valid V03 incident
         incidents.push({
           id: event.rec_iid || event.Id,
@@ -220,7 +210,7 @@ if (!isInRange) {
       }
     }
     
-    console.log(`📊 [INCIDENT] FINAL RESULT: Found ${incidents.length} V03 incidents (processed ${allEvents.length} events, skipped ${skippedEvents})`);
+    console.log(`📊 [INCIDENT] Found ${incidents.length} V03 incidents (processed ${allEvents.length}, skipped ${skippedEvents})`);
     
     // Group by date for daily breakdown
     const dailyBreakdown = {};
@@ -238,7 +228,7 @@ if (!isInRange) {
         days: endDateTime.diff(startDateTime, 'day') + 1
       },
       dailyBreakdown,
-      incidents: incidents, // Full list if needed
+      incidents: incidents,
       metadata: {
         clientId: parseInt(clientId),
         generatedAt: new Date(),
@@ -250,11 +240,12 @@ if (!isInRange) {
     };
     
   } catch (error) {
-    console.error(`❌ [INCIDENT] Error fetching incidents:`, error.message);
+    console.error(`❌ [INCIDENT] Error:`, error);
     return {
       success: false,
       totalIncidents: 0,
       error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       metadata: {
         clientId: parseInt(clientId),
         generatedAt: new Date()
@@ -266,7 +257,7 @@ if (!isInRange) {
 /**
  * 📊 Get incident summary (count only, no details)
  */
-export async function getIncidentSummary(clientId, startDate, endDate) {
+async function getIncidentSummary(clientId, startDate, endDate) {
   const result = await getIncidentCount(clientId, startDate, endDate);
   
   return {
@@ -274,23 +265,19 @@ export async function getIncidentSummary(clientId, startDate, endDate) {
     totalIncidents: result.totalIncidents,
     dateRange: result.dateRange,
     dailyBreakdown: result.dailyBreakdown,
-    metadata: result.metadata
+    metadata: result.metadata,
+    error: result.error
   };
 }
 
 /**
- * 🗓️ Get incidents for common report periods - ULTRA DEFENSIVE
+ * 🗓️ Get incidents for common report periods
  */
-export async function getIncidentsForPeriod(clientId, period = 'daily') {
+async function getIncidentsForPeriod(clientId, period = 'daily') {
   try {
-    console.log(`📅 [INCIDENT] getIncidentsForPeriod called with period: ${period}, clientId: ${clientId}, TZ: ${TZ}`);
+    console.log(`📅 [INCIDENT] Period request: ${period}, client: ${clientId}`);
     
-    const now = dayjs();
-    console.log(`📅 [INCIDENT] Current time: ${now.format('YYYY-MM-DD HH:mm:ss')}`);
-    
-    const nowInTz = now.tz(TZ);
-    console.log(`📅 [INCIDENT] Current time in TZ: ${nowInTz.format('YYYY-MM-DD HH:mm:ss')}`);
-    
+    const nowInTz = dayjs().tz(TZ);
     let startDate, endDate;
     
     switch(period.toLowerCase()) {
@@ -331,22 +318,20 @@ export async function getIncidentsForPeriod(clientId, period = 'daily') {
         throw new Error(`Invalid period: ${period}`);
     }
     
-    console.log(`📅 [INCIDENT] Calculated range: ${startDate.format('YYYY-MM-DD')} → ${endDate.format('YYYY-MM-DD')}`);
-    
     const startStr = startDate.format('YYYY-MM-DD');
     const endStr = endDate.format('YYYY-MM-DD');
     
-    console.log(`📅 [INCIDENT] Calling getIncidentSummary with: ${startStr} → ${endStr}`);
+    console.log(`📅 [INCIDENT] Calculated: ${startStr} → ${endStr}`);
     
     return getIncidentSummary(clientId, startStr, endStr);
     
   } catch (error) {
-    console.error(`❌ [INCIDENT] Error in getIncidentsForPeriod:`, error);
+    console.error(`❌ [INCIDENT] Period error:`, error);
     return {
       success: false,
       totalIncidents: 0,
       error: error.message,
-      stack: error.stack,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       metadata: {
         clientId: parseInt(clientId),
         generatedAt: new Date()
@@ -356,15 +341,22 @@ export async function getIncidentsForPeriod(clientId, period = 'daily') {
 }
 
 /**
- * 🌐 Create API endpoints
+ * 🌐 Create API endpoints - FIXED ROUTES
  */
-export function createIncidentAPI(app) {
-  // Get full incident details (must be BEFORE the /:period route)
-  app.get('/api/incidents/details', async (req, res) => {
+function createIncidentAPI(app) {
+  console.log('🔧 [INCIDENT] Registering incident routes...');
+  
+  // 🔥 FIXED: Routes match test expectations (no /api prefix)
+  
+  // Get full incident details
+  app.get('/incidents/details', async (req, res) => {
     try {
+      console.log('📊 [ROUTE] GET /incidents/details', req.query);
+      
       const { clientId, startDate, endDate } = req.query;
       
       if (!clientId || !startDate || !endDate) {
+        console.log('❌ [ROUTE] Missing parameters');
         return res.status(400).json({
           success: false,
           error: 'Missing required parameters: clientId, startDate, endDate'
@@ -373,22 +365,31 @@ export function createIncidentAPI(app) {
       
       const result = await getIncidentCount(clientId, startDate, endDate);
       
+      console.log('✅ [ROUTE] /incidents/details success:', { 
+        totalIncidents: result.totalIncidents 
+      });
+      
       res.status(200).json(result);
       
     } catch (error) {
+      console.error('❌ [ROUTE] /incidents/details error:', error);
       res.status(500).json({
         success: false,
-        error: error.message
+        error: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   });
   
   // Get incident count for date range
-  app.get('/api/incidents/count', async (req, res) => {
+  app.get('/incidents/count', async (req, res) => {
     try {
+      console.log('📊 [ROUTE] GET /incidents/count', req.query);
+      
       const { clientId, startDate, endDate } = req.query;
       
       if (!clientId || !startDate || !endDate) {
+        console.log('❌ [ROUTE] Missing parameters');
         return res.status(400).json({
           success: false,
           error: 'Missing required parameters: clientId, startDate, endDate'
@@ -397,23 +398,35 @@ export function createIncidentAPI(app) {
       
       const result = await getIncidentSummary(clientId, startDate, endDate);
       
+      console.log('✅ [ROUTE] /incidents/count success:', { 
+        totalIncidents: result.totalIncidents 
+      });
+      
       res.status(200).json(result);
       
     } catch (error) {
+      console.error('❌ [ROUTE] /incidents/count error:', error);
       res.status(500).json({
         success: false,
-        error: error.message
+        error: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   });
   
-  // Get incident count for period (must be AFTER /details and /count)
-  app.get('/api/incidents/:period', async (req, res) => {
+  // Get incident count for period (monthly, weekly, etc.)
+  app.get('/incidents/:period', async (req, res) => {
     try {
+      console.log('📊 [ROUTE] GET /incidents/:period', { 
+        period: req.params.period, 
+        query: req.query 
+      });
+      
       const { period } = req.params;
       const { clientId } = req.query;
       
       if (!clientId) {
+        console.log('❌ [ROUTE] Missing clientId');
         return res.status(400).json({
           success: false,
           error: 'Missing required parameter: clientId'
@@ -422,20 +435,30 @@ export function createIncidentAPI(app) {
       
       const result = await getIncidentsForPeriod(clientId, period);
       
+      console.log('✅ [ROUTE] /incidents/:period success:', { 
+        period,
+        totalIncidents: result.totalIncidents 
+      });
+      
       res.status(200).json(result);
       
     } catch (error) {
+      console.error('❌ [ROUTE] /incidents/:period error:', error);
       res.status(500).json({
         success: false,
-        error: error.message
+        error: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   });
   
-  console.log('✅ Incident API endpoints registered');
+  console.log('✅ [INCIDENT] Routes registered:');
+  console.log('   - GET /incidents/details');
+  console.log('   - GET /incidents/count');
+  console.log('   - GET /incidents/:period');
 }
 
-export default {
+module.exports = {
   getIncidentCount,
   getIncidentSummary,
   getIncidentsForPeriod,

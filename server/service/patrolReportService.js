@@ -1,11 +1,11 @@
 // server/service/patrolReportService.js - FIXED: Correct validation logic
-import bmSecurityAPI from "./bmSecurityAPI.js";
+const bmSecurityAPI = require("./bmSecurityAPI.js");
 
 /**
  * 📊 Fetches patrol report for a specific client account
  * This is the ONLY function dashboards and emails should call
  */
-export async function getClientPatrolReport({
+async function getClientPatrolReport({
   apiClientAccount,
   startDate,
   endDate
@@ -61,7 +61,7 @@ export async function getClientPatrolReport({
  * 🔴 FIX #2: Use getAccountByNumber() instead of getPatrolEvents()
  * 📍 Validation = identity, not patrol data
  */
-export async function validateClientCredentials(email, accountNumber) {
+async function validateClientCredentials(email, accountNumber) {
   if (!email || !accountNumber) {
     return { 
       valid: false, 
@@ -106,7 +106,7 @@ export async function validateClientCredentials(email, accountNumber) {
  * 🔍 Helper: Get account details
  * Useful for displaying client information in dashboards
  */
-export async function getAccountDetails(accountNumber) {
+async function getAccountDetails(accountNumber) {
   if (!accountNumber) {
     throw new Error("Account number is required");
   }
@@ -133,7 +133,7 @@ export async function getAccountDetails(accountNumber) {
 /**
  * 🧪 Test the patrol report service
  */
-export async function testPatrolReportService(accountNumber) {
+async function testPatrolReportService(accountNumber) {
   try {
     console.log(`🧪 [PatrolReportService] Testing with account ${accountNumber}`);
 
@@ -172,3 +172,10 @@ export async function testPatrolReportService(accountNumber) {
     };
   }
 }
+
+module.exports = {
+  getClientPatrolReport,
+  validateClientCredentials,
+  getAccountDetails,
+  testPatrolReportService
+};

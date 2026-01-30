@@ -1,0 +1,44 @@
+DEPLOYMENT CHECKLIST
+===================
+
+Before distributing:
+☐ Test the executable on a clean machine
+☐ Verify database connection works
+☐ Test BM Security API login
+☐ Send a test email
+☐ Generate a PDF report with logo
+☐ Check scheduler runs properly
+☐ Verify browser auto-opens
+☐ Confirm logo appears in PDFs: assets/BM SECURITY LOGO.jpg
+
+Ready to distribute:
+☐ ZIP the release folder
+☐ Name: BMSecurity-Reports-v3.0.zip
+☐ Include QUICK_START.txt in email
+☐ Provide support contact info
+
+User Requirements:
+☐ Windows 10/11 or Windows Server
+☐ SQL Server accessible at "localhost"
+☐ Internet connection (for BM Security API)
+☐ Port 5000 available
+☐ 2GB RAM minimum
+☐ Keep ALL files together in same folder
+
+Logo Verification:
+☐ assets/BM SECURITY LOGO.jpg exists (must be exact filename)
+☐ Logo appears in PDF reports
+☐ Check PDF service can find the logo
+
+Support Information:
+☐ Include your email/phone for support
+☐ Include BM Security support contact
+☐ Mention this is pre-configured
+☐ Provide logo troubleshooting: Check assets folder
+
+Credentials Included:
+✓ Database: sa / Password12$
+✓ BM API: admindss@softguard.com
+✓ Email: alerts@bmsecurity.com
+✓ Logo: assets/BM SECURITY LOGO.jpg
+✓ All settings in .env

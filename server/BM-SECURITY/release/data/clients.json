@@ -1,0 +1,60 @@
+[
+  {
+    "id": "1766993589474",
+    "email": "test@multichoice.com",
+    "passwordHash": "$2b$10$DxyC5jL/yCwoqLNhu1aC0eXKSid6uFWMaBX1/wHFpMize1bnstpWK",
+    "accountNumber": null,
+    "companyName": "Multichoice",
+    "status": "pending_link",
+    "createdAt": "2025-12-29T07:33:09.474Z",
+    "updatedAt": "2025-12-29T07:33:09.474Z",
+    "isActive": true
+  },
+  {
+    "id": "1766999340414",
+    "email": "josephine.nyagah@highchem.ke",
+    "passwordHash": "$2b$10$zfeU5tIzfCYFyMRxv3090uifzg2f5nNLoQX/Jdf8oojFxGT/blD4.",
+    "accountNumber": "A011",
+    "companyName": "Highchem",
+    "status": "active",
+    "createdAt": "2025-12-29T09:09:00.414Z",
+    "updatedAt": "2025-12-29T10:53:33.029Z",
+    "isActive": true
+  },
+  {
+    "id": "admin-1767080649662-0",
+    "email": "rirungu@bmsecurity.com",
+    "passwordHash": "$2b$10$AoPbE1NV3/uS1/QOPOyPduHjRpD2sCgUt8GRQDBXg7htql5z6M7Q6",
+    "companyName": "BM Security Admin",
+    "accountNumber": null,
+    "role": "admin",
+    "status": "active",
+    "createdAt": "2025-12-30T07:44:09.662Z",
+    "updatedAt": "2025-12-30T07:44:09.663Z",
+    "isActive": true
+  },
+  {
+    "id": "admin-1767080649663-1",
+    "email": "jmutisya@bmsecurity.com",
+    "passwordHash": "$2b$10$AoPbE1NV3/uS1/QOPOyPduHjRpD2sCgUt8GRQDBXg7htql5z6M7Q6",
+    "companyName": "BM Security Admin",
+    "accountNumber": null,
+    "role": "admin",
+    "status": "active",
+    "createdAt": "2025-12-30T07:44:09.663Z",
+    "updatedAt": "2025-12-30T07:44:09.663Z",
+    "isActive": true
+  },
+  {
+    "id": "1768308127824",
+    "email": "janetymutisya@gmail.com",
+    "passwordHash": "$2b$10$hDcfgvw5H9hlGCpwqsVx.efGkTOMjXdn3jtUSgNyGku6/6aJ1jO1K",
+    "accountNumber": "N281",
+    "companyName": "sarit",
+    "status": "active",
+    "role": "client",
+    "createdAt": "2026-01-13T12:42:07.824Z",
+    "updatedAt": "2026-01-18T13:07:30.720Z",
+    "isActive": true
+  }
+]

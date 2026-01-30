@@ -1,6 +1,6 @@
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
-//import { runDynamicReportScheduler } from "../service/scheduler.js";
+const nodemailer = require("nodemailer");
+const dotenv = require("dotenv");
+//const { runDynamicReportScheduler } = require("../service/scheduler.js");
 
 dotenv.config();
 
@@ -14,7 +14,7 @@ const transporter = nodemailer.createTransport({
 });
 
 // ✅ Trigger the main scheduler manually
-export const triggerSchedulerNow = async (req, res) => {
+const triggerSchedulerNow = async (req, res) => {
   try {
     await runDynamicReportScheduler();
     res.status(200).json({ success: true, message: "Scheduler executed manually." });
@@ -25,7 +25,7 @@ export const triggerSchedulerNow = async (req, res) => {
 };
 
 // ✅ Manual test email route (no client data)
-export const sendTestEmail = async (req, res) => {
+const sendTestEmail = async (req, res) => {
   const { TEST_EMAIL, EMAIL_USER } = process.env;
   if (!TEST_EMAIL) {
     console.error("⚠️ TEST_EMAIL not set in .env");
@@ -50,4 +50,10 @@ export const sendTestEmail = async (req, res) => {
     console.error("❌ Failed to send test email:", err.message);
     res.status(500).json({ error: err.message });
   }
+};
+
+// Export the functions
+module.exports = {
+  triggerSchedulerNow,
+  sendTestEmail
 };

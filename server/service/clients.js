@@ -1,6 +1,18 @@
+const { Connection } = require('tedious');
 
+const config = {
+  userName: 'sa',
+  password: 'Password12',
+  server: 'localhost',
+  options: {
+    encrypt: false,
+    trustServerCertificate: true,
+    database: '_Datos',
+    port: 1433,
+  },
+};
 
-export const clients = [
+const clients = [
   { name: 'ALARI CONFIGURACION 1', email: 'alari1@company.com' },
   { name: 'ALARI CONFIGURACION 2', email: 'alari2@company.com' },
   { name: 'ALARI CONFIGURACION 3', email: 'alari3@company.com' },
@@ -60,3 +72,16 @@ export const clients = [
   { name: 'TEST', email: 'test@company.com' },
   { name: 'TEST12', email: 'test12@company.com' }
 ];
+
+const connection = new Connection(config);
+
+connection.on('connect', (err) => {
+  if (err) {
+    console.error('Database connection failed:', err);
+  } else {
+    console.log('Connected to the database!');
+  }
+  connection.close();
+});
+
+connection.connect();

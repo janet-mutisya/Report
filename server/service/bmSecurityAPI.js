@@ -1,16 +1,13 @@
-// server/service/bmSecurityAPI.js - PRODUCTION OPTIMIZED VERSION - FIXED DEDUPLICATION
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
-import minMax from 'dayjs/plugin/minMax.js';
-import axios from 'axios';
+// server/service/bmSecurityAPI.js - PRODUCTION READY WITH FLEXIBLE VALIDATION
+const dotenv = require('dotenv');
+const path = require('path');
+const dayjs = require("dayjs");
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
+const minMax = require('dayjs/plugin/minMax.js');
+const axios = require('axios');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-dotenv.config({ path: join(__dirname, '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -19,9 +16,9 @@ dayjs.extend(minMax);
 const axiosInstance = axios.create({
   withCredentials: true,
   validateStatus: (status) => status < 500,
-  timeout: 600000, // ✅ 10 minutes global timeout
+  timeout: 600000,
   maxRedirects: 5,
-  maxContentLength: 100 * 1024 * 1024, // 100MB max response size
+  maxContentLength: 100 * 1024 * 1024,
   maxBodyLength: 100 * 1024 * 1024
 });
 
@@ -77,9 +74,8 @@ class BMSecurityAPI {
     this.loginPromise = null;
     this.cookies = null;
     
-    // ✅ Configurable timeouts from environment
-    this.requestTimeout = parseInt(process.env.API_REQUEST_TIMEOUT) || 600000; // 10 min
-    this.loginTimeout = parseInt(process.env.API_LOGIN_TIMEOUT) || 60000; // 1 min
+    this.requestTimeout = parseInt(process.env.API_REQUEST_TIMEOUT) || 600000;
+    this.loginTimeout = parseInt(process.env.API_LOGIN_TIMEOUT) || 60000;
     this.maxRetries = parseInt(process.env.API_MAX_RETRIES) || 3;
     
     this.credentials = {
@@ -88,12 +84,11 @@ class BMSecurityAPI {
       clientid: process.env.BM_API_CLIENT_ID
     };
 
-    // Concurrency limiter - 1 sequential chunk (changed from 2)
     this.limiter = new ConcurrencyLimiter(
-      parseInt(process.env.API_PARALLEL_CHUNKS) || 1
+      parseInt(process.env.API_PARALLEL_CHUNKS) || 3
     );
 
-    console.log('⚡ BMSecurity API Service initialized (PRODUCTION OPTIMIZED - FIXED DEDUPLICATION)');
+    console.log('⚡ BMSecurity API Service initialized (FLEXIBLE VALIDATION)');
     console.log(`  Base URL: ${this.baseURL}`);
     console.log(`  Request timeout: ${this.requestTimeout}ms`);
     console.log(`  Max retries: ${this.maxRetries}`);
@@ -108,11 +103,21 @@ class BMSecurityAPI {
       'A048': '048'
     };
 
-    // Deduplication stats tracking
-    this.duplicateStats = {
-      totalProcessed: 0,
-      totalRemoved: 0,
-      byReason: {
+    // Stats tracking
+    this.stats = {
+      totalRawEvents: 0,
+      totalValidEvents: 0,
+      totalDedupedEvents: 0,
+      malformedRemoved: 0,
+      duplicatesRemoved: 0,
+      byMalformedReason: {
+        missingTimestamp: 0,
+        invalidTimestamp: 0,
+        missingZone: 0,
+        missingClientId: 0,
+        missingAlarmCode: 0
+      },
+      byDuplicateReason: {
         exact: 0,
         sameSecond: 0,
         sameMinute: 0
@@ -141,7 +146,7 @@ class BMSecurityAPI {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
-        timeout: this.loginTimeout, // ✅ Configurable login timeout
+        timeout: this.loginTimeout,
         withCredentials: true
       };
 
@@ -177,7 +182,7 @@ class BMSecurityAPI {
       }
       
       this.token = token;
-      this.tokenExpiry = Date.now() + (55 * 60 * 1000); // 55 minutes buffer
+      this.tokenExpiry = Date.now() + (55 * 60 * 1000);
       
       console.log('✅ BMSecurity API: Logged in successfully');
       
@@ -193,12 +198,10 @@ class BMSecurityAPI {
    * 🔄 Ensure we have a valid token
    */
   async ensureAuthenticated() {
-    // If we have a valid token, use it
     if (this.token && Date.now() < this.tokenExpiry) {
       return this.token;
     }
 
-    // If login is in progress, wait for it
     if (!this.loginPromise) {
       console.log('🔐 Creating shared login promise...');
       this.loginPromise = this.login()
@@ -230,238 +233,352 @@ class BMSecurityAPI {
   }
 
   /**
-   * 🧼 IMPROVED DEDUPLICATION - Reduces 90%+ duplicates to <20%
-   * 
-   * Strategy:
-   * 1. Use ONLY essential fields for uniqueness
-   * 2. Normalize timestamps to second precision
-   * 3. Trim and normalize zone codes
-   * 4. Use alarm code as part of key
-   * 5. Use single, consistent event ID
+   * 🔍 DEBUG: Analyze timestamp formats
    */
-  dedupeBMEvents(events) {
-    const seen = new Map();
-    const deduped = [];
-    const duplicatesByReason = {
-      exact: 0,
-      sameSecond: 0,
-      sameMinute: 0,
-      malformed: 0
+  debugTimestampFormats(events, sampleSize = 5) {
+    if (!Array.isArray(events) || events.length === 0) return;
+    
+    const samples = [];
+    const formats = new Set();
+    
+    for (let i = 0; i < Math.min(events.length, sampleSize); i++) {
+      const timestamp = events[i]?.rec_tfechahora;
+      if (timestamp) {
+        samples.push(timestamp);
+        formats.add(this.detectTimestampFormat(timestamp));
+      }
+    }
+    
+    if (samples.length > 0) {
+      console.log(`🔍 Timestamp format analysis:`);
+      console.log(`   Sample timestamps (${samples.length}):`);
+      samples.forEach((ts, i) => {
+        const format = this.detectTimestampFormat(ts);
+        console.log(`     ${i + 1}. "${ts}" → Format: ${format}`);
+      });
+      console.log(`   Detected formats: ${Array.from(formats).join(', ')}`);
+    }
+  }
+
+  /**
+   * 🔍 Detect timestamp format
+   */
+  detectTimestampFormat(timestamp) {
+    if (!timestamp || typeof timestamp !== 'string') return 'INVALID';
+    
+    const trimmed = timestamp.trim();
+    
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(trimmed)) {
+      return 'YYYY-MM-DD HH:MM:SS';
+    } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(trimmed)) {
+      return 'ISO8601';
+    } else if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+$/.test(trimmed)) {
+      return 'YYYY-MM-DD HH:MM:SS.millis';
+    } else if (/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/.test(trimmed)) {
+      return 'MM/DD/YYYY HH:MM:SS';
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return 'YYYY-MM-DD';
+    } else if (/^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}$/.test(trimmed)) {
+      return 'DD-MM-YYYY HH:MM:SS';
+    } else {
+      return 'UNKNOWN';
+    }
+  }
+
+  /**
+   * 🛡️ FLEXIBLE VALIDATE AND FILTER MALFORMED EVENTS
+   * Key fix: Accepts various timestamp formats and is more permissive
+   */
+  validateAndFilterEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) {
+      return { validEvents: [], stats: { total: 0, valid: 0, removed: 0 } };
+    }
+
+    const validEvents = [];
+    const stats = {
+      total: events.length,
+      valid: 0,
+      removed: 0,
+      reasons: {
+        missingTimestamp: 0,
+        invalidTimestamp: 0,
+        missingZone: 0,
+        missingClientId: 0,
+        missingAlarmCode: 0
+      }
     };
 
+    // 🔍 First, debug the incoming data
+    if (stats.total > 0) {
+      this.debugTimestampFormats(events, 3);
+    }
+
     for (const event of events) {
+      let isValid = true;
+      let missingFields = [];
+
+      // ✅ FLEXIBLE TIMESTAMP CHECK
+      const timestamp = event.rec_tfechahora;
+      if (!timestamp || timestamp.trim() === '' || timestamp.toLowerCase() === 'null') {
+        isValid = false;
+        missingFields.push('timestamp');
+        stats.reasons.missingTimestamp++;
+      } else {
+        // Accept various timestamp formats
+        const trimmedTimestamp = timestamp.trim();
+        
+        // Check if it has at least date part (minimum YYYY-MM-DD)
+        const hasDatePattern = 
+          /^\d{4}-\d{2}-\d{2}/.test(trimmedTimestamp) ||  // YYYY-MM-DD
+          /^\d{2}\/\d{2}\/\d{4}/.test(trimmedTimestamp) || // MM/DD/YYYY
+          /^\d{2}-\d{2}-\d{4}/.test(trimmedTimestamp);     // DD-MM-YYYY
+        
+        if (!hasDatePattern) {
+          isValid = false;
+          missingFields.push('validTimestamp');
+          stats.reasons.invalidTimestamp++;
+        }
+      }
+
+      // ✅ FLEXIBLE ZONE CHECK
+      const zone = String(event.rec_czona || '').trim();
+      if (!zone || zone === '' || zone.toLowerCase() === 'null' || zone === '0') {
+        // Mark as invalid but don't necessarily reject if we have other valid data
+        missingFields.push('zone');
+        stats.reasons.missingZone++;
+        // We'll allow it but mark it
+        event.rec_czona = 'UNKNOWN_ZONE';
+      }
+
+      // ✅ FLEXIBLE CLIENT ID CHECK
+      const clientId = String(event.rec_iidcuenta || event.cue_iid || '').trim();
+      if (!clientId || clientId === '' || clientId === '0') {
+        missingFields.push('clientId');
+        stats.reasons.missingClientId++;
+        event.rec_iidcuenta = 'UNKNOWN_CLIENT';
+      }
+
+      // ✅ FLEXIBLE ALARM CODE CHECK
+      const alarmCode = String(event.rec_calarma || '').trim().toUpperCase();
+      if (!alarmCode || alarmCode === '' || alarmCode.toLowerCase() === 'null') {
+        missingFields.push('alarmCode');
+        stats.reasons.missingAlarmCode++;
+        event.rec_calarma = 'UNKNOWN_ALARM';
+      }
+
+      // ✅ ACCEPT EVENTS WITH TIMESTAMP AND AT LEAST ONE OTHER FIELD
+      // This is more permissive than before
+      const hasTimestamp = timestamp && timestamp.trim() !== '' && timestamp.toLowerCase() !== 'null';
+      const hasEssentialData = zone !== 'UNKNOWN_ZONE' || clientId !== 'UNKNOWN_CLIENT' || alarmCode !== 'UNKNOWN_ALARM';
+      
+      if (hasTimestamp && hasEssentialData) {
+        validEvents.push(event);
+        stats.valid++;
+      } else {
+        stats.removed++;
+      }
+    }
+
+    // Update global stats
+    this.stats.totalRawEvents += events.length;
+    this.stats.totalValidEvents += stats.valid;
+    this.stats.malformedRemoved += stats.removed;
+    
+    Object.keys(stats.reasons).forEach(reason => {
+      this.stats.byMalformedReason[reason] += stats.reasons[reason];
+    });
+
+    return { validEvents, stats };
+  }
+
+  /**
+   * 🧼 IMPROVED DEDUPLICATION - Handles flexible timestamps
+   */
+  dedupeValidEvents(validEvents) {
+    if (!Array.isArray(validEvents) || validEvents.length === 0) {
+      return { dedupedEvents: [], stats: { total: 0, deduped: 0, removed: 0 } };
+    }
+
+    const seen = new Map();
+    const dedupedEvents = [];
+    const stats = {
+      total: validEvents.length,
+      deduped: 0,
+      removed: 0,
+      reasons: {
+        exact: 0,
+        sameSecond: 0,
+        sameMinute: 0
+      }
+    };
+
+    for (const event of validEvents) {
       try {
-        // Extract core fields
+        // Extract fields
         const timestamp = event.rec_tfechahora;
         const zone = String(event.rec_czona || '').trim();
         const clientId = String(event.rec_iidcuenta || event.cue_iid || '').trim();
         const alarmCode = String(event.rec_calarma || '').trim().toUpperCase();
-        
-        // Primary event ID (use the most reliable one)
         const eventId = String(event.rec_iid || event.rec_id || '').trim();
+
+        // ✅ Extract timestamp parts safely
+        let timestampToSecond = '';
+        let timestampToMinute = '';
         
-        // Skip if missing critical data
-        if (!timestamp || !zone || !clientId || !alarmCode) {
-          duplicatesByReason.malformed++;
-          continue;
+        try {
+          // Try to parse the timestamp
+          const dateStr = timestamp.trim();
+          
+          // Handle different timestamp formats
+          let parsedDate;
+          if (dateStr.includes('T')) {
+            // ISO format
+            parsedDate = new Date(dateStr);
+          } else if (dateStr.includes('/')) {
+            // MM/DD/YYYY format
+            const parts = dateStr.split(' ');
+            const dateParts = parts[0].split('/');
+            if (dateParts.length === 3) {
+              const timePart = parts[1] || '00:00:00';
+              parsedDate = new Date(`${dateParts[2]}-${dateParts[0]}-${dateParts[1]} ${timePart}`);
+            }
+          } else {
+            // Try standard parsing
+            parsedDate = new Date(dateStr);
+          }
+          
+          if (parsedDate && !isNaN(parsedDate.getTime())) {
+            const year = parsedDate.getFullYear();
+            const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
+            const day = String(parsedDate.getDate()).padStart(2, '0');
+            const hours = String(parsedDate.getHours()).padStart(2, '0');
+            const minutes = String(parsedDate.getMinutes()).padStart(2, '0');
+            const seconds = String(parsedDate.getSeconds()).padStart(2, '0');
+            
+            timestampToSecond = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+            timestampToMinute = `${year}-${month}-${day} ${hours}:${minutes}`;
+          }
+        } catch (parseError) {
+          // If we can't parse, use raw string (truncated)
+          timestampToSecond = timestamp.substring(0, 19);
+          timestampToMinute = timestamp.substring(0, 16);
         }
 
         // ✅ LEVEL 1: Exact duplicate check (same event ID)
-        if (eventId) {
+        if (eventId && eventId !== '' && eventId !== '0' && eventId !== 'UNKNOWN_CLIENT') {
           const exactKey = `ID:${eventId}`;
           if (seen.has(exactKey)) {
-            duplicatesByReason.exact++;
+            stats.reasons.exact++;
+            stats.removed++;
             continue;
           }
           seen.set(exactKey, true);
         }
 
         // ✅ LEVEL 2: Same-second duplicate check
-        // Format: timestamp(to second) | zone | clientId | alarmCode
-        const timestampToSecond = timestamp.substring(0, 19); // YYYY-MM-DD HH:MM:SS
-        const secondKey = [
-          timestampToSecond,
-          zone,
-          clientId,
-          alarmCode
-        ].join('|');
-        
-        if (seen.has(secondKey)) {
-          duplicatesByReason.sameSecond++;
-          continue;
+        if (timestampToSecond) {
+          const secondKey = [
+            timestampToSecond,
+            zone,
+            clientId,
+            alarmCode
+          ].join('|');
+          
+          if (seen.has(secondKey)) {
+            stats.reasons.sameSecond++;
+            stats.removed++;
+            continue;
+          }
+          seen.set(secondKey, true);
         }
-        seen.set(secondKey, true);
 
-        // ✅ LEVEL 3: Same-minute duplicate check (for rapid scanning)
-        // This catches guards scanning the same zone multiple times in same minute
-        const timestampToMinute = timestamp.substring(0, 16); // YYYY-MM-DD HH:MM
-        const minuteKey = [
-          timestampToMinute,
-          zone,
-          clientId,
-          alarmCode
-        ].join('|');
-        
-        if (seen.has(minuteKey)) {
-          duplicatesByReason.sameMinute++;
-          continue;
+        // ✅ LEVEL 3: Same-minute duplicate check
+        if (timestampToMinute) {
+          const minuteKey = [
+            timestampToMinute,
+            zone,
+            clientId,
+            alarmCode
+          ].join('|');
+          
+          if (seen.has(minuteKey)) {
+            stats.reasons.sameMinute++;
+            stats.removed++;
+            continue;
+          }
+          seen.set(minuteKey, true);
         }
-        seen.set(minuteKey, true);
 
-        // ✅ This event is unique - keep it
-        deduped.push(event);
+        // ✅ This event is unique
+        dedupedEvents.push(event);
+        stats.deduped++;
 
       } catch (error) {
-        // Skip malformed events
-        duplicatesByReason.malformed++;
+        // Skip problematic events
+        stats.removed++;
         continue;
       }
     }
 
     // Update global stats
-    this.duplicateStats.totalProcessed += events.length;
-    this.duplicateStats.totalRemoved += (events.length - deduped.length);
-    this.duplicateStats.byReason.exact += duplicatesByReason.exact;
-    this.duplicateStats.byReason.sameSecond += duplicatesByReason.sameSecond;
-    this.duplicateStats.byReason.sameMinute += duplicatesByReason.sameMinute;
+    this.stats.totalDedupedEvents += stats.deduped;
+    this.stats.duplicatesRemoved += stats.removed;
+    
+    Object.keys(stats.reasons).forEach(reason => {
+      this.stats.byDuplicateReason[reason] += stats.reasons[reason];
+    });
 
-    const removalCount = events.length - deduped.length;
-    const removalPercent = events.length > 0 ? ((removalCount / events.length) * 100).toFixed(1) : 0;
-    
-    if (removalCount > 0) {
-      console.log(`🧼 Deduplicated: ${events.length} → ${deduped.length} events (-${removalCount}, ${removalPercent}%)`);
-      console.log(`   Breakdown: Exact=${duplicatesByReason.exact}, SameSecond=${duplicatesByReason.sameSecond}, SameMinute=${duplicatesByReason.sameMinute}, Malformed=${duplicatesByReason.malformed}`);
-    }
-    
-    // ✅ ALERT: High duplicate rate is now EXPECTED to be lower
-    if (removalPercent > 20) {
-      console.warn(`⚠️ Moderate duplicate rate: ${removalPercent}% (expected <20%)`);
-    }
-    
-    if (removalPercent > 50) {
-      console.error(`🚨 HIGH duplicate rate: ${removalPercent}% - investigate data quality!`);
-    }
-
-    return deduped;
+    return { dedupedEvents, stats };
   }
 
   /**
-   * 🔥 ULTRA-AGGRESSIVE DEDUPLICATION (ALTERNATIVE)
-   * Only keeps ONE event per zone per minute
-   * Use if guards are over-scanning
+   * 🔄 Process events with validation AND deduplication
    */
-  dedupeBMEventsAggressive(events) {
-    const seen = new Map();
-    const deduped = [];
-    let malformedCount = 0;
-
-    for (const event of events) {
-      try {
-        const timestamp = event.rec_tfechahora;
-        const zone = String(event.rec_czona || '').trim();
-        const clientId = String(event.rec_iidcuenta || event.cue_iid || '').trim();
-        const alarmCode = String(event.rec_calarma || '').trim().toUpperCase();
-        
-        if (!timestamp || !zone || !clientId || !alarmCode) {
-          malformedCount++;
-          continue;
-        }
-
-        // KEY: minute + zone + client + alarm
-        // This means: one V04 per zone per minute maximum
-        const timestampToMinute = timestamp.substring(0, 16);
-        const key = `${timestampToMinute}|${zone}|${clientId}|${alarmCode}`;
-        
-        if (seen.has(key)) continue;
-        
-        seen.set(key, true);
-        deduped.push(event);
-
-      } catch (error) {
-        malformedCount++;
-        continue;
+  processEvents(events) {
+    if (events.length === 0) {
+      console.log(`🔄 No events to process`);
+      return [];
+    }
+    
+    console.log(`\n🔄 Processing ${events.length} raw events...`);
+    
+    // Step 1: Filter out malformed data
+    const validationResult = this.validateAndFilterEvents(events);
+    
+    if (validationResult.stats.removed > 0) {
+      const removedPercent = (validationResult.stats.removed / validationResult.stats.total * 100).toFixed(1);
+      console.log(`🛡️ Data Validation: ${validationResult.stats.total} raw → ${validationResult.stats.valid} valid (-${validationResult.stats.removed}, ${removedPercent}% filtered)`);
+      
+      // Log specific issues if significant
+      if (removedPercent > 50) {
+        console.log(`   Malformed breakdown:`);
+        Object.entries(validationResult.stats.reasons).forEach(([reason, count]) => {
+          if (count > 0) {
+            console.log(`     ${reason}: ${count}`);
+          }
+        });
       }
+    } else {
+      console.log(`🛡️ Data Validation: All ${validationResult.stats.total} events accepted`);
     }
 
-    const removalCount = events.length - deduped.length;
-    const removalPercent = events.length > 0 ? ((removalCount / events.length) * 100).toFixed(1) : 0;
+    // Step 2: Deduplicate valid events
+    const dedupeResult = this.dedupeValidEvents(validationResult.validEvents);
     
-    console.log(`🔥 AGGRESSIVE Dedup: ${events.length} → ${deduped.length} events (-${removalCount}, ${removalPercent}%)`);
-    console.log(`   Malformed events: ${malformedCount}`);
-    
-    return deduped;
-  }
-
-  /**
-   * 🔍 Analyze duplicate patterns
-   * Call this to understand your duplicate problem
-   */
-  analyzeDuplicates(events) {
-    const analysis = {
-      total: events.length,
-      byEventId: new Map(),
-      byTimestamp: new Map(),
-      byZone: new Map(),
-      byAlarmCode: new Map(),
-      patterns: []
-    };
-
-    for (const event of events) {
-      const eventId = String(event.rec_iid || event.rec_id || 'NO_ID');
-      const timestamp = event.rec_tfechahora?.substring(0, 19) || 'NO_TIME';
-      const zone = String(event.rec_czona || 'NO_ZONE').trim();
-      const alarmCode = String(event.rec_calarma || 'NO_CODE').trim().toUpperCase();
+    if (dedupeResult.stats.removed > 0) {
+      const dupPercent = (dedupeResult.stats.removed / dedupeResult.stats.total * 100).toFixed(1);
+      console.log(`🧼 Deduplication: ${dedupeResult.stats.total} valid → ${dedupeResult.stats.deduped} unique (-${dedupeResult.stats.removed}, ${dupPercent}% duplicates)`);
       
-      // Count by ID
-      analysis.byEventId.set(eventId, (analysis.byEventId.get(eventId) || 0) + 1);
-      
-      // Count by timestamp
-      analysis.byTimestamp.set(timestamp, (analysis.byTimestamp.get(timestamp) || 0) + 1);
-      
-      // Count by zone
-      analysis.byZone.set(zone, (analysis.byZone.get(zone) || 0) + 1);
-      
-      // Count by alarm code
-      analysis.byAlarmCode.set(alarmCode, (analysis.byAlarmCode.get(alarmCode) || 0) + 1);
+      if (dupPercent > 10) {
+        console.log(`   Duplicate breakdown: Exact=${dedupeResult.stats.reasons.exact}, SameSecond=${dedupeResult.stats.reasons.sameSecond}, SameMinute=${dedupeResult.stats.reasons.sameMinute}`);
+      }
+    } else {
+      console.log(`🧼 Deduplication: ${dedupeResult.stats.total} valid → ${dedupeResult.stats.deduped} unique (0% duplicates)`);
     }
 
-    // Find patterns
-    const duplicateIds = Array.from(analysis.byEventId.entries())
-      .filter(([_, count]) => count > 1)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
+    console.log(`✅ Final result: ${events.length} raw → ${dedupeResult.dedupedEvents.length} clean events`);
     
-    const duplicateTimestamps = Array.from(analysis.byTimestamp.entries())
-      .filter(([_, count]) => count > 1)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-
-    const alarmCodeDistribution = Array.from(analysis.byAlarmCode.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-
-    console.log('\n🔍 DUPLICATE ANALYSIS:');
-    console.log(`Total events: ${analysis.total}`);
-    console.log(`Unique timestamps: ${analysis.byTimestamp.size}`);
-    console.log(`Unique zones: ${analysis.byZone.size}`);
-    console.log(`Unique alarm codes: ${analysis.byAlarmCode.size}`);
-    
-    console.log(`\nTop duplicate event IDs:`);
-    duplicateIds.forEach(([id, count]) => {
-      console.log(`  ${id}: ${count} copies`);
-    });
-    
-    console.log(`\nTop duplicate timestamps:`);
-    duplicateTimestamps.forEach(([time, count]) => {
-      console.log(`  ${time}: ${count} events`);
-    });
-
-    console.log(`\nTop alarm codes:`);
-    alarmCodeDistribution.forEach(([code, count]) => {
-      console.log(`  ${code}: ${count} events`);
-    });
-
-    return analysis;
+    return dedupeResult.dedupedEvents;
   }
 
   /**
@@ -505,7 +622,7 @@ class BMSecurityAPI {
           error.code === 'ECONNABORTED';
         
         if (isRetryable && attempt < maxRetries) {
-          const delay = retryDelay * attempt; // Exponential backoff
+          const delay = retryDelay * attempt;
           console.warn(`  ⚠️ ${error.message}, retrying in ${delay}ms...`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
@@ -519,7 +636,7 @@ class BMSecurityAPI {
   }
 
   /**
-   * 🚀 FETCH BY RANGE - WITH RETRY ON ABORT
+   * 🚀 FETCH BY RANGE - WITH IMPROVED DEBUGGING
    */
   async fetchPatrolEventsRange(accountVariant, start, end, chunkIndex = 0) {
     await this.ensureAuthenticated();
@@ -558,35 +675,40 @@ class BMSecurityAPI {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
               },
-              timeout: this.requestTimeout // ✅ Configurable request timeout
+              timeout: this.requestTimeout
             }
           );
 
           const events = response.data?.data || response.data?.rows || [];
           
-          // 🔍 Diagnostic: Analyze first page for duplicates
+          // 🔍 Diagnostic: Analyze first page
           if (page === 1 && events.length > 0) {
-            console.log(`    📊 First page analysis:`);
-            console.log(`      Total: ${events.length} events`);
-            const uniqueTimestamps = new Set(events.map(e => e.rec_tfechahora?.substring(0, 19)));
-            console.log(`      Unique timestamps: ${uniqueTimestamps.size}`);
+            console.log(`    📊 First page raw: ${events.length} events`);
             
-            const uniqueZones = new Set(events.map(e => String(e.rec_czona || '').trim()).filter(z => z));
-            console.log(`      Unique zones: ${uniqueZones.size}`);
+            // Debug sample events
+            if (events.length > 0) {
+              console.log(`    Sample event structure:`);
+              console.log(`      Timestamp: "${events[0].rec_tfechahora}"`);
+              console.log(`      Zone: "${events[0].rec_czona}"`);
+              console.log(`      Alarm: "${events[0].rec_calarma}"`);
+              console.log(`      Client: "${events[0].rec_iidcuenta}"`);
+            }
             
+            // Quick analysis of alarm codes
             const alarmCodes = events.map(e => String(e.rec_calarma || '').trim().toUpperCase()).filter(c => c);
-            const uniqueAlarmCodes = new Set(alarmCodes);
-            console.log(`      Unique alarm codes: ${uniqueAlarmCodes.size}`);
-            
-            // Most common alarm code
             const alarmCodeCounts = {};
             alarmCodes.forEach(code => {
               alarmCodeCounts[code] = (alarmCodeCounts[code] || 0) + 1;
             });
-            const mostCommon = Object.entries(alarmCodeCounts).sort((a, b) => b[1] - a[1])[0];
-            if (mostCommon) {
-              console.log(`      Most common alarm: ${mostCommon[0]} (${mostCommon[1]} times)`);
-            }
+            
+            const topCodes = Object.entries(alarmCodeCounts)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 5);
+            
+            console.log(`    Top alarm codes:`);
+            topCodes.forEach(([code, count]) => {
+              console.log(`      ${code}: ${count} events`);
+            });
           }
           
           if (events.length === 0) {
@@ -598,16 +720,15 @@ class BMSecurityAPI {
           } else {
             consecutiveEmptyPages = 0;
             
-            // Dedupe per page
-            const dedupedPageEvents = this.dedupeBMEvents(events);
-            allEvents.push(...dedupedPageEvents);
+            // 🛡️ Process each page (validate + dedupe)
+            const pageEvents = this.processEvents(events);
+            allEvents.push(...pageEvents);
             
             if (page === 1) {
-              console.log(`    📥 Page ${page}: ${events.length} events → ${dedupedPageEvents.length} deduped`);
+              console.log(`    📥 Page ${page}: ${events.length} raw → ${pageEvents.length} clean`);
             }
           }
 
-          // Check if we have more data
           if (events.length < limit) {
             hasMoreData = false;
           } else {
@@ -615,36 +736,35 @@ class BMSecurityAPI {
             await new Promise(r => setTimeout(r, 200));
           }
         } catch (pageError) {
-          // If it's an abort error, throw to trigger retry
           if (pageError.message?.includes('aborted') || 
               pageError.message?.includes('timeout') ||
               pageError.code === 'ECONNABORTED') {
-            throw pageError; // This will trigger the retry mechanism
+            throw pageError;
           }
           
-          // For other errors, log and continue
           console.error(`    ⚠️ Page ${page} failed: ${pageError.message}`);
           hasMoreData = false;
         }
       }
 
-      console.log(`    ✅ Chunk ${chunkIndex + 1}: ${allEvents.length} total events`);
+      console.log(`    ✅ Chunk ${chunkIndex + 1}: ${allEvents.length} clean events`);
       return allEvents;
     }, this.maxRetries);
   }
 
   /**
-   * 🚀 OPTIMIZED FETCHING (PUBLIC API) - FIXED FOR SINGLE-DAY QUERIES
+   * 🚀 MAIN FETCHING METHOD - OPTIMIZED
    */
   async getPatrolEvents(accountNumber, startDate, endDate) {
-    // Timezone-safe cache key
+    // Reset stats for this request
+    this.resetStatsForRequest();
+    
     const cacheKey = [
       accountNumber || 'ALL',
       dayjs(startDate).tz('Africa/Nairobi').format('YYYY-MM-DD'),
       dayjs(endDate).tz('Africa/Nairobi').format('YYYY-MM-DD')
     ].join('_');
     
-    // Check cache first
     const cached = rawCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
       console.log('📦 Serving from cache:', cacheKey);
@@ -655,18 +775,15 @@ class BMSecurityAPI {
 
     console.log(`\n🚀 FETCHING: ${startDate} → ${endDate}`);
     console.log(`  Account: ${accountNumber || 'All accounts'}`);
-    console.log(`  Timeout: ${this.requestTimeout}ms, Retries: ${this.maxRetries}`);
 
     const accountVariants = this.generateAccountVariants(accountNumber);
     const allEvents = [];
     let resolvedAccount = null;
 
-    // Create date objects
     let cursor = dayjs(startDate).tz('Africa/Nairobi').startOf('day');
     const endDateObj = dayjs(endDate).tz('Africa/Nairobi').endOf('day');
     const daysInRange = endDateObj.diff(cursor, 'day');
 
-    // Create 3-day chunks
     const chunks = [];
     const CHUNK_SIZE_DAYS = 3;
     
@@ -680,7 +797,6 @@ class BMSecurityAPI {
 
     console.log(`📊 Processing ${daysInRange} days in ${chunks.length} chunks`);
 
-    // 🔥 FIX: Account resolution (only if accountNumber provided)
     if (accountNumber) {
       const cacheKey = `account_resolution_${accountNumber}`;
       const cachedResolution = accountResolutionCache.get(cacheKey);
@@ -689,7 +805,6 @@ class BMSecurityAPI {
         resolvedAccount = cachedResolution.variant;
         console.log(`✅ Using cached account variant: ${resolvedAccount}`);
       } else {
-        // Try each variant with first chunk
         for (const variant of accountVariants) {
           try {
             const testEvents = await this.fetchPatrolEventsRange(variant, chunks[0][0], chunks[0][1], 0);
@@ -698,7 +813,6 @@ class BMSecurityAPI {
               allEvents.push(...testEvents);
               console.log(`✅ Resolved account variant: ${variant} (${testEvents.length} events)`);
               
-              // Cache positive resolution for 1 hour
               accountResolutionCache.set(cacheKey, {
                 variant: resolvedAccount,
                 timestamp: Date.now()
@@ -714,7 +828,6 @@ class BMSecurityAPI {
           console.log('⚠️ No variant worked, using first variant');
           resolvedAccount = accountVariants[0];
           
-          // Cache negative resolution for 5 minutes
           accountResolutionCache.set(cacheKey, {
             variant: resolvedAccount,
             timestamp: Date.now()
@@ -722,21 +835,18 @@ class BMSecurityAPI {
         }
       }
     } else {
-      // 🔥 FIX: For null accountNumber, use empty string
       resolvedAccount = '';
       console.log('✅ No account filter - fetching all accounts');
     }
 
-    // 🔥 CRITICAL FIX: Determine which chunks still need to be fetched
     const chunksToFetch = accountNumber && resolvedAccount && chunks.length > 1
-      ? chunks.slice(1)  // Skip first chunk (already fetched during account resolution)
+      ? chunks.slice(1)
       : accountNumber && resolvedAccount && chunks.length === 1
-      ? []               // Single chunk already fetched during resolution
-      : chunks;          // No account number: fetch all chunks
+      ? []
+      : chunks;
 
-    console.log(`📋 Chunks to fetch: ${chunksToFetch.length}/${chunks.length} (${accountNumber ? 'account-filtered' : 'all-accounts'})`);
+    console.log(`📋 Chunks to fetch: ${chunksToFetch.length}/${chunks.length}`);
 
-    // 🔥 FIX: Fetch remaining chunks (works for single-day AND multi-day AND null account)
     if (chunksToFetch.length > 0) {
       const chunkPromises = chunksToFetch.map(([chunkStart, chunkEnd], index) => {
         const actualChunkIndex = accountNumber && resolvedAccount && chunks.length > 1 ? index + 1 : index;
@@ -756,22 +866,44 @@ class BMSecurityAPI {
       }
     }
 
-    console.log(`\n🧮 RAW EVENTS AFTER CHUNK FETCHES: ${allEvents.length}`);
-
-    // Final deduplication (cross-page/cross-chunk safety)
-    const dedupedEvents = this.dedupeBMEvents(allEvents);
-    console.log(`🧮 FINAL EVENTS AFTER DEDUPE: ${dedupedEvents.length}`);
-
+    // 🔥 FINAL PROCESSING
+    console.log(`\n🎯 FINAL PROCESSING`);
+    console.log(`📈 Raw events collected: ${allEvents.length}`);
+    
+    const finalEvents = this.processEvents(allEvents);
+    
     const daysCovered = new Set(
-      dedupedEvents.map(e => {
+      finalEvents.map(e => {
         const dateStr = e.rec_tfechahora;
         if (!dateStr) return 'unknown';
-        return dayjs(dateStr).tz('Africa/Nairobi').format('YYYY-MM-DD');
+        try {
+          // Try to parse the date
+          const date = new Date(dateStr);
+          if (!isNaN(date.getTime())) {
+            return dayjs(date).tz('Africa/Nairobi').format('YYYY-MM-DD');
+          }
+        } catch (e) {
+          // Try to extract just the date part
+          const dateMatch = dateStr.match(/\d{4}-\d{2}-\d{2}/);
+          if (dateMatch) return dateMatch[0];
+        }
+        return 'unknown';
       }).filter(d => d !== 'unknown')
     );
     
-    console.log(`📅 DAYS WITH EVENTS: ${daysCovered.size}/${daysInRange}`);
-    console.log(`📊 TOTAL: ${dedupedEvents.length} events`);
+    console.log(`\n📊 REQUEST SUMMARY`);
+    console.log(`📅 Days requested: ${daysInRange}`);
+    console.log(`📅 Days with events: ${daysCovered.size}`);
+    console.log(`📈 Total clean events: ${finalEvents.length}`);
+    
+    // Log overall stats
+    console.log(`\n📊 DATA QUALITY STATS`);
+    const totalProcessed = this.stats.totalRawEvents;
+    const malformedPercent = totalProcessed > 0 ? (this.stats.malformedRemoved / totalProcessed * 100).toFixed(1) : 0;
+    const duplicatePercent = this.stats.totalValidEvents > 0 ? (this.stats.duplicatesRemoved / this.stats.totalValidEvents * 100).toFixed(1) : 0;
+    
+    console.log(`🛡️ Malformed data removed: ${this.stats.malformedRemoved}/${totalProcessed} (${malformedPercent}%)`);
+    console.log(`🧼 Duplicates removed: ${this.stats.duplicatesRemoved}/${this.stats.totalValidEvents} (${duplicatePercent}%)`);
     
     if (daysCovered.size < daysInRange / 2) {
       console.warn(`⚠️  Only ${daysCovered.size}/${daysInRange} days have events`);
@@ -779,31 +911,56 @@ class BMSecurityAPI {
 
     const result = {
       success: true,
-      data: dedupedEvents,
-      total: dedupedEvents.length,
+      data: finalEvents,
+      total: finalEvents.length,
       daysCovered: daysCovered.size,
       daysRequested: daysInRange,
       accountUsed: resolvedAccount,
       hasCompleteCoverage: daysCovered.size === daysInRange,
       chunks: chunks.length,
-      parallel: this.limiter.maxConcurrent,
-      cached: false,
-      duplicateStats: {
-        totalProcessed: this.duplicateStats.totalProcessed,
-        totalRemoved: this.duplicateStats.totalRemoved,
-        removalRate: this.duplicateStats.totalProcessed > 0 
-          ? ((this.duplicateStats.totalRemoved / this.duplicateStats.totalProcessed) * 100).toFixed(1) 
-          : 0
-      }
+      stats: {
+        rawEvents: this.stats.totalRawEvents,
+        validEvents: this.stats.totalValidEvents,
+        cleanEvents: this.stats.totalDedupedEvents,
+        malformedRemoved: this.stats.malformedRemoved,
+        duplicatesRemoved: this.stats.duplicatesRemoved,
+        malformedRate: malformedPercent,
+        duplicateRate: duplicatePercent
+      },
+      cached: false
     };
 
-    // Cache the result
     rawCache.set(cacheKey, {
       data: { ...result, cached: true },
       timestamp: Date.now()
     });
     
     return result;
+  }
+
+  /**
+   * Reset stats for new request
+   */
+  resetStatsForRequest() {
+    this.stats = {
+      totalRawEvents: 0,
+      totalValidEvents: 0,
+      totalDedupedEvents: 0,
+      malformedRemoved: 0,
+      duplicatesRemoved: 0,
+      byMalformedReason: {
+        missingTimestamp: 0,
+        invalidTimestamp: 0,
+        missingZone: 0,
+        missingClientId: 0,
+        missingAlarmCode: 0
+      },
+      byDuplicateReason: {
+        exact: 0,
+        sameSecond: 0,
+        sameMinute: 0
+      }
+    };
   }
 
   /**
@@ -821,11 +978,7 @@ class BMSecurityAPI {
           start: 0,
           limit: 50,
           sort: JSON.stringify([{ property: 'cue_ncuenta', direction: 'ASC' }]),
-          filter: JSON.stringify([
-            { property: 'cue_nparticion', value: '0' },
-            { property: 'tip_nTipo', value: 5 },
-            { property: 'cue_ncuenta', value: variant }
-          ]),
+          filter: JSON.stringify([]), // REMOVED RESTRICTIVE FILTERS
           oauth_token: this.token
         };
 
@@ -847,43 +1000,107 @@ class BMSecurityAPI {
   }
 
   /**
-   * 🔍 Fetch all accounts
+   * 🔍 Fetch all accounts - NO LIMIT VERSION (fetches ALL accounts without restrictive filters)
    */
   async getAllAccounts() {
     await this.ensureAuthenticated();
     
-    console.log('🔍 Fetching all accounts from BMSecurity API...');
+    console.log('🔍 Fetching ALL accounts from BMSecurity API (NO RESTRICTIVE FILTERS)...');
     
     try {
-      const params = {
-        page: 1,
-        start: 0,
-        limit: 1000,
-        sort: JSON.stringify([{ property: 'cue_ncuenta', direction: 'ASC' }]),
-        filter: JSON.stringify([
-          { property: 'cue_nparticion', value: '0' },
-          { property: 'tip_nTipo', value: 5 }
-        ]),
-        oauth_token: this.token
-      };
-
-      const response = await axiosInstance.get(
-        `${this.baseURL}/Rest/Search/CuentaByDealer`,
-        { params, timeout: 15000 }
-      );
-
-      const accounts = response.data?.data || response.data?.rows || [];
+      const allAccounts = [];
+      let page = 1;
+      const limit = 1000;
+      let hasMore = true;
+      let totalFetched = 0;
+      let totalExpected = null;
       
-      console.log(`✅ Retrieved ${accounts.length} accounts from API`);
+      while (hasMore) {
+        const params = {
+          page: page,
+          start: (page - 1) * limit,
+          limit: limit,
+          sort: JSON.stringify([{ property: 'cue_iid', direction: 'ASC' }]), // ✅ CORRECT: Sort by ID
+          // ✅ FIX #1: REMOVED RESTRICTIVE FILTERS - fetching ALL clients
+          filter: JSON.stringify([]), // Empty filter = fetch everything
+          oauth_token: this.token
+        };
+
+        console.log(`  📄 Fetching page ${page} (records ${(page - 1) * limit + 1} to ${page * limit})...`);
+
+        const response = await axiosInstance.get(
+          `${this.baseURL}/Rest/Search/CuentaByDealer`,
+          { 
+            params, 
+            timeout: 45000,
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            }
+          }
+        );
+
+        const accounts = response.data?.data || response.data?.rows || [];
+        
+        // ✅ FIX #2: Log totals properly
+        console.log({
+          page,
+          returned: accounts.length,
+          totalFromAPI: response.data?.total
+        });
+        
+        // Get total count on first page if available
+        if (totalExpected === null && response.data?.total !== undefined) {
+          totalExpected = parseInt(response.data.total);
+          console.log(`  📊 Total accounts expected: ${totalExpected}`);
+        }
+        
+        if (accounts.length === 0) {
+          console.log(`  ⚠️ Page ${page} returned 0 accounts`);
+          hasMore = false;
+          break;
+        }
+        
+        allAccounts.push(...accounts);
+        totalFetched += accounts.length;
+        
+        console.log(`  ✅ Page ${page}: ${accounts.length} accounts (Total fetched: ${totalFetched}${totalExpected ? `/${totalExpected}` : ''})`);
+        
+        // Continue until we get all accounts
+        // If we know total expected, stop when we have them all
+        if (totalExpected !== null) {
+          hasMore = totalFetched < totalExpected;
+        } else {
+          // If we don't know total, stop when we get less than limit
+          hasMore = accounts.length >= limit;
+        }
+        
+        if (hasMore) {
+          page++;
+          // Add longer delay between pages for large fetches
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      console.log(`✅ Successfully fetched ALL ${totalFetched} accounts from API`);
+      
+      // Cache the result
+      rawCache.set('all_accounts_full', {
+        data: allAccounts,
+        timestamp: Date.now()
+      });
       
       return { 
         success: true, 
-        data: accounts, 
-        total: accounts.length 
+        data: allAccounts, 
+        total: allAccounts.length,
+        pagesFetched: page - 1,
+        totalExpected: totalExpected
       };
       
     } catch (error) {
       console.error('❌ Failed to fetch all accounts:', error.message);
+      console.error('   Error stack:', error.stack);
       return { 
         success: false, 
         data: [], 
@@ -901,7 +1118,7 @@ class BMSecurityAPI {
       const today = dayjs().tz('Africa/Nairobi').format('YYYY-MM-DD');
       const yesterday = dayjs().tz('Africa/Nairobi').subtract(1, 'day').format('YYYY-MM-DD');
       
-      console.log('\n🧪 Running connection test with duplicate diagnostics...');
+      console.log('\n🧪 Running connection test with data validation...');
       const result = await this.getPatrolEvents('', yesterday, today);
       
       return {
@@ -909,17 +1126,14 @@ class BMSecurityAPI {
         token: this.token ? `Valid (55min buffer)` : 'Invalid',
         eventsCount: result.total,
         daysCovered: result.daysCovered,
-        cacheSize: rawCache.size,
-        timeout: `${this.requestTimeout}ms`,
-        retries: this.maxRetries,
-        duplicateStats: result.duplicateStats,
-        message: 'Fixed deduplication API: Expected <20% duplicate rate'
+        stats: result.stats,
+        message: 'Flexible validation API: Accepts various timestamp formats'
       };
     } catch (error) {
       return { 
         success: false, 
         error: error.message,
-        duplicateStats: this.duplicateStats 
+        stats: this.stats 
       };
     }
   }
@@ -959,24 +1173,13 @@ class BMSecurityAPI {
     
     rawCache.clear();
     accountResolutionCache.clear();
-    
-    // Reset duplicate stats
-    this.duplicateStats = {
-      totalProcessed: 0,
-      totalRemoved: 0,
-      byReason: {
-        exact: 0,
-        sameSecond: 0,
-        sameMinute: 0
-      }
-    };
+    this.resetStatsForRequest();
     
     console.log(`🗑️ Cleared cache (${rawSize + resolutionSize} entries) and reset stats`);
     return { 
       cleared: rawSize + resolutionSize,
       rawCache: rawSize,
-      accountResolutionCache: resolutionSize,
-      duplicateStatsReset: true
+      accountResolutionCache: resolutionSize
     };
   }
 
@@ -992,26 +1195,42 @@ class BMSecurityAPI {
       accountResolutionCache: {
         size: accountResolutionCache.size
       },
-      duplicateStats: this.duplicateStats
+      processingStats: this.stats
     };
   }
 
   /**
-   * 🔧 Switch deduplication mode
+   * 📈 Get detailed stats report
    */
-  setDeduplicationMode(mode = 'normal') {
-    const modes = {
-      'normal': 'dedupeBMEvents',
-      'aggressive': 'dedupeBMEventsAggressive',
-      'none': null
+  getStatsReport() {
+    const totalProcessed = this.stats.totalRawEvents;
+    const malformedPercent = totalProcessed > 0 ? (this.stats.malformedRemoved / totalProcessed * 100).toFixed(1) : 0;
+    const duplicatePercent = this.stats.totalValidEvents > 0 ? (this.stats.duplicatesRemoved / this.stats.totalValidEvents * 100).toFixed(1) : 0;
+    
+    return {
+      summary: {
+        totalRawEvents: this.stats.totalRawEvents,
+        totalValidEvents: this.stats.totalValidEvents,
+        totalCleanEvents: this.stats.totalDedupedEvents,
+        efficiency: totalProcessed > 0 ? ((this.stats.totalDedupedEvents / totalProcessed) * 100).toFixed(1) + '%' : '0%'
+      },
+      malformedData: {
+        totalRemoved: this.stats.malformedRemoved,
+        percentage: malformedPercent + '%',
+        breakdown: this.stats.byMalformedReason
+      },
+      duplicates: {
+        totalRemoved: this.stats.duplicatesRemoved,
+        percentage: duplicatePercent + '%',
+        breakdown: this.stats.byDuplicateReason
+      },
+      dataQuality: {
+        malformedRate: malformedPercent,
+        duplicateRate: duplicatePercent,
+        overallQuality: malformedPercent < 20 && duplicatePercent < 20 ? 'GOOD' : 
+                       malformedPercent < 50 && duplicatePercent < 30 ? 'MODERATE' : 'POOR'
+      }
     };
-    
-    if (!modes[mode]) {
-      throw new Error(`Invalid deduplication mode: ${mode}. Use: normal, aggressive, none`);
-    }
-    
-    console.log(`🔧 Setting deduplication mode to: ${mode}`);
-    return { mode, message: `Deduplication mode changed to ${mode}` };
   }
 
   addAccountMapping(alphanumeric, numeric) {
@@ -1025,7 +1244,93 @@ class BMSecurityAPI {
     this.loginPromise = null;
     console.log('👋 BMSecurity API: Logged out');
   }
-}
+
+  /**
+   * 👥 Get clients (with caching) - Fetches ALL clients without limits
+   */
+  async getClients() {
+    try {
+      const cacheKey = 'all_clients';
+      const cached = rawCache.get(cacheKey);
+      
+      if (cached && Date.now() - cached.timestamp < 5 * 60 * 1000) {
+        console.log('📦 Serving clients from cache');
+        return cached.data;
+      }
+      
+      console.log('👥 Fetching ALL clients from BMSecurity API (no limits)...');
+      
+      const accountsResult = await this.getAllAccounts();
+      
+      if (!accountsResult.success || !accountsResult.data) {
+        throw new Error('Failed to fetch accounts from API');
+      }
+      
+      console.log(`🔄 Transforming ${accountsResult.data.length} accounts to client format...`);
+      
+      // ✅ FIX #3: Temporarily REMOVE filter to debug missing names
+      const clients = accountsResult.data.map(account => ({
+        id: account.cue_iid || account.id,
+        name: account.cue_cnombre || account.name || 'Unknown Client',
+        email: account.cue_cemail || account.email || '',
+        accountNumber: (account.cue_ncuenta || account.accountNumber || '').trim(),
+        active: account.cue_bactivo !== undefined ? account.cue_bactivo : true,
+        phone: account.cue_ctelefono || '',
+        address: account.cue_cdireccion || '',
+        city: account.cue_cciudad || '',
+        // Additional fields for better identification
+        dealerId: account.cue_iiddealer,
+        partition: account.cue_nparticion,
+        accountType: account.tip_nTipo,
+        // Debug fields to understand data
+        rawAccount: account // Keep raw data for debugging
+      }));
+      // ✅ Temporarily REMOVE filter to see ALL accounts
+      // .filter(client => client.name !== 'Unknown Client'); // ⚠️ COMMENTED OUT FOR DEBUGGING
+      
+      console.log(`✅ Successfully transformed ${clients.length} clients`);
+      
+      // Log statistics about data quality
+      const unknownCount = clients.filter(c => c.name === 'Unknown Client').length;
+      const activeCount = clients.filter(c => c.active).length;
+      const inactiveCount = clients.filter(c => !c.active).length;
+      
+      console.log(`📊 Client Statistics:`);
+      console.log(`   Total: ${clients.length}`);
+      console.log(`   Active: ${activeCount}`);
+      console.log(`   Inactive: ${inactiveCount}`);
+      console.log(`   Unknown Name: ${unknownCount} (${((unknownCount / clients.length) * 100).toFixed(1)}%)`);
+      
+      // Log sample of clients for debugging
+      if (clients.length > 0) {
+        console.log(`📋 Sample clients (first 10):`);
+        clients.slice(0, 10).forEach((client, i) => {
+          console.log(`  ${i + 1}. "${client.name}" (${client.accountNumber}) - Active: ${client.active}, Type: ${client.accountType}, Partition: ${client.partition}`);
+        });
+        
+        // Log some unknown clients to understand what's missing
+        const unknownClients = clients.filter(c => c.name === 'Unknown Client').slice(0, 5);
+        if (unknownClients.length > 0) {
+          console.log(`❓ Sample Unknown Clients (why they're missing names):`);
+          unknownClients.forEach((client, i) => {
+            console.log(`  ${i + 1}. Account#: ${client.accountNumber}, ID: ${client.id}, Has cue_cnombre: ${!!client.rawAccount?.cue_cnombre}`);
+          });
+        }
+      }
+      
+      rawCache.set(cacheKey, {
+        data: clients,
+        timestamp: Date.now()
+      });
+      
+      return clients;
+      
+    } catch (error) {
+      console.error('❌ Error in getClients:', error.message);
+      throw error;
+    }
+  }
+} // <-- Class closes HERE
 
 const apiInstance = new BMSecurityAPI();
-export default apiInstance;
+module.exports = apiInstance;

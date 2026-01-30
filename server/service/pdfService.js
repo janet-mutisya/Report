@@ -1,20 +1,15 @@
 // server/service/pdfService.js - FIXED INCIDENT REPORTS VERSION WITH ZONE NAMES
-import PDFDocument from "pdfkit";
-import dayjs from "dayjs";
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const PDFDocument = require("pdfkit");
+const dayjs = require("dayjs");
+const fs = require('fs');
+const path = require('path');
+const { fileURLToPath } = require('url');
 
 // Import the report model - ALL DATA COMES FROM HERE
-import { fetchPatrolReport } from '../models/reportModel.js';
+const { fetchPatrolReport } = require('../models/reportModel');
 
-dayjs.extend(utc);
-dayjs.extend(timezone);
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+dayjs.extend(require('dayjs/plugin/utc'));
+dayjs.extend(require('dayjs/plugin/timezone'));
 
 const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
@@ -110,7 +105,7 @@ function cleanPostName(postName) {
  */
 function formatDate(dateString) {
   try {
-    const date = dayjs(dateString).tz(TZ);
+    const date = dayjs.tz(dateString, TZ);
     if (date.isValid()) {
       return date.format('DD/MM/YYYY');
     }
@@ -403,7 +398,7 @@ function processPatrolEvents(reportData) {
 /**
  * MAIN: Generate Dashboard PDF
  */
-export async function generateDashboardPDF(clientData) {
+async function generateDashboardPDF(clientData) {
   const startTime = Date.now();
   
   logger.info('='.repeat(60));
@@ -446,16 +441,30 @@ export async function generateDashboardPDF(clientData) {
     logger.info(`   - Incidents: ${incidents.length}`);
     logger.info(`   - Patrol Events: ${patrolEvents.length}`);
 
-    // Extract metadata with fallbacks
+    // ==================== FIXED METADATA EXTRACTION ====================
+    // Extract metadata with fallbacks - USING CORRECT FIELD NAMES
     const {
       clientName: reportClientName = clientName,
-      overallPerformance = 0,
-      totalCompleted = 0,
+      overallPatrolPerformance = 0,  // ✅ Changed from overallPerformance
+      totalCompletedPatrols = 0,     // ✅ Changed from totalCompleted
       totalExpectedPatrols = 0,
       dataQuality = {}
     } = reportData.metadata || {};
 
     const displayClientName = clientName || reportClientName || 'Unknown Client';
+
+    // ✅ Calculate from actual post data as backup
+    const calculatedCompleted = posts.reduce((sum, post) => sum + (post.Completed || 0), 0);
+    const calculatedExpected = posts.reduce((sum, post) => sum + (post.Expected || 0), 0);
+    const calculatedPerformance = calculatedExpected > 0 
+      ? Math.round((calculatedCompleted / calculatedExpected) * 100)
+      : 0;
+
+    // Use calculated values if metadata values are 0
+    const totalCompleted = totalCompletedPatrols || calculatedCompleted;
+    const overallPerformance = overallPatrolPerformance || calculatedPerformance;
+
+    logger.info(`📊 Using totals: ${totalCompleted}/${totalExpectedPatrols} = ${overallPerformance}%`);
 
     // Calculate actual days for display
     const actualDays = calculateActualDays(startDate, endDate);
@@ -827,18 +836,31 @@ export async function generateDashboardPDF(clientData) {
 
       checkPageBreak(24);
       
+      // ==================== FIXED: GRAND TOTAL ROW ====================
+      // ✅ CALCULATE ACTUAL TOTALS FROM PERFORMANCE DATA
+      const actualTotalCompleted = posts.reduce((sum, post) => sum + (post.Completed || 0), 0);
+      const actualTotalExpected = posts.reduce((sum, post) => sum + (post.Expected || 0), 0);
+      const actualOverallPerformance = actualTotalExpected > 0 
+        ? Math.round((actualTotalCompleted / actualTotalExpected) * 100)
+        : 0;
+
+      logger.info(`📊 Grand Total Verification:`);
+      logger.info(`   Completed: ${actualTotalCompleted} (reported: ${totalCompleted})`);
+      logger.info(`   Expected: ${actualTotalExpected} (reported: ${totalExpectedPatrols})`);
+      logger.info(`   Performance: ${actualOverallPerformance}% (reported: ${overallPerformance}%)`);
+
       // Grand total row
       doc.fillColor(COLORS.primary)
          .rect(40, yPos, pageWidth, 24)
          .fill();
-      
+
       doc.fillColor(COLORS.white)
          .fontSize(10)
          .font('Helvetica-Bold')
          .text('TOTAL PATROLS', 45, yPos + 9)
-         .text(String(totalCompleted), 255, yPos + 9)
-         .text(String(totalExpectedPatrols), 335, yPos + 9)
-         .text(`${overallPerformance}%`, 415, yPos + 9, { width: 80 });
+         .text(String(actualTotalCompleted), 255, yPos + 9)
+         .text(String(actualTotalExpected), 335, yPos + 9)
+         .text(`${actualOverallPerformance}%`, 415, yPos + 9, { width: 80 });
       
       yPos += 40;
     } else {
@@ -1003,7 +1025,7 @@ export async function generateDashboardPDF(clientData) {
 /**
  * Generate historical report PDF (alias)
  */
-export async function generateHistoricalReportPDF(data, clientName, dateRange) {
+async function generateHistoricalReportPDF(data, clientName, dateRange) {
   const pdfData = {
     clientId: data.clientId || data.client?.ClientID,
     clientName: clientName,
@@ -1017,7 +1039,7 @@ export async function generateHistoricalReportPDF(data, clientName, dateRange) {
 /**
  * Generate patrol report PDF (alias)
  */
-export async function generatePatrolReportPDF(data, clientName, dateRange) {
+async function generatePatrolReportPDF(data, clientName, dateRange) {
   const pdfData = {
     clientId: data.clientId || data.client?.ClientID,
     clientName: clientName,
@@ -1031,7 +1053,7 @@ export async function generatePatrolReportPDF(data, clientName, dateRange) {
 /**
  * Main PDF generation function with error handling
  */
-export async function generatePDFReport(clientData) {
+async function generatePDFReport(clientData) {
   try {
     const pdfBuffer = await generateDashboardPDF(clientData);
     
@@ -1075,7 +1097,16 @@ export async function generatePDFReport(clientData) {
   }
 }
 
-export default {
+// Export all functions
+module.exports = {
+  generateDashboardPDF,
+  generateHistoricalReportPDF,
+  generatePatrolReportPDF,
+  generatePDFReport
+};
+
+// Keep default export for compatibility
+module.exports.default = {
   generateDashboardPDF,
   generateHistoricalReportPDF,
   generatePatrolReportPDF,

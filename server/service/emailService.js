@@ -1,8 +1,8 @@
 // server/service/emailService.js - CLEAN COMPACT VERSION WITH DEBUG LOGS
-import nodemailer from 'nodemailer';
-import dayjs from 'dayjs';
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const nodemailer = require('nodemailer');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -325,7 +325,7 @@ async function sendEmailWithRetry(mailOptions, maxRetries = 3) {
 }
 
 // ----------------- EXPORTABLE FUNCTIONS -----------------
-export async function sendGuardReport({ to, recipientName = '', clientName = '', startDate, endDate, pdfBuffer, pdfFilename }) {
+async function sendGuardReport({ to, recipientName = '', clientName = '', startDate, endDate, pdfBuffer, pdfFilename }) {
   try {
     validateEmailConfig();
 
@@ -430,17 +430,17 @@ export async function sendGuardReport({ to, recipientName = '', clientName = '',
   }
 }
 
-export async function sendPatrolReport(options) { 
+async function sendPatrolReport(options) { 
   logger.info('📧 sendPatrolReport called (alias for sendGuardReport)');
   return sendGuardReport(options); 
 }
 
-export async function sendHistoricalReport(options) { 
+async function sendHistoricalReport(options) { 
   logger.info('📧 sendHistoricalReport called (alias for sendGuardReport)');
   return sendGuardReport(options); 
 }
 
-export async function sendSimpleEmail({ to, subject, text, html, attachments }) {
+async function sendSimpleEmail({ to, subject, text, html, attachments }) {
   const fromName = process.env.FROM_NAME || 'Security Operations';
   const fromEmail = process.env.FROM_EMAIL || process.env.EMAIL_USER;
 
@@ -456,7 +456,7 @@ export async function sendSimpleEmail({ to, subject, text, html, attachments }) 
   return await sendEmailWithRetry(mailOptions);
 }
 
-export async function testSMTPConnection() {
+async function testSMTPConnection() {
   try {
     const transporter = createEmailTransporter();
     await transporter.verify();
@@ -468,7 +468,7 @@ export async function testSMTPConnection() {
   }
 }
 
-export default {
+module.exports = {
   sendGuardReport,
   sendPatrolReport,
   sendHistoricalReport,

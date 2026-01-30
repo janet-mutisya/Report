@@ -1,5 +1,5 @@
-import express from "express";
-import { triggerSchedulerNow, sendTestEmail } from "../controllers/testScheduler.js";
+const express = require("express");
+const { triggerSchedulerNow, sendTestEmail } = require("../controllers/testScheduler.js");
 
 const router = express.Router();
 
@@ -9,4 +9,4 @@ router.get("/run-now", triggerSchedulerNow);
 // Send test email only
 router.get("/email-test", sendTestEmail);
 
-export default router;
+module.exports = router;

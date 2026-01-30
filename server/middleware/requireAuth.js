@@ -1,5 +1,5 @@
 // server/middleware/requireAuth.js
-import jwt from "jsonwebtoken";
+const jwt = require("jsonwebtoken");
 
 /**
  * Middleware to protect routes requiring authentication
@@ -11,7 +11,7 @@ import jwt from "jsonwebtoken";
  *   console.log(req.user.apiClientAccount);
  * });
  */
-export function requireAuth(req, res, next) {
+function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -75,7 +75,7 @@ export function requireAuth(req, res, next) {
  *   // Only admins can access
  * });
  */
-export function requireRole(...allowedRoles) {
+function requireRole(...allowedRoles) {
   return (req, res, next) => {
     if (!req.user) {
       return res.status(401).json({
@@ -98,3 +98,9 @@ export function requireRole(...allowedRoles) {
     next();
   };
 }
+
+// Export functions
+module.exports = {
+  requireAuth,
+  requireRole
+};

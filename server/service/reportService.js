@@ -1,9 +1,9 @@
 // server/services/reportService.js - FULLY SYNCHRONIZED WITH API & MODEL
-import PDFDocument from "pdfkit";
-import { fetchWeeklyReport } from "../models/reportModel.js";
-import dayjs from "dayjs";
-import utc from 'dayjs/plugin/utc.js';
-import timezone from 'dayjs/plugin/timezone.js';
+const PDFDocument = require('pdfkit');
+const { fetchWeeklyReport } = require('../models/reportModel.js');
+const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc.js');
+const timezone = require('dayjs/plugin/timezone.js');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -363,7 +363,7 @@ function generateWarningPage(doc, metadata) {
 /**
  * 📊 MAIN FUNCTION: Generate PDF report with full API integration
  */
-export async function generateWeeklyReportPDF(clientId, startDate, endDate) {
+async function generateWeeklyReportPDF(clientId, startDate, endDate) {
   try {
     console.log(`\n🧾 ========================================`);
     console.log(`📊 GENERATING PDF REPORT`);
@@ -492,7 +492,7 @@ export async function generateWeeklyReportPDF(clientId, startDate, endDate) {
 /**
  * 🧪 TEST FUNCTION: Generate test PDF with validation
  */
-export async function generateTestReport(clientId = 1001, startDate = null, endDate = null) {
+async function generateTestReport(clientId = 1001, startDate = null, endDate = null) {
   try {
     console.log('\n🧪 ========================================');
     console.log('   RUNNING TEST REPORT GENERATION');
@@ -534,7 +534,7 @@ export async function generateTestReport(clientId = 1001, startDate = null, endD
 /**
  * 📧 Generate report for email attachment
  */
-export async function generateEmailReport(clientId, startDate, endDate, clientName = 'Client') {
+async function generateEmailReport(clientId, startDate, endDate, clientName = 'Client') {
   try {
     console.log(`\n📧 Generating email report for ${clientName}...`);
     
@@ -565,7 +565,7 @@ export async function generateEmailReport(clientId, startDate, endDate, clientNa
 /**
  * 🔍 Get report metadata without generating PDF
  */
-export async function getReportMetadata(clientId, startDate, endDate) {
+async function getReportMetadata(clientId, startDate, endDate) {
   try {
     console.log(`\n🔍 Fetching report metadata for client ${clientId}...`);
     
@@ -609,7 +609,7 @@ export async function getReportMetadata(clientId, startDate, endDate) {
 /**
  * 🔍 Validate report data before PDF generation
  */
-export async function validateReportData(clientId, startDate, endDate) {
+async function validateReportData(clientId, startDate, endDate) {
   try {
     console.log(`\n🔍 Validating report data availability...`);
     
@@ -660,7 +660,7 @@ export async function validateReportData(clientId, startDate, endDate) {
   }
 }
 
-export default {
+module.exports = {
   generateWeeklyReportPDF,
   generateTestReport,
   generateEmailReport,

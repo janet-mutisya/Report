@@ -1,5 +1,5 @@
 // test-final-email.js
-import { testSMTPConnection, sendSimpleEmail } from './server/service/emailService.js';
+const { testSMTPConnection, sendSimpleEmail } = require('./server/service/emailService.js');
 
 async function testFinalEmailSystem() {
   console.log('🧪 FINAL EMAIL SYSTEM TEST...\n');
