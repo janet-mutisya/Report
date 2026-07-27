@@ -1,832 +1,831 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Calendar, Clock, Users, TrendingUp, Edit2, Trash2, Save, X, Download, Filter, Search, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
+import { Calendar, Clock, Users, TrendingUp, Edit2, Trash2, Save, X, Download, Filter, Search, CheckCircle, XCircle, RefreshCw, AlertTriangle } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5000/api';
 
+// ✅ Canonical shift type values — must match backend VALID_SHIFT_TYPES
+// There is NO default. Admin must select explicitly.
+const SHIFT_OPTIONS = [
+  { value: 'day',   label: 'Day Only (06:00 → 18:00)'   },
+  { value: 'night', label: 'Night Only (18:00 → 06:00)'  },
+  { value: 'both',  label: 'Day & Night (24h)'           },
+];
+const VALID_SHIFT_TYPES = SHIFT_OPTIONS.map(o => o.value);
+
+const DAY_OPTIONS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// ✅ shiftType is '' (empty) by default — admin must pick explicitly
+const EMPTY_FORM = {
+  patrolsPerDay:      '',
+  weekendPatrols:     '',
+  patrolDays:         '',
+  scheduleType:       'daily',
+  customIntervalDays: null,
+  shiftType:          '',   // NO default — form is invalid until admin selects
+};
+
+// ============================================================================
+// AUTH HELPERS
+// ============================================================================
+
+function getAuthToken() {
+  return (
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('token')     ||
+    sessionStorage.getItem('authToken') ||
+    sessionStorage.getItem('token')   ||
+    null
+  );
+}
+
+async function authFetch(url, options = {}) {
+  const token = getAuthToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...options.headers,
+  };
+  const response = await fetch(url, { ...options, headers });
+
+  if (response.status === 401) throw new Error('Unauthorized — please log in again (401)');
+  if (response.status === 403) throw new Error('Forbidden — admin access required (403)');
+  if (!response.ok) {
+    let msg = `HTTP ${response.status}`;
+    try { const body = await response.json(); msg = body.message || body.error || msg; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return response.json();
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+function validateForm(form) {
+  const errors = {};
+  const ppd = Number(form.patrolsPerDay);
+  const wpd = Number(form.weekendPatrols);
+
+  if (form.patrolsPerDay === '' || isNaN(ppd))  errors.patrolsPerDay  = 'Required';
+  else if (ppd < 1 || ppd > 48)                 errors.patrolsPerDay  = 'Must be 1–48';
+
+  if (form.weekendPatrols === '' || isNaN(wpd)) errors.weekendPatrols = 'Required';
+  else if (wpd < 1 || wpd > 48)                 errors.weekendPatrols = 'Must be 1–48';
+
+  if (!form.patrolDays || !form.patrolDays.trim()) errors.patrolDays  = 'Select at least one day';
+
+  // ✅ shiftType is required — empty string or invalid value is an error
+  if (!form.shiftType || !VALID_SHIFT_TYPES.includes(form.shiftType))
+    errors.shiftType = 'Select a shift type (Day Only, Night Only, or Day & Night)';
+
+  return errors;
+}
+
+function computeWeeklyTotal(form) {
+  const days     = form.patrolDays ? form.patrolDays.split(',').filter(Boolean) : [];
+  const weekdays = days.filter(d => !['Sat', 'Sun'].includes(d)).length;
+  const weekend  = days.filter(d =>  ['Sat', 'Sun'].includes(d)).length;
+  return weekdays * (Number(form.patrolsPerDay) || 0)
+       + weekend  * (Number(form.weekendPatrols) || 0);
+}
+
+// ✅ Normalise shiftType from server.
+// Returns null for missing/unknown — means "not configured", displayed as a warning.
+function normaliseShiftType(raw) {
+  if (!raw) return null;
+  const lower = String(raw).toLowerCase().trim();
+  if (lower === 'day'   || lower === 'day only'   || lower === 'day shift only'   || lower === 'dayshift')   return 'day';
+  if (lower === 'night' || lower === 'night only' || lower === 'night shift only' || lower === 'nightshift') return 'night';
+  if (lower === 'both'  || lower === 'day/night'  || lower === 'daynightshift'    || lower === '24/7')        return 'both';
+  return null;   // unrecognised — treat as not configured
+}
+
+// Human-readable label for display
+function shiftLabel(value) {
+  if (!value) return null;
+  return SHIFT_OPTIONS.find(o => o.value === value)?.label ?? null;
+}
+
+function normaliseClient(c) {
+  return {
+    ClientID:           c.ClientID          ?? c.id             ?? 0,
+    ClientName:         c.ClientName        ?? c.name           ?? 'Unknown',
+    PatrolsPerDay:      c.PatrolsPerDay     ?? c.patrolsPerDay  ?? null,
+    WeekendPatrols:     c.WeekendPatrols    ?? c.weekendPatrols ?? null,
+    PatrolDays:         c.PatrolDays        ?? c.patrolDays     ?? '',
+    ScheduleType:       c.ScheduleType      ?? c.scheduleType   ?? 'daily',
+    CustomIntervalDays: c.CustomIntervalDays ?? c.customIntervalDays ?? null,
+    // ✅ normaliseShiftType returns null if not configured — never defaults to 'both'
+    ShiftType:          normaliseShiftType(c.ShiftType ?? c.shiftType),
+    WeeklyTotal:        c.WeeklyTotal       ?? c.weeklyTotal    ?? null,
+    HasCustomSchedule:  c.HasCustomSchedule ?? c.hasCustomSchedule ?? false,
+    IsActive:           c.IsActive          ?? c.isActive       ?? true,
+    accountNumber:      c.AccountNumber     ?? c.accountNumber  ?? c.cue_ccliente ?? '',
+  };
+}
+
+// ============================================================================
+// SUB-COMPONENTS
+// ============================================================================
+
+const Badge = ({ children, color = 'gray' }) => {
+  const palette = {
+    green:  'bg-green-100  text-green-800',
+    red:    'bg-red-100    text-red-800',
+    purple: 'bg-purple-100 text-purple-800',
+    yellow: 'bg-yellow-100 text-yellow-800',
+    blue:   'bg-blue-100   text-blue-800',
+    gray:   'bg-gray-100   text-gray-700',
+    orange: 'bg-orange-100 text-orange-800',
+  };
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${palette[color] ?? palette.gray}`}>
+      {children}
+    </span>
+  );
+};
+
+const DayPicker = ({ value, onChange, error }) => {
+  const selected = value ? value.split(',').map(d => d.trim()).filter(Boolean) : [];
+  const toggle   = (day) => {
+    const next = selected.includes(day)
+      ? selected.filter(d => d !== day)
+      : [...selected, day];
+    onChange(next.join(','));
+  };
+  return (
+    <div>
+      <div className="flex gap-1 flex-wrap">
+        {DAY_OPTIONS.map(day => (
+          <button key={day} type="button" onClick={() => toggle(day)}
+            className={`px-2.5 py-1 rounded text-xs font-semibold border transition-colors ${
+              selected.includes(day)
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
+            }`}>
+            {day}
+          </button>
+        ))}
+      </div>
+      {error && <p className="text-red-500 text-xs mt-1">{error}</p>}
+    </div>
+  );
+};
+
+const NumInput = ({ value, onChange, error, placeholder = '—' }) => (
+  <div>
+    <input
+      type="number" min="1" max="48"
+      value={value} onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      className={`w-20 px-2 py-1 border rounded text-sm text-center ${
+        error ? 'border-red-400 bg-red-50' : 'border-gray-300'
+      } focus:outline-none focus:ring-2 focus:ring-blue-400`}
+    />
+    {error && <p className="text-red-500 text-xs mt-0.5">{error}</p>}
+  </div>
+);
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
 const PatrolScheduleManager = () => {
-  const [clients, setClients] = useState([]);
-  const [allClients, setAllClients] = useState([]); // Store all clients for filtering
+  const [allClients,      setAllClients]      = useState([]);
   const [filteredClients, setFilteredClients] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState('all');
-  const [editingClient, setEditingClient] = useState(null);
-  const [notification, setNotification] = useState(null);
+  const [loading,         setLoading]         = useState(true);
+  const [isRefreshing,    setIsRefreshing]    = useState(false);
+  const [searchTerm,      setSearchTerm]      = useState('');
+  const [filterStatus,    setFilterStatus]    = useState('all');
+  const [editingClient,   setEditingClient]   = useState(null);
+  const [formData,        setFormData]        = useState(EMPTY_FORM);
+  const [formErrors,      setFormErrors]      = useState({});
+  const [notification,    setNotification]    = useState(null);
   const [performanceData, setPerformanceData] = useState(null);
-  const [viewMode, setViewMode] = useState('list');
+  const [viewMode,        setViewMode]        = useState('list');
   const [performanceDays, setPerformanceDays] = useState(7);
-  const [isRefreshingClients, setIsRefreshingClients] = useState(false);
 
-  // Form state for editing/creating
-  const [formData, setFormData] = useState({
-    patrolsPerDay: 11,
-    patrolDays: 'Mon,Tue,Wed,Thu,Fri,Sat,Sun',
-    scheduleType: 'daily',
-    weekendPatrols: 11,
-    customIntervalDays: null,
-    shiftType: 'Day/Night'
-  });
-
+  // ── Notification ─────────────────────────────────────────────────────────
   const showNotification = useCallback((message, type = 'success') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 5000);
   }, []);
 
-  // ✅ FIXED: Filter clients based on search query
-  const filterClients = useCallback((query, status, clientsList) => {
-    if (!clientsList || clientsList.length === 0) {
-      setFilteredClients([]);
-      return;
+  // ── Filter ────────────────────────────────────────────────────────────────
+  const applyFilters = useCallback((query, status, list) => {
+    let result = [...(list || [])];
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      result = result.filter(c =>
+        (c.ClientName || '').toLowerCase().includes(q) ||
+        String(c.ClientID).includes(q)                 ||
+        String(c.accountNumber || '').includes(q)
+      );
     }
-
-    let filtered = [...clientsList];
-
-    // Search filter
-    if (query && query.trim().length >= 1) {
-      const searchTerm = query.toLowerCase().trim();
-      filtered = filtered.filter(client => {
-        const name = client.ClientName?.toLowerCase() || client.name?.toLowerCase() || "";
-        const id = client.ClientID?.toString() || client.id?.toString() || "";
-        const account = client.accountNumber?.toString() || "";
-        return name.includes(searchTerm) || id.includes(searchTerm) || account.includes(searchTerm);
-      });
-    }
-
-    // Status filter
-    if (status !== 'all') {
-      if (status === 'active') {
-        filtered = filtered.filter(c => c.IsActive || c.isActive);
-      } else if (status === 'inactive') {
-        filtered = filtered.filter(c => !c.IsActive && !c.isActive);
-      } else if (status === 'custom') {
-        filtered = filtered.filter(c => c.HasCustomSchedule || c.hasCustomSchedule);
-      } else if (status === 'default') {
-        filtered = filtered.filter(c => !c.HasCustomSchedule && !c.hasCustomSchedule);
-      }
-    }
-
-    console.log(`🔍 Filtered to ${filtered.length} clients for query: "${query}" with status: "${status}"`);
-    setFilteredClients(filtered);
+    if      (status === 'active')       result = result.filter(c =>  c.IsActive);
+    else if (status === 'inactive')     result = result.filter(c => !c.IsActive);
+    else if (status === 'custom')       result = result.filter(c =>  c.HasCustomSchedule);
+    else if (status === 'default')      result = result.filter(c => !c.HasCustomSchedule);
+    else if (status === 'unconfigured') result = result.filter(c => !c.HasCustomSchedule || !c.PatrolsPerDay || !c.ShiftType);
+    setFilteredClients(result);
   }, []);
 
-  // ✅ FIXED: Load all clients using the same approach as SecurityReportsPage
-  const fetchAllClients = useCallback(async (showLoading = true) => {
+  useEffect(() => {
+    applyFilters(searchTerm, filterStatus, allClients);
+  }, [searchTerm, filterStatus, allClients, applyFilters]);
+
+  // ── Fetch all clients ─────────────────────────────────────────────────────
+  const fetchAllClients = useCallback(async (showSpinner = true) => {
+    if (showSpinner) setLoading(true);
+    setIsRefreshing(true);
     try {
-      if (showLoading) {
-        setLoading(true);
-      }
-      setIsRefreshingClients(true);
-      console.log('📊 Fetching ALL clients from main clients API...');
-      setNotification(null);
-
-      // Try main clients endpoint first (this should have all 2000+ clients)
-      const response = await fetch(`${API_BASE}/clients`);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      // ✅ CRITICAL: Check response structure - this endpoint returns { clients: [], count: X }
-      let clientsData = [];
-      
-      if (data && Array.isArray(data.clients)) {
-        // Format 1: { clients: [], count: X }
-        clientsData = data.clients;
-        console.log(`✅ Loaded ${clientsData.length} clients (total: ${data.count || data.clients.length}) from /clients endpoint`);
-      } else if (data && Array.isArray(data)) {
-        // Format 2: Direct array
-        clientsData = data;
-        console.log(`✅ Loaded ${clientsData.length} clients from /clients endpoint (direct array)`);
-      } else {
-        console.warn("Unexpected response format from /clients:", data);
-        
-        // Fallback to patrol-schedules endpoint
-        console.log('🔄 Falling back to patrol-schedules endpoint...');
-        const patrolResponse = await fetch(`${API_BASE}/patrol-schedules/all`);
-        if (patrolResponse.ok) {
-          const patrolData = await patrolResponse.json();
-          if (patrolData.success && Array.isArray(patrolData.clients)) {
-            clientsData = patrolData.clients;
-            console.log(`✅ Loaded ${clientsData.length} clients from fallback endpoint`);
-          } else {
-            throw new Error('Invalid fallback response format');
-          }
-        } else {
-          throw new Error('Both endpoints failed');
-        }
-      }
-
-      // Transform client data to consistent format
-      const transformedClients = clientsData.map(client => ({
-        // Original patrol-schedules format
-        ClientID: client.ClientID || client.id || client.cue_codigo || 0,
-        ClientName: client.ClientName || client.name || client.cue_cnombre || 'Unknown Client',
-        PatrolsPerDay: client.PatrolsPerDay || client.patrolsPerDay || 11,
-        PatrolDays: client.PatrolDays || client.patrolDays || 'Mon,Tue,Wed,Thu,Fri,Sat,Sun',
-        ScheduleType: client.ScheduleType || client.scheduleType || 'daily',
-        WeekendPatrols: client.WeekendPatrols || client.weekendPatrols || 11,
-        CustomIntervalDays: client.CustomIntervalDays || client.customIntervalDays,
-        ShiftType: client.ShiftType || client.shiftType || 'Day/Night',
-        WeeklyTotal: client.WeeklyTotal || client.weeklyTotal || 77,
-        HasCustomSchedule: client.HasCustomSchedule || client.hasCustomSchedule || false,
-        IsActive: client.IsActive !== undefined ? client.IsActive : (client.isActive !== undefined ? client.isActive : true),
-        // Additional fields from main clients endpoint
-        accountNumber: client.accountNumber || client.cue_ccliente || '',
-        email: client.email || '',
-        phone: client.phone || '',
-        address: client.address || ''
-      }));
-
-      // ✅ CRITICAL: Store all clients AND show all initially
-      setAllClients(transformedClients);
-      
-      // Apply filters with current search term and status
-      filterClients(searchTerm, filterStatus, transformedClients);
-
-      if (transformedClients.length === 0) {
-        showNotification('No clients found', 'error');
-      } else {
-        showNotification(`Loaded ${transformedClients.length} clients`, 'success');
-      }
-
-    } catch (error) {
-      console.error('❌ Failed to fetch clients:', error);
-      showNotification(`Failed to load clients: ${error.message}`, 'error');
-      // ✅ CRITICAL: Clear both states on error
+      const data = await authFetch(`${API_BASE}/patrol-schedules`);
+      const raw  = Array.isArray(data)
+        ? data
+        : data.data && Array.isArray(data.data.clients) ? data.data.clients
+        : Array.isArray(data.clients) ? data.clients
+        : Array.isArray(data.data)    ? data.data
+        : [];
+      const transformed = raw.map(normaliseClient);
+      setAllClients(transformed);
+      showNotification(`Loaded ${transformed.length} clients`, 'success');
+    } catch (err) {
+      const isAuthError = err.message.includes('401') || err.message.includes('403');
+      showNotification(
+        isAuthError
+          ? `Auth error: ${err.message}`
+          : `Failed to load clients: ${err.message}`,
+        'error'
+      );
       setAllClients([]);
       setFilteredClients([]);
     } finally {
-      if (showLoading) {
-        setLoading(false);
-      }
-      setIsRefreshingClients(false);
+      if (showSpinner) setLoading(false);
+      setIsRefreshing(false);
     }
-  }, [searchTerm, filterStatus, filterClients, showNotification]);
+  }, [showNotification]);
 
-  // Handle client search input change with debouncing
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      filterClients(searchTerm, filterStatus, allClients);
-    }, 300); // 300ms debounce
-    
-    return () => clearTimeout(timer);
-  }, [searchTerm, filterStatus, allClients, filterClients]);
+  useEffect(() => { fetchAllClients(true); }, [fetchAllClients]);
 
+  // ── Edit ──────────────────────────────────────────────────────────────────
+  const handleEdit = (client) => {
+    setEditingClient(client.ClientID);
+    setFormErrors({});
+    setFormData({
+      patrolsPerDay:      client.PatrolsPerDay      ?? '',
+      weekendPatrols:     client.WeekendPatrols      ?? '',
+      patrolDays:         client.PatrolDays          || '',
+      scheduleType:       client.ScheduleType        || 'daily',
+      customIntervalDays: client.CustomIntervalDays  || null,
+      // ✅ Use stored value if valid, otherwise '' — forces admin to pick explicitly
+      shiftType:          VALID_SHIFT_TYPES.includes(client.ShiftType) ? client.ShiftType : '',
+    });
+  };
+
+  const handleCancel = () => {
+    setEditingClient(null);
+    setFormData(EMPTY_FORM);
+    setFormErrors({});
+  };
+
+  // ── Save ──────────────────────────────────────────────────────────────────
+  const handleSave = async (clientId) => {
+    const errors = validateForm(formData);
+    if (Object.keys(errors).length > 0) { setFormErrors(errors); return; }
+
+    try {
+      const payload = {
+        ...formData,
+        patrolsPerDay:  parseInt(formData.patrolsPerDay,  10),
+        weekendPatrols: parseInt(formData.weekendPatrols, 10),
+        // shiftType is already validated as 'day' | 'night' | 'both' by validateForm
+      };
+
+      const result = await authFetch(`${API_BASE}/patrol-schedules/${clientId}`, {
+        method: 'POST',
+        body:   JSON.stringify(payload),
+      });
+
+      if (result.success) {
+        setAllClients(prev => prev.map(c => {
+          if (c.ClientID !== clientId) return c;
+          const ppd      = payload.patrolsPerDay;
+          const wpd      = payload.weekendPatrols;
+          const days     = payload.patrolDays ? payload.patrolDays.split(',').filter(Boolean) : [];
+          const weekdays = days.filter(d => !['Sat','Sun'].includes(d)).length;
+          const weekend  = days.filter(d =>  ['Sat','Sun'].includes(d)).length;
+          return {
+            ...c,
+            PatrolsPerDay:     ppd,
+            WeekendPatrols:    wpd,
+            PatrolDays:        payload.patrolDays,
+            ScheduleType:      payload.scheduleType,
+            ShiftType:         payload.shiftType,   // already 'day' | 'night' | 'both'
+            WeeklyTotal:       weekdays * ppd + weekend * wpd,
+            HasCustomSchedule: true,
+          };
+        }));
+        showNotification('Schedule saved successfully', 'success');
+        handleCancel();
+        fetchAllClients(false);
+      } else {
+        showNotification(result.message || 'Save failed', 'error');
+      }
+    } catch (err) {
+      showNotification(`Error saving: ${err.message}`, 'error');
+    }
+  };
+
+  // ── Delete ─────────────────────────────────────────────────────────────────
+  const handleDelete = async (clientId, clientName) => {
+    if (!window.confirm(`Delete custom schedule for "${clientName}"?\n\nThis client will show as "Not Configured" and reports will fail until a new schedule is set.`)) return;
+    try {
+      const result = await authFetch(`${API_BASE}/patrol-schedules/${clientId}`, { method: 'DELETE' });
+      if (result.success) {
+        setAllClients(prev => prev.map(c =>
+          c.ClientID !== clientId ? c : {
+            ...c,
+            PatrolsPerDay:     null,
+            WeekendPatrols:    null,
+            PatrolDays:        '',
+            ShiftType:         null,   // ✅ null — not configured, no silent default
+            WeeklyTotal:       null,
+            HasCustomSchedule: false,
+          }
+        ));
+        showNotification('Schedule deleted — client is now unconfigured', 'success');
+        fetchAllClients(false);
+      } else {
+        showNotification(result.message || 'Delete failed', 'error');
+      }
+    } catch (err) {
+      showNotification(`Error deleting: ${err.message}`, 'error');
+    }
+  };
+
+  // ── Performance ────────────────────────────────────────────────────────────
   const fetchPerformanceData = useCallback(async (days = performanceDays) => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE}/patrol-schedules/performance?days=${days}`);
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const text = await response.text();
-      let result;
-      
-      try {
-        result = JSON.parse(text);
-      } catch (error) {
-        console.error('Failed to parse JSON:', text);
-        throw new Error('Server returned invalid JSON');
-      }
-      
-      if (result.success) {
-        setPerformanceData(result.data);
-      } else {
-        showNotification(result.message || 'Failed to fetch performance data', 'error');
-      }
-    } catch (error) {
-      console.error('Error fetching performance:', error);
-      showNotification('Error loading performance data: ' + error.message, 'error');
+      const result = await authFetch(`${API_BASE}/patrol-schedules/performance?days=${days}`);
+      if (result.success) setPerformanceData(result.data);
+      else showNotification(result.message || 'Failed to load performance', 'error');
+    } catch (err) {
+      showNotification(`Performance error: ${err.message}`, 'error');
     } finally {
       setLoading(false);
     }
   }, [performanceDays, showNotification]);
 
-  const handleEdit = (client) => {
-    setEditingClient(client.ClientID);
-    // Preserve ALL existing values from the client
-    setFormData({
-      patrolsPerDay: client.PatrolsPerDay,
-      patrolDays: client.PatrolDays,
-      scheduleType: client.ScheduleType,
-      weekendPatrols: client.WeekendPatrols,
-      customIntervalDays: client.CustomIntervalDays,
-      shiftType: client.ShiftType
-    });
-  };
-
-  const handleSave = async (clientId) => {
-    try {
-      const response = await fetch(`${API_BASE}/patrol-schedules/${clientId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const text = await response.text();
-      let result;
-      
-      try {
-        result = JSON.parse(text);
-      } catch (error) {
-        throw new Error('Server returned invalid JSON');
-      }
-
-      if (result.success) {
-        showNotification('Schedule updated successfully', 'success');
-        setEditingClient(null);
-        // Refresh clients after update
-        await fetchAllClients(false);
-      } else {
-        showNotification(result.message || 'Failed to update schedule', 'error');
-      }
-    } catch (error) {
-      console.error('Error saving schedule:', error);
-      showNotification('Error saving schedule: ' + error.message, 'error');
-    }
-  };
-
-  const handleDelete = async (clientId, clientName) => {
-    if (!window.confirm(`Are you sure you want to delete the custom schedule for ${clientName}? This will revert to default settings.`)) {
-      return;
-    }
-
-    try {
-      const response = await fetch(`${API_BASE}/patrol-schedules/${clientId}`, {
-        method: 'DELETE'
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const text = await response.text();
-      let result;
-      
-      try {
-        result = JSON.parse(text);
-      } catch (error) {
-        throw new Error('Server returned invalid JSON');
-      }
-
-      if (result.success) {
-        showNotification('Schedule deleted successfully', 'success');
-        // Refresh clients after delete
-        await fetchAllClients(false);
-      } else {
-        showNotification(result.message || 'Failed to delete schedule', 'error');
-      }
-    } catch (error) {
-      console.error('Error deleting schedule:', error);
-      showNotification('Error deleting schedule: ' + error.message, 'error');
-    }
-  };
-
-  const handleCancel = () => {
-    setEditingClient(null);
-    setFormData({
-      patrolsPerDay: 11,
-      patrolDays: 'Mon,Tue,Wed,Thu,Fri,Sat,Sun',
-      scheduleType: 'daily',
-      weekendPatrols: 11,
-      customIntervalDays: null,
-      shiftType: 'Day/Night'
-    });
-  };
-
+  // ── Export ─────────────────────────────────────────────────────────────────
   const exportToCSV = () => {
-    const headers = ['Client ID', 'Client Name', 'Patrols/Day', 'Weekend Patrols', 'Patrol Days', 'Shift Type', 'Weekly Total', 'Has Custom', 'Account Number', 'Status'];
+    const headers = [
+      'Client ID','Client Name','Patrols/Day (Weekday)','Patrols/Day (Weekend)',
+      'Patrol Days','Shift Type','Weekly Total','Configured','Account','Status',
+    ];
     const rows = filteredClients.map(c => [
-      c.ClientID,
-      c.ClientName,
-      c.PatrolsPerDay,
-      c.WeekendPatrols,
-      c.PatrolDays,
-      c.ShiftType,
-      c.WeeklyTotal,
+      c.ClientID, c.ClientName,
+      c.PatrolsPerDay   ?? 'NOT SET',
+      c.WeekendPatrols  ?? 'NOT SET',
+      c.PatrolDays      || 'NOT SET',
+      c.ShiftType ? (shiftLabel(c.ShiftType) ?? c.ShiftType) : 'NOT SET',
+      c.WeeklyTotal     ?? 'NOT SET',
       c.HasCustomSchedule ? 'Yes' : 'No',
-      c.accountNumber || '',
-      c.IsActive ? 'Active' : 'Inactive'
+      c.accountNumber   || '',
+      c.IsActive ? 'Active' : 'Inactive',
     ]);
-
-    const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
+    const csv  = [headers, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
     a.href = url;
     a.download = `patrol-schedules-${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
+    URL.revokeObjectURL(url);
   };
 
-  const getDayButtons = (selectedDays) => {
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const selected = selectedDays.split(',').map(d => d.trim());
-    
-    return days.map(day => (
-      <button
-        key={day}
-        type="button"
-        onClick={() => {
-          const newDays = selected.includes(day)
-            ? selected.filter(d => d !== day)
-            : [...selected, day];
-          setFormData({ ...formData, patrolDays: newDays.join(',') });
-        }}
-        className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-          selected.includes(day)
-            ? 'bg-blue-600 text-white'
-            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-        }`}
-      >
-        {day}
-      </button>
-    ));
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  // A client is "fully configured" only when it has both patrolsPerDay AND shiftType set
+  const stats = {
+    total:        allClients.length,
+    active:       allClients.filter(c =>  c.IsActive).length,
+    configured:   allClients.filter(c =>  c.HasCustomSchedule && c.PatrolsPerDay && c.ShiftType).length,
+    unconfigured: allClients.filter(c => !c.HasCustomSchedule || !c.PatrolsPerDay || !c.ShiftType).length,
   };
 
-  // Handle manual refresh of clients
-  const handleRefreshClients = () => {
-    console.log("🔄 Refreshing clients...");
-    setSearchTerm(""); // Clear search on refresh
-    fetchAllClients(true);
-  };
-
-  // Handle clear client search
-  const handleClearClientSearch = () => {
-    setSearchTerm("");
-    filterClients("", filterStatus, allClients);
-  };
-
-  // ✅ FIXED: Fetch clients on initial load
-  useEffect(() => {
-    fetchAllClients(true);
-  }, [fetchAllClients]);
-
+  // ── Loading screen ─────────────────────────────────────────────────────────
   if (loading && allClients.length === 0) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading patrol schedules...</p>
-          <p className="text-sm text-gray-500 mt-2">Fetching all clients from database...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto" />
+          <p className="mt-4 text-gray-600 font-medium">Loading patrol schedules…</p>
         </div>
       </div>
     );
   }
 
-  // Calculate stats for the dashboard using allClients
-  const activeClients = allClients.filter(c => c.IsActive).length;
-  const customSchedules = allClients.filter(c => c.HasCustomSchedule).length;
-  const defaultSchedules = allClients.filter(c => !c.HasCustomSchedule).length;
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-50">
+
       {/* Header */}
-      <div className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
-                <Calendar className="w-8 h-8 text-blue-600" />
-                Patrol Schedule Manager
-              </h1>
-              <p className="mt-1 text-gray-600">Manage client patrol schedules and performance</p>
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => {
-                  setViewMode(viewMode === 'list' ? 'performance' : 'list');
-                  if (viewMode === 'list') fetchPerformanceData();
-                }}
-                className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors flex items-center gap-2"
-              >
-                <TrendingUp className="w-4 h-4" />
-                {viewMode === 'list' ? 'View Performance' : 'View Schedules'}
-              </button>
-              <button
-                onClick={exportToCSV}
-                disabled={filteredClients.length === 0}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 transition-colors flex items-center gap-2"
-              >
-                <Download className="w-4 h-4" />
-                Export CSV ({filteredClients.length})
-              </button>
-            </div>
+      <div className="bg-white border-b shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <Calendar className="w-7 h-7 text-blue-600" />
+              Patrol Schedule Manager
+            </h1>
+            <p className="text-sm text-gray-500 mt-0.5">Configure required patrols per client — shift type is required</p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                const next = viewMode === 'list' ? 'performance' : 'list';
+                setViewMode(next);
+                if (next === 'performance') fetchPerformanceData();
+              }}
+              className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm flex items-center gap-2"
+            >
+              <TrendingUp className="w-4 h-4" />
+              {viewMode === 'list' ? 'Performance' : 'Schedules'}
+            </button>
+            <button
+              onClick={exportToCSV}
+              disabled={filteredClients.length === 0}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 text-sm flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              Export ({filteredClients.length})
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Notification */}
+      {/* Toast */}
       {notification && (
-        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg flex items-center gap-3 ${
+        <div className={`fixed top-4 right-4 z-50 px-5 py-3 rounded-lg shadow-lg flex items-center gap-2 text-white text-sm font-medium max-w-md ${
           notification.type === 'success' ? 'bg-green-600' : 'bg-red-600'
-        } text-white`}>
-          {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
-          {notification.message}
+        }`}>
+          {notification.type === 'success'
+            ? <CheckCircle className="w-4 h-4 shrink-0" />
+            : <XCircle    className="w-4 h-4 shrink-0" />}
+          <span>{notification.message}</span>
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+        {/* Stats */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[
+            { label: 'Total Clients',  value: stats.total,        icon: Users,         color: 'blue'   },
+            { label: 'Active',         value: stats.active,       icon: CheckCircle,   color: 'green'  },
+            { label: 'Fully Configured', value: stats.configured, icon: Calendar,      color: 'purple',
+              sub: `${stats.total > 0 ? Math.round(stats.configured / stats.total * 100) : 0}% of total` },
+            { label: 'Not Configured', value: stats.unconfigured, icon: AlertTriangle, color: 'yellow',
+              sub: 'Missing patrols/day or shift type' },
+          ].map(({ label, value, icon: Icon, color, sub }) => (
+            <div key={label} className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 flex items-center justify-between">
               <div>
-                <p className="text-sm text-gray-600">Total Clients</p>
-                <p className="text-2xl font-bold text-gray-900">{allClients.length}</p>
-                <p className="text-xs text-gray-500 mt-1">Database total</p>
+                <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">{label}</p>
+                <p className={`text-2xl font-bold mt-1 text-${color}-600`}>{value}</p>
+                {sub && <p className="text-xs text-gray-400 mt-0.5">{sub}</p>}
               </div>
-              <Users className="w-10 h-10 text-blue-600" />
+              <Icon className={`w-9 h-9 text-${color}-200`} />
             </div>
-          </div>
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Active Clients</p>
-                <p className="text-2xl font-bold text-green-600">{activeClients}</p>
-                <p className="text-xs text-gray-500 mt-1">{Math.round((activeClients / allClients.length) * 100)}% of total</p>
-              </div>
-              <CheckCircle className="w-10 h-10 text-green-600" />
-            </div>
-          </div>
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Custom Schedules</p>
-                <p className="text-2xl font-bold text-purple-600">{customSchedules}</p>
-                <p className="text-xs text-gray-500 mt-1">{Math.round((customSchedules / allClients.length) * 100)}% of total</p>
-              </div>
-              <Calendar className="w-10 h-10 text-purple-600" />
-            </div>
-          </div>
-          <div className="bg-white rounded-lg shadow p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-600">Default Schedules</p>
-                <p className="text-2xl font-bold text-gray-600">{defaultSchedules}</p>
-                <p className="text-xs text-gray-500 mt-1">{Math.round((defaultSchedules / allClients.length) * 100)}% of total</p>
-              </div>
-              <Clock className="w-10 h-10 text-gray-600" />
-            </div>
-          </div>
+          ))}
         </div>
 
-        {/* Client Refresh Section */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 mb-6 p-6">
-          <div className="flex items-center justify-between">
+        {/* Unconfigured alert */}
+        {stats.unconfigured > 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
             <div>
-              <h3 className="text-lg font-semibold text-gray-900">Clients Database</h3>
-              <p className="text-sm text-gray-600">
-                {filteredClients.length} of {allClients.length} clients shown • 
-                {allClients.length >= 2000 ? ' Full database loaded' : ' Partial database loaded'}
+              <p className="text-sm font-semibold text-amber-800">
+                {stats.unconfigured} client{stats.unconfigured !== 1 ? 's' : ''} are missing patrol configuration
+              </p>
+              <p className="text-xs text-amber-600 mt-0.5">
+                Reports for unconfigured clients will fail immediately. Both <strong>Patrols/Day</strong> and <strong>Shift Type</strong> are required.
               </p>
             </div>
-            <div className="flex items-center gap-3">
-              <div className="text-sm">
-                <span className="text-gray-500">Showing: </span>
-                <span className="font-medium">{filteredClients.length} clients</span>
-              </div>
-              <button
-                onClick={handleRefreshClients}
-                disabled={isRefreshingClients}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-blue-400 flex items-center gap-2 transition-colors"
-              >
-                <RefreshCw size={16} className={isRefreshingClients ? 'animate-spin' : ''} />
-                {isRefreshingClients ? 'Refreshing...' : 'Refresh Clients'}
-              </button>
-            </div>
+            <button
+              onClick={() => setFilterStatus('unconfigured')}
+              className="ml-auto text-xs text-amber-700 underline hover:text-amber-900 whitespace-nowrap"
+            >
+              Show unconfigured
+            </button>
           </div>
-        </div>
+        )}
 
-        {/* Filters */}
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="Search by name, ID, or account number..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <p className="mt-1 text-xs text-gray-500">
-                {searchTerm && searchTerm.trim().length >= 1 
-                  ? `Showing ${filteredClients.length} of ${allClients.length} clients matching "${searchTerm}"`
-                  : `Showing all ${allClients.length} clients`}
-              </p>
+        {/* Toolbar */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text" placeholder="Search by name, ID or account…"
+                value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none"
+              />
+              {searchTerm && (
+                <button onClick={() => setSearchTerm('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
-            <div className="flex gap-2">
-              <Filter className="w-5 h-5 text-gray-400 self-center" />
-              <select
-                value={filterStatus}
-                onChange={(e) => setFilterStatus(e.target.value)}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              >
-                <option value="all">All Clients ({allClients.length})</option>
-                <option value="active">Active Only ({activeClients})</option>
-                <option value="inactive">Inactive Only ({allClients.length - activeClients})</option>
-                <option value="custom">Custom Schedules ({customSchedules})</option>
-                <option value="default">Default Schedules ({defaultSchedules})</option>
+
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-gray-400 shrink-0" />
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-400 focus:outline-none">
+                <option value="all">All ({allClients.length})</option>
+                <option value="active">Active ({stats.active})</option>
+                <option value="inactive">Inactive ({allClients.length - stats.active})</option>
+                <option value="configured">Configured ({stats.configured})</option>
+                <option value="unconfigured">Not Configured ({stats.unconfigured})</option>
               </select>
-              <button
-                onClick={handleClearClientSearch}
-                disabled={!searchTerm}
-                className="flex items-center gap-2 bg-gray-200 text-gray-700 rounded-lg px-4 py-2 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 transition-all shrink-0"
-              >
-                <X className="w-4 h-4" />
-                Clear
-              </button>
             </div>
+
+            <button
+              onClick={() => { setSearchTerm(''); fetchAllClients(true); }}
+              disabled={isRefreshing}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60 text-sm flex items-center gap-2"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
           </div>
-          <div className="mt-4 text-sm text-gray-600 flex justify-between items-center">
-            <span>
-              Showing {filteredClients.length} of {allClients.length} clients
-              {filterStatus !== 'all' && ` • Filtered by: ${filterStatus}`}
-            </span>
+
+          <p className="text-xs text-gray-400">
+            Showing <span className="font-semibold text-gray-600">{filteredClients.length}</span> of {allClients.length} clients
             {(searchTerm || filterStatus !== 'all') && (
-              <button
-                onClick={() => {
-                  setSearchTerm('');
-                  setFilterStatus('all');
-                  filterClients('', 'all', allClients);
-                }}
-                className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-              >
-                Clear all filters
+              <button onClick={() => { setSearchTerm(''); setFilterStatus('all'); }}
+                className="ml-2 text-blue-500 hover:underline">
+                Clear filters
               </button>
             )}
-          </div>
+          </p>
         </div>
 
-        {/* Main Content */}
+        {/* Main content */}
         {viewMode === 'list' ? (
-          /* Schedules List */
-          <div className="bg-white rounded-lg shadow overflow-hidden">
+
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {filteredClients.length === 0 ? (
-              <div className="text-center py-12">
-                <Calendar className="mx-auto mb-4 text-gray-400" size={48} />
-                <p className="text-gray-600 mb-4">
-                  {allClients.length === 0 
-                    ? "No clients found. Check your backend connection." 
-                    : "No clients match your search criteria"}
+              <div className="py-20 text-center">
+                <Calendar className="mx-auto w-12 h-12 text-gray-300 mb-3" />
+                <p className="text-gray-500 text-sm">
+                  {allClients.length === 0
+                    ? 'No clients loaded — check backend connection or authentication.'
+                    : 'No clients match your filters.'}
                 </p>
-                <button
-                  onClick={handleClearClientSearch}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                >
-                  Clear Search
+                <button onClick={() => { setSearchTerm(''); setFilterStatus('all'); }}
+                  className="mt-3 text-sm text-blue-600 hover:underline">
+                  Clear filters
                 </button>
               </div>
             ) : (
               <>
-                <div className="px-6 py-4 bg-gray-50 border-b flex justify-between items-center">
-                  <div>
-                    <span className="text-sm font-medium text-gray-700">
-                      {filteredClients.length} client{filteredClients.length !== 1 ? 's' : ''}
-                    </span>
-                    {allClients.length > 0 && (
-                      <span className="text-sm text-gray-500 ml-2">
-                        ({Math.round((filteredClients.length / allClients.length) * 100)}% of total)
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-sm text-gray-500">
-                    Scroll horizontally to see all columns →
-                  </div>
+                <div className="px-6 py-3 bg-gray-50 border-b flex items-center justify-between">
+                  <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                    {filteredClients.length} client{filteredClients.length !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-xs text-gray-400">Scroll right for all columns →</span>
                 </div>
-                <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
+
+                <div className="overflow-x-auto max-h-[65vh] overflow-y-auto">
+                  <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 sticky top-0 z-10">
                       <tr>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Patrols/Day</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Weekend</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Days</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shift</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Weekly Total</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Account</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        {['Client','Patrols / Weekday','Patrols / Weekend','Active Days','Shift Type','Weekly Total','Account','Status','Actions'].map(h => (
+                          <th key={h} className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider whitespace-nowrap">
+                            {h}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                      {filteredClients.map((client) => (
-                        <tr key={client.ClientID} className={editingClient === client.ClientID ? 'bg-blue-50' : 'hover:bg-gray-50'}>
-                          <td className="px-6 py-4">
-                            <div className="flex items-center">
-                              <div>
-                                <div className="text-sm font-medium text-gray-900">{client.ClientName}</div>
-                                <div className="text-sm text-gray-500">ID: {client.ClientID}</div>
-                                {client.HasCustomSchedule && (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 mt-1">
-                                    Custom
-                                  </span>
-                                )}
+
+                    <tbody className="divide-y divide-gray-100">
+                      {filteredClients.map(client => {
+                        const isEditing        = editingClient === client.ClientID;
+                        const missingPatrols   = !client.PatrolsPerDay;
+                        const missingShiftType = !client.ShiftType;
+                        const isUnconfigured   = !client.HasCustomSchedule || missingPatrols || missingShiftType;
+
+                        return (
+                          <tr key={client.ClientID}
+                            className={isEditing ? 'bg-blue-50' : isUnconfigured ? 'bg-amber-50/40' : 'hover:bg-gray-50'}>
+
+                            {/* Client name */}
+                            <td className="px-5 py-3 whitespace-nowrap">
+                              <div className="font-medium text-gray-900">{client.ClientName}</div>
+                              <div className="text-gray-400 text-xs">ID: {client.ClientID}</div>
+                              <div className="flex gap-1 mt-1 flex-wrap">
+                                {client.HasCustomSchedule && <Badge color="purple">Custom</Badge>}
+                                {missingPatrols   && <Badge color="yellow">⚠ No patrol count</Badge>}
+                                {missingShiftType && <Badge color="orange">⚠ No shift type</Badge>}
                               </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            {editingClient === client.ClientID ? (
-                              <input
-                                type="number"
-                                min="1"
-                                max="24"
-                                value={formData.patrolsPerDay}
-                                onChange={(e) => setFormData({ ...formData, patrolsPerDay: parseInt(e.target.value) })}
-                                className="w-20 px-2 py-1 border border-gray-300 rounded"
-                              />
-                            ) : (
-                              <span className="text-sm text-gray-900">{client.PatrolsPerDay}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4">
-                            {editingClient === client.ClientID ? (
-                              <input
-                                type="number"
-                                min="1"
-                                max="24"
-                                value={formData.weekendPatrols}
-                                onChange={(e) => setFormData({ ...formData, weekendPatrols: parseInt(e.target.value) })}
-                                className="w-20 px-2 py-1 border border-gray-300 rounded"
-                              />
-                            ) : (
-                              <span className="text-sm text-gray-900">{client.WeekendPatrols}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4">
-                            {editingClient === client.ClientID ? (
-                              <div className="flex gap-1 flex-wrap max-w-xs">
-                                {getDayButtons(formData.patrolDays)}
-                              </div>
-                            ) : (
-                              <span className="text-sm text-gray-900">{client.PatrolDays}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4">
-                            {editingClient === client.ClientID ? (
-                              <select
-                                value={formData.shiftType}
-                                onChange={(e) => setFormData({ ...formData, shiftType: e.target.value })}
-                                className="px-2 py-1 border border-gray-300 rounded text-sm"
-                              >
-                                <option>Day/Night</option>
-                                <option>Day Only</option>
-                                <option>Night Only</option>
-                                <option>24/7</option>
-                              </select>
-                            ) : (
-                              <span className="text-sm text-gray-900">{client.ShiftType}</span>
-                            )}
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className="text-sm font-medium text-gray-900">{client.WeeklyTotal}</span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className="text-sm text-gray-600">{client.accountNumber || 'N/A'}</span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                              client.IsActive ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                            }`}>
-                              {client.IsActive ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-sm">
-                            {editingClient === client.ClientID ? (
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => handleSave(client.ClientID)}
-                                  className="text-green-600 hover:text-green-900"
-                                  title="Save"
-                                >
-                                  <Save className="w-5 h-5" />
-                                </button>
-                                <button
-                                  onClick={handleCancel}
-                                  className="text-gray-600 hover:text-gray-900"
-                                  title="Cancel"
-                                >
-                                  <X className="w-5 h-5" />
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => handleEdit(client)}
-                                  className="text-blue-600 hover:text-blue-900"
-                                  title="Edit"
-                                >
-                                  <Edit2 className="w-5 h-5" />
-                                </button>
-                                {client.HasCustomSchedule && (
-                                  <button
-                                    onClick={() => handleDelete(client.ClientID, client.ClientName)}
-                                    className="text-red-600 hover:text-red-900"
-                                    title="Delete Custom Schedule"
+                            </td>
+
+                            {/* Weekday patrols */}
+                            <td className="px-5 py-3">
+                              {isEditing ? (
+                                <NumInput
+                                  value={formData.patrolsPerDay}
+                                  onChange={v => { setFormData(f => ({ ...f, patrolsPerDay: v })); setFormErrors(e => ({ ...e, patrolsPerDay: '' })); }}
+                                  error={formErrors.patrolsPerDay} placeholder="e.g. 4"
+                                />
+                              ) : (
+                                <span className={client.PatrolsPerDay ? 'font-semibold text-gray-800' : 'text-amber-500 font-medium'}>
+                                  {client.PatrolsPerDay ?? '— not set'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Weekend patrols */}
+                            <td className="px-5 py-3">
+                              {isEditing ? (
+                                <NumInput
+                                  value={formData.weekendPatrols}
+                                  onChange={v => { setFormData(f => ({ ...f, weekendPatrols: v })); setFormErrors(e => ({ ...e, weekendPatrols: '' })); }}
+                                  error={formErrors.weekendPatrols} placeholder="e.g. 3"
+                                />
+                              ) : (
+                                <span className={client.WeekendPatrols ? 'font-semibold text-gray-800' : 'text-amber-500 font-medium'}>
+                                  {client.WeekendPatrols ?? '— not set'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Active days */}
+                            <td className="px-5 py-3">
+                              {isEditing ? (
+                                <DayPicker
+                                  value={formData.patrolDays}
+                                  onChange={v => { setFormData(f => ({ ...f, patrolDays: v })); setFormErrors(e => ({ ...e, patrolDays: '' })); }}
+                                  error={formErrors.patrolDays}
+                                />
+                              ) : (
+                                <span className={client.PatrolDays ? 'text-gray-700' : 'text-amber-500'}>
+                                  {client.PatrolDays || '— not set'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Shift type */}
+                            <td className="px-5 py-3">
+                              {isEditing ? (
+                                <div>
+                                  <select
+                                    value={formData.shiftType}
+                                    onChange={e => { setFormData(f => ({ ...f, shiftType: e.target.value })); setFormErrors(er => ({ ...er, shiftType: '' })); }}
+                                    className={`px-2 py-1 border rounded text-sm ${
+                                      formErrors.shiftType ? 'border-red-400 bg-red-50' : 'border-gray-300'
+                                    } focus:outline-none focus:ring-2 focus:ring-blue-400`}
                                   >
-                                    <Trash2 className="w-5 h-5" />
+                                    {/* ✅ Placeholder forces an explicit choice — no value defaults */}
+                                    <option value="">— select shift type —</option>
+                                    {SHIFT_OPTIONS.map(({ value, label }) => (
+                                      <option key={value} value={value}>{label}</option>
+                                    ))}
+                                  </select>
+                                  {formErrors.shiftType && (
+                                    <p className="text-red-500 text-xs mt-0.5">{formErrors.shiftType}</p>
+                                  )}
+                                </div>
+                              ) : (
+                                // ✅ null ShiftType shown as a warning badge, not silently hidden
+                                client.ShiftType ? (
+                                  <span className="text-gray-700">{shiftLabel(client.ShiftType)}</span>
+                                ) : (
+                                  <Badge color="orange">⚠ Not set</Badge>
+                                )
+                              )}
+                            </td>
+
+                            {/* Weekly total */}
+                            <td className="px-5 py-3 text-center">
+                              {isEditing ? (
+                                <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-bold">
+                                  {computeWeeklyTotal(formData) || '—'}
+                                </span>
+                              ) : (
+                                <span className={client.WeeklyTotal ? 'font-bold text-gray-800' : 'text-amber-500'}>
+                                  {client.WeeklyTotal ?? '—'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Account */}
+                            <td className="px-5 py-3 text-gray-500 text-xs">{client.accountNumber || '—'}</td>
+
+                            {/* Status */}
+                            <td className="px-5 py-3">
+                              <Badge color={client.IsActive ? 'green' : 'red'}>
+                                {client.IsActive ? 'Active' : 'Inactive'}
+                              </Badge>
+                            </td>
+
+                            {/* Actions */}
+                            <td className="px-5 py-3">
+                              {isEditing ? (
+                                <div className="flex gap-2">
+                                  <button onClick={() => handleSave(client.ClientID)} className="text-green-600 hover:text-green-800" title="Save">
+                                    <Save className="w-5 h-5" />
                                   </button>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                                  <button onClick={handleCancel} className="text-gray-500 hover:text-gray-700" title="Cancel">
+                                    <X className="w-5 h-5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <button onClick={() => handleEdit(client)} className="text-blue-600 hover:text-blue-800" title="Configure">
+                                    <Edit2 className="w-5 h-5" />
+                                  </button>
+                                  {client.HasCustomSchedule && (
+                                    <button onClick={() => handleDelete(client.ClientID, client.ClientName)}
+                                      className="text-red-500 hover:text-red-700" title="Remove schedule">
+                                      <Trash2 className="w-5 h-5" />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               </>
             )}
           </div>
+
         ) : (
-          /* Performance View */
-          <div className="space-y-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold text-gray-900">Client Performance Metrics</h2>
-              <div className="flex gap-3">
+          /* Performance view */
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-gray-900">Client Performance</h2>
+              <div className="flex gap-2">
                 <select
                   value={performanceDays}
-                  onChange={(e) => {
-                    setPerformanceDays(parseInt(e.target.value));
-                    fetchPerformanceData(parseInt(e.target.value));
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-lg"
-                >
-                  <option value="7">Last 7 Days</option>
-                  <option value="30">Last 30 Days</option>
-                  <option value="90">Last 90 Days</option>
+                  onChange={e => { const d = parseInt(e.target.value); setPerformanceDays(d); fetchPerformanceData(d); }}
+                  className="border border-gray-200 rounded-lg px-3 py-2 text-sm">
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="90">Last 90 days</option>
                 </select>
-                <button
-                  onClick={() => fetchPerformanceData()}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                >
+                <button onClick={() => fetchPerformanceData()}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
                   Refresh
                 </button>
               </div>
             </div>
-            
+
             {performanceData ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {performanceData.clients?.map((client) => (
-                  <div key={client.ClientID} className="bg-white rounded-lg shadow p-6">
-                    <div className="flex justify-between items-start mb-4">
-                      <div>
-                        <h3 className="font-bold text-lg text-gray-900">{client.ClientName}</h3>
-                        <p className="text-sm text-gray-500">ID: {client.ClientID}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {performanceData.clients?.map(client => {
+                  const p = client.performance || {};
+                  const colorMap = { Excellent: 'green', Good: 'blue', Fair: 'yellow' };
+                  return (
+                    <div key={client.ClientID} className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+                      <div className="flex justify-between items-start mb-4">
+                        <div>
+                          <h3 className="font-semibold text-gray-900">{client.ClientName}</h3>
+                          <p className="text-xs text-gray-400">ID: {client.ClientID}</p>
+                        </div>
+                        <Badge color={colorMap[p.performance] || 'red'}>{p.performance || 'N/A'}</Badge>
                       </div>
-                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                        client.performance?.performance === 'Excellent' ? 'bg-green-100 text-green-800' :
-                        client.performance?.performance === 'Good' ? 'bg-blue-100 text-blue-800' :
-                        client.performance?.performance === 'Fair' ? 'bg-yellow-100 text-yellow-800' :
-                        'bg-red-100 text-red-800'
-                      }`}>
-                        {client.performance?.performance || 'N/A'}
-                      </span>
+                      <div className="space-y-2 text-sm">
+                        {[
+                          ['Compliance', p.complianceRate],
+                          ['Expected',   p.expectedPatrols],
+                          ['Actual',     p.actualPatrols],
+                          ['Daily avg',  p.dailyAverage],
+                          ['Zones',      p.zonesCovered],
+                        ].map(([label, val]) => (
+                          <div key={label} className="flex justify-between">
+                            <span className="text-gray-500">{label}</span>
+                            <span className="font-medium text-gray-800">{val ?? '—'}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {client.ScheduleInfo && (
+                        <p className="text-xs text-gray-400 mt-3 pt-3 border-t">{client.ScheduleInfo}</p>
+                      )}
                     </div>
-                    
-                    <div className="space-y-3">
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Compliance Rate:</span>
-                        <span className="text-sm font-bold text-gray-900">{client.performance?.complianceRate || 'N/A'}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Expected Patrols:</span>
-                        <span className="text-sm font-medium text-gray-900">{client.performance?.expectedPatrols || 'N/A'}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Actual Patrols:</span>
-                        <span className="text-sm font-medium text-gray-900">{client.performance?.actualPatrols || 'N/A'}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Daily Average:</span>
-                        <span className="text-sm font-medium text-gray-900">{client.performance?.dailyAverage || 'N/A'}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-sm text-gray-600">Zones Covered:</span>
-                        <span className="text-sm font-medium text-gray-900">{client.performance?.zonesCovered || 'N/A'}</span>
-                      </div>
-                    </div>
-                    
-                    <div className="mt-4 pt-4 border-t">
-                      <p className="text-xs text-gray-500">Schedule: {client.ScheduleInfo || 'Default schedule'}</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : (
-              <div className="text-center py-12">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-                <p className="mt-4 text-gray-600">Loading performance data...</p>
+              <div className="flex items-center justify-center py-20">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto" />
+                  <p className="text-gray-500 text-sm mt-3">Loading performance data…</p>
+                </div>
               </div>
             )}
           </div>
