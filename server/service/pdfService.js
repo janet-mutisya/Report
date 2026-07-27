@@ -1,1114 +1,1141 @@
-// server/service/pdfService.js - FIXED INCIDENT REPORTS VERSION WITH ZONE NAMES
+"use strict";
+
+// server/service/pdfService.js
+// Security Patrol Report PDF Generator
+// v18 — FIX 22: shiftType argument-shape bug fixed (see below)
+//
+// CHANGES vs v17:
+//   ✅ FIX 22 (shift mixup, still present after v17): generateDashboardPDF()
+//      was calling fetchPatrolReport(..., { shiftType, sqlStartDate,
+//      sqlEndDate }) — passing an OBJECT as the 6th argument. But
+//      reportModel.js's fetchPatrolReport expects the 6th argument to be a
+//      plain STRING ('day' | 'night' | 'both' | null), and immediately runs
+//      normaliseShiftType(requestedShiftType) on it, which does
+//      String(raw).toLowerCase().trim(). String({shiftType:'day', ...})
+//      produces the literal text "[object object]", which matches none of
+//      the day/night/both patterns — so normaliseShiftType always returned
+//      null, and ANY explicit shift request made through pdfService was
+//      silently discarded before reportModel ever saw it. Whatever shift a
+//      report ended up scoped to was therefore always whatever
+//      reportModel's own fallback resolved to (the client's configured
+//      shift, or full day if the client has no shift configured) —
+//      never the shift that was actually explicitly requested by this
+//      call. This is exactly the risk flagged in v17's own FIX 20 comment
+//      ("this fix is only half-complete... if it currently only accepts
+//      (clientId, startDate, endDate, useCache, reportType) it will
+//      ignore the extra arguments") — the object shape was never caught
+//      because it happened to coincidentally still produce correct output
+//      whenever the caller's explicit request matched the client's
+//      already-configured shift.
+//
+//      FIX: pass normalizedShift directly as the 6th positional argument
+//      (a plain string), matching reportModel.js's actual signature. The
+//      sqlStartDate/sqlEndDate precomputed bounds are dropped from this
+//      call entirely — reportModel.js's fetchPatrolReport builds its own
+//      shift-scoped query window internally from requestedShiftType (see
+//      validateAndFormatDates in reportModel.js), so those precomputed
+//      values were never consumed downstream anyway; keeping them in the
+//      call signature was dead weight that obscured the real bug.
+//
+//   All v17 fixes preserved (date-range shift-awareness intent, blank-page
+//   layout fixes) — this release only corrects how the shift is *handed
+//   off* to reportModel, not the shift-hour boundaries themselves.
+
 const PDFDocument = require("pdfkit");
-const dayjs = require("dayjs");
-const fs = require('fs');
-const path = require('path');
-const { fileURLToPath } = require('url');
+const dayjs       = require("dayjs");
+const fs          = require("fs");
+const path        = require("path");
 
-// Import the report model - ALL DATA COMES FROM HERE
-const { fetchPatrolReport } = require('../models/reportModel');
+const { fetchPatrolReport } = require("../models/reportModel");
 
-dayjs.extend(require('dayjs/plugin/utc'));
-dayjs.extend(require('dayjs/plugin/timezone'));
+dayjs.extend(require("dayjs/plugin/utc"));
+dayjs.extend(require("dayjs/plugin/timezone"));
 
-const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
+const TZ = process.env.TIMEZONE || "Africa/Nairobi";
 
-// COLOR SCHEME - Blue, White, Black
-const COLORS = {
-  primary: '#1e40af',
-  primaryDark: '#1e3a8a',
-  white: '#ffffff',
-  black: '#000000',
-  gray: {
-    100: '#f3f4f6',
-    200: '#e5e7eb',
-    300: '#d1d5db',
-    600: '#4b5563',
-    800: '#1f2937'
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// DESIGN TOKENS
+// ─────────────────────────────────────────────────────────────────────────────
+const C = {
+  primary:     "#1e40af",
+  primaryDark: "#1e3a8a",
+  accent:      "#3b82f6",
+  success:     "#16a34a",
+  warning:     "#d97706",
+  danger:      "#dc2626",
+  white:       "#ffffff",
+  black:       "#000000",
+  gray100:     "#f3f4f6",
+  gray200:     "#e5e7eb",
+  gray300:     "#d1d5db",
+  gray400:     "#9ca3af",
+  gray600:     "#4b5563",
+  gray800:     "#1f2937",
 };
 
-// Logger utility
-const logger = {
-  info: (...args) => console.log('[PDF]', ...args),
-  warn: (...args) => console.warn('[PDF WARN]', ...args),
-  error: (...args) => console.error('[PDF ERROR]', ...args),
-  debug: (...args) => process.env.NODE_ENV === 'development' && console.log('[PDF DEBUG]', ...args)
+// ─────────────────────────────────────────────────────────────────────────────
+// SHIFT TYPE SUPPORT
+//
+// Mirrors schedulerController.js's normaliseShiftType() so pdfService can
+// be called directly (e.g. from a test script) without depending on the
+// controller. 'day' | 'night' | 'both' — 'both' is the legacy default.
+// ─────────────────────────────────────────────────────────────────────────────
+const VALID_SHIFT_TYPES = ["day", "night", "both"];
+
+function normaliseShiftType(input) {
+  if (!input || typeof input !== "string") return "both";
+  const v = input.trim().toLowerCase();
+  if (v === "day" || v === "daytime" || v === "day shift") return "day";
+  if (v === "night" || v === "nighttime" || v === "night shift") return "night";
+  if (v === "both" || v === "day/night" || v === "all" || v === "24hr" || v === "") return "both";
+  return VALID_SHIFT_TYPES.includes(v) ? v : "both";
+}
+
+const SHIFT_LABELS = { day: "Day Shift", night: "Night Shift", both: "" };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOGGER
+// ─────────────────────────────────────────────────────────────────────────────
+const log = {
+  info:  (...a) => console.log("[PDF]",         ...a),
+  warn:  (...a) => console.warn("[PDF WARN]",   ...a),
+  error: (...a) => console.error("[PDF ERROR]", ...a),
+  debug: (...a) => process.env.NODE_ENV === "development" && console.log("[PDF DBG]", ...a),
 };
 
-/**
- * Load logo from file system
- */
-function loadLogoFromFile() {
-  try {
-    const possiblePaths = [
-      path.join(process.cwd(), 'assets', 'BM SECURITY LOGO.jpg'),
-      path.join(process.cwd(), 'server', 'assets', 'BM SECURITY LOGO.jpg'),
-      path.join(__dirname, '..', 'assets', 'BM SECURITY LOGO.jpg'),
-      path.join(__dirname, '..', '..', 'assets', 'BM SECURITY LOGO.jpg'),
-      path.join(__dirname, '..', '..', '..', 'assets', 'BM SECURITY LOGO.jpg')
-    ];
+// ─────────────────────────────────────────────────────────────────────────────
+// CHART LAYOUT CONSTANTS
+// ─────────────────────────────────────────────────────────────────────────────
+const CHART = {
+  TITLE_H:   28,
+  PAD_L:     32,
+  PAD_R:     12,
+  PAD_TOP:   14,
+  PAD_BOT:   56,
+  BAR_GAP:    4,
+  MIN_BAR_W:  6,
+  MAX_BAR_W: 30,
+  BAR_H:    160,
+};
 
-    for (const logoPath of possiblePaths) {
-      if (fs.existsSync(logoPath)) {
-        logger.info(`✅ Logo found at: ${logoPath}`);
-        return {
-          buffer: fs.readFileSync(logoPath),
-          path: logoPath
-        };
-      }
-    }
-    
-    logger.warn(`⚠️ Logo not found in any of the expected locations`);
-    return null;
-  } catch (error) {
-    logger.error('Logo load error:', error.message);
-    return null;
+function zonesPerRow(drawWidth) {
+  const usable = drawWidth - CHART.PAD_L - CHART.PAD_R;
+  const colW   = CHART.MIN_BAR_W + CHART.BAR_GAP;
+  return Math.max(1, Math.floor(usable / colW));
+}
+
+function computeRowCardHeight() {
+  return CHART.TITLE_H + CHART.PAD_TOP + CHART.BAR_H + CHART.PAD_BOT;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTINUATION HEADER  (drawn by pageAdded event — never on page 1)
+// ─────────────────────────────────────────────────────────────────────────────
+const CONTINUATION_HEADER_H = 36;
+
+function drawContinuationHeader(doc, logo, clientName, startFmt, endFmt, left, contentW, shiftLabel) {
+  const y = 12;
+  doc.fillColor(C.primary).rect(left, y, contentW, CONTINUATION_HEADER_H).fill();
+
+  const LOGO_W = 28, LOGO_H = 28;
+  if (logo) {
+    try {
+      doc.image(logo, left + 4, y + 4, { width: LOGO_W, height: LOGO_H, fit: [LOGO_W, LOGO_H] });
+    } catch (_) { /* skip */ }
   }
+
+  const textX = left + (logo ? LOGO_W + 10 : 6);
+  doc.fillColor(C.white).fontSize(9).font("Helvetica-Bold")
+     .text("BM SECURITY  -  SECURITY PATROL REPORT", textX, y + 6, { lineBreak: false });
+  const shiftSuffix = shiftLabel ? "   |   " + shiftLabel : "";
+  doc.fillColor(C.gray200).fontSize(7.5).font("Helvetica")
+     .text(
+       clientName.toUpperCase() + "   |   Period: " + startFmt + " – " + endFmt + shiftSuffix + "   (continued)",
+       textX, y + 20, { lineBreak: false },
+     );
 }
 
-/**
- * Text wrapping utility
- */
-function wrapText(doc, text, maxWidth, fontSize = 8) {
-  if (!text) return [''];
-  
-  doc.fontSize(fontSize);
-  const words = String(text).split(' ');
-  const lines = [];
-  let currentLine = '';
-  
-  for (const word of words) {
-    const testLine = currentLine ? currentLine + ' ' + word : word;
-    if (doc.widthOfString(testLine) <= maxWidth) {
-      currentLine = testLine;
-    } else {
-      if (currentLine) lines.push(currentLine);
-      currentLine = word;
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYOUT ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+class Layout {
+  constructor(doc, { left = 40, firstPageTop = 40, contPageTop = 40, bottom = 50 } = {}) {
+    this.doc         = doc;
+    this.left        = left;
+    this.bottom      = bottom;
+    this.pageH       = 841.89;
+    this.pageW       = 595.28;
+    this.contentW    = this.pageW - left * 2;
+    this.maxY        = this.pageH - 60;
+    this.y           = firstPageTop;
+    this.contPageTop = contPageTop;
   }
-  
-  if (currentLine) lines.push(currentLine);
-  return lines.length ? lines : [''];
-}
 
-/**
- * Clean post name by removing leading numbers
- */
-function cleanPostName(postName) {
-  if (!postName) return postName;
-  return postName.replace(/^\d+\.\s*/, '').trim();
-}
-
-/**
- * Format date for display
- */
-function formatDate(dateString) {
-  try {
-    const date = dayjs.tz(dateString, TZ);
-    if (date.isValid()) {
-      return date.format('DD/MM/YYYY');
+  ensure(needed) {
+    if (needed <= 0.5) return false;
+    if (this.y > this.maxY || this.y + needed > this.maxY) {
+      this.doc.addPage();
+      this.y = Math.ceil(this.contPageTop);
+      return true;
     }
-    return dateString;
-  } catch (error) {
-    return dateString;
+    return false;
   }
-}
 
-/**
- * Calculate actual days between dates
- */
-function calculateActualDays(startDate, endDate) {
-  try {
-    const start = dayjs(startDate);
-    const end = dayjs(endDate);
-    
-    if (!start.isValid() || !end.isValid()) {
-      return 0;
-    }
-    
-    // Add 1 day because it's inclusive
-    const days = end.diff(start, 'day') + 1;
-    
-    logger.info(`📅 Day calculation: ${start.format('DD/MM/YYYY')} to ${end.format('DD/MM/YYYY')} = ${days} days`);
-    return days;
-  } catch (error) {
-    logger.error('Error calculating days:', error.message);
-    return 0;
+  gap(n = 8) { this.y = Math.ceil(this.y + n); }
+
+  sectionTitle(text) {
+    this.ensure(48);
+    this.doc
+      .fillColor(C.primary).fontSize(13).font("Helvetica-Bold")
+      .text(text, this.left, this.y, { lineBreak: false });
+    this.doc
+      .strokeColor(C.gray300).lineWidth(0.5)
+      .moveTo(this.left,                 this.y + 17)
+      .lineTo(this.left + this.contentW, this.y + 17)
+      .stroke();
+    this.y = Math.ceil(this.y + 26);
   }
-}
 
-/**
- * Extract clean incident description from raw text
- * Removes timestamps, tags, and formatting artifacts
- */
-function extractIncidentDescription(rawText) {
-  if (!rawText) return '';
-  
-  let cleaned = rawText.trim();
-  
-  // Remove timestamp patterns like [08/01/2026 17:17:50] or [08/01/2026 17:17]
-  cleaned = cleaned.replace(/\[\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(:\d{2})?\]/g, '');
-  
-  // Remove [VigiControl] and similar tags
-  cleaned = cleaned.replace(/\[vigicontrol\]/gi, '');
-  cleaned = cleaned.replace(/\[irservices\]/gi, '');
-  
-  // Remove any remaining square bracket content at the start
-  cleaned = cleaned.replace(/^\s*\[.*?\]\s*/g, '');
-  
-  // Clean up multiple spaces and newlines
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-  
-  return cleaned;
-}
-
-/**
- * Get zone name with comprehensive fallback strategy
- */
-function getZoneName(incidentData) {
-  // Priority 1: Check specific zone fields
-  if (incidentData.zone) return cleanPostName(incidentData.zone);
-  if (incidentData.zoneName) return cleanPostName(incidentData.zoneName);
-  if (incidentData.zone_name) return cleanPostName(incidentData.zone_name);
-  if (incidentData.Zone) return cleanPostName(incidentData.Zone);
-  
-  // Priority 2: Check post fields
-  if (incidentData.post) return cleanPostName(incidentData.post);
-  if (incidentData.postName) return cleanPostName(incidentData.postName);
-  if (incidentData.post_name) return cleanPostName(incidentData.post_name);
-  if (incidentData.SecurityPost) return cleanPostName(incidentData.SecurityPost);
-  
-  // Priority 3: Check rec_czona fields
-  if (incidentData.rec_czona) return `Zone ${incidentData.rec_czona}`;
-  if (incidentData.rec_czonanombre) return cleanPostName(incidentData.rec_czonanombre);
-  
-  // Priority 4: Try to extract from description
-  if (incidentData.description || incidentData.report) {
-    const text = (incidentData.description || incidentData.report || '').toLowerCase();
-    const zoneMatch = text.match(/zone\s+(\w+)/i) || 
-                     text.match(/post\s+(\w+)/i) ||
-                     text.match(/at\s+(.+?)\s+post/i) ||
-                     text.match(/in\s+(.+?)\s+area/i);
-    if (zoneMatch && zoneMatch[1]) {
-      return cleanPostName(zoneMatch[1].toUpperCase());
-    }
+  tableHeader(cols, rowH = 22) {
+    this.ensure(rowH + 4);
+    this.doc.fillColor(C.primary).rect(this.left, this.y, this.contentW, rowH).fill();
+    this.doc.fillColor(C.white).fontSize(8).font("Helvetica-Bold");
+    cols.forEach(({ label, cx, w }) =>
+      this.doc.text(label, cx, this.y + (rowH - 8) / 2, { width: w, lineBreak: false })
+    );
+    this.y = Math.ceil(this.y + rowH);
   }
-  
-  // Priority 5: Try location field
-  if (incidentData.location) return cleanPostName(incidentData.location);
-  
-  // Fallback
-  return 'Unknown Location';
-}
 
-/**
- * Process guard reports - Extract FULL incident details with zone names
- */
-function processGuardReports(reportData) {
-  const incidents = [];
-  
-  logger.info('🔍 Processing guard reports for incidents...');
-  
-  // Method 1: Check guardReports array (primary source)
-  if (Array.isArray(reportData.guardReports) && reportData.guardReports.length > 0) {
-    logger.info(`   Found ${reportData.guardReports.length} guard reports to process`);
-    
-    reportData.guardReports.forEach((report, index) => {
-      logger.debug(`   Report ${index + 1}:`, {
-        type: report.type || report.__type,
-        hasZone: !!report.zone,
-        hasPost: !!report.post,
-        hasZoneName: !!report.zoneName,
-        hasReport: !!report.report,
-        hasIncidentName: !!report.incidentName,
-        hasTitle: !!report.title
-      });
-      
-      if (report.type === 'INCIDENT_REPORT' || report.__type === 'INCIDENT_REPORT') {
-        const rawDescription = report.report || report.description || report.content || '';
-        const cleanDescription = extractIncidentDescription(rawDescription);
-        
-        // Parse date/time
-        let incidentDate = 'N/A';
-        let incidentTime = 'N/A';
-        if (report.date) {
-          const dateObj = dayjs(report.date);
-          if (dateObj.isValid()) {
-            incidentDate = dateObj.format('DD/MM/YYYY');
-            incidentTime = dateObj.format('HH:mm:ss');
-          }
-        }
-        
-        // Get zone name with fallback
-        const zoneName = getZoneName(report);
-        
-        incidents.push({
-          id: report.id || report.rec_iid || `inc-${incidents.length + 1}`,
-          date: incidentDate,
-          time: incidentTime,
-          dateTime: report.date || 'N/A',
-          zone: zoneName,
-          description: cleanDescription,
-          priority: report.priority || 'MEDIUM',
-          reportedBy: report.guardName || report.officer || report.reportedBy || 'Guard',
-          rawText: rawDescription,
-          source: 'guardReport'
-        });
-        
-        logger.info(`   ✅ Added incident from guard report:`);
-        logger.info(`      Zone: ${zoneName}`);
-        logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
-      }
+  tableRow(cols, rowH = 18, even = false) {
+    this.ensure(rowH + 2);
+    if (even) this.doc.fillColor(C.gray100).rect(this.left, this.y, this.contentW, rowH).fill();
+    this.doc.fillColor(C.black).fontSize(8).font("Helvetica");
+    cols.forEach(({ text, cx, w, bold, color }) => {
+      if (bold)  this.doc.font("Helvetica-Bold");
+      if (color) this.doc.fillColor(color);
+      this.doc.text(String(text ?? ""), cx, this.y + 5, { width: w, lineBreak: false });
+      if (color) this.doc.fillColor(C.black);
+      if (bold)  this.doc.font("Helvetica");
     });
+    this.y = Math.ceil(this.y + rowH);
   }
-  
-  // Method 2: Check events array for V03 (incident) events
-  if (incidents.length === 0 && Array.isArray(reportData.events)) {
-    logger.info(`   No guardReports found, checking ${reportData.events.length} events...`);
-    
-    reportData.events.forEach((event, index) => {
-      const alarmCode = (event.rec_calarma || event.AlarmCode || '').toString().trim().toUpperCase();
-      
-      if (alarmCode === 'V03') {
-        logger.debug(`   Event ${index + 1} is V03 (incident)`);
-        
-        // Get raw text content
-        const rawText = event.rec_cObservaciones || 
-                        event.Observaciones || 
-                        event.observaciones || 
-                        event.rec_cContenido || 
-                        '';
-        
-        const cleanDescription = extractIncidentDescription(rawText);
-        
-        // Parse date/time
-        let incidentDate = 'N/A';
-        let incidentTime = 'N/A';
-        if (event.rec_tfechahora) {
-          const dateObj = dayjs(event.rec_tfechahora);
-          if (dateObj.isValid()) {
-            incidentDate = dateObj.format('DD/MM/YYYY');
-            incidentTime = dateObj.format('HH:mm:ss');
-          }
-        }
-        
-        // Get zone name with comprehensive fallback
-        const zoneName = getZoneName(event);
-        
-        incidents.push({
-          id: event.rec_iid || `inc-${incidents.length + 1}`,
-          date: incidentDate,
-          time: incidentTime,
-          dateTime: event.rec_tfechahora || 'N/A',
-          zone: zoneName,
-          description: cleanDescription,
-          priority: 'MEDIUM',
-          reportedBy: event.rec_coperador || event.Operator || 'Guard',
-          rawText: rawText,
-          source: 'event'
-        });
-        
-        logger.info(`   ✅ Added incident from event:`);
-        logger.info(`      Zone: ${zoneName}`);
-        logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
-      }
-    });
+
+  totalRow(cols, rowH = 24) {
+    this.ensure(rowH + 4);
+    this.doc.fillColor(C.primaryDark).rect(this.left, this.y, this.contentW, rowH).fill();
+    this.doc.fillColor(C.white).fontSize(9).font("Helvetica-Bold");
+    cols.forEach(({ text, cx, w }) =>
+      this.doc.text(String(text ?? ""), cx, this.y + (rowH - 9) / 2, { width: w, lineBreak: false })
+    );
+    this.y = Math.ceil(this.y + rowH);
   }
-  
-  // Method 3: Check incidents array directly
-  if (incidents.length === 0 && Array.isArray(reportData.incidents)) {
-    logger.info(`   Checking incidents array (${reportData.incidents.length} items)...`);
-    
-    reportData.incidents.forEach((incident, index) => {
-      const rawDescription = incident.description || incident.notes || incident.details || '';
-      const cleanDescription = extractIncidentDescription(rawDescription);
-      
-      // Parse date/time
-      let incidentDate = 'N/A';
-      let incidentTime = 'N/A';
-      if (incident.date || incident.incidentDate) {
-        const dateObj = dayjs(incident.date || incident.incidentDate);
-        if (dateObj.isValid()) {
-          incidentDate = dateObj.format('DD/MM/YYYY');
-          incidentTime = dateObj.format('HH:mm:ss');
-        }
-      }
-      
-      // Get zone name with comprehensive fallback
-      const zoneName = getZoneName(incident);
-      
-      incidents.push({
-        id: incident.id || incident.incidentId || `inc-${incidents.length + 1}`,
-        date: incidentDate,
-        time: incidentTime,
-        dateTime: incident.date || incident.incidentDate || 'N/A',
-        zone: zoneName,
-        description: cleanDescription,
-        priority: incident.priority || incident.severity || 'MEDIUM',
-        reportedBy: incident.reportedBy || incident.reporter || 'Guard',
-        rawText: rawDescription,
-        source: 'incidentsArray'
-      });
-      
-      logger.info(`   ✅ Added incident from incidents array:`);
-      logger.info(`      Zone: ${zoneName}`);
-      logger.info(`      Description: ${cleanDescription.substring(0, 60)}...`);
-    });
-  }
-  
-  logger.info(`📊 Processed ${incidents.length} total incidents`);
-  
-  // Debug log all incidents with zones
-  incidents.forEach((incident, idx) => {
-    logger.debug(`   Incident ${idx + 1}: Zone="${incident.zone}", Desc="${incident.description.substring(0, 40)}..."`);
-  });
-  
-  return incidents;
 }
 
-/**
- * Process patrol events for activity log
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+function cleanPost(name) {
+  return name ? String(name).replace(/^\d+\.\s*/, "").trim() : "";
+}
+
+function fmtDate(str) {
+  const d = dayjs.tz(str, TZ);
+  return d.isValid() ? d.format("DD/MM/YYYY") : String(str || "");
+}
+
+function dayCount(start, end) {
+  const s = dayjs(start), e = dayjs(end);
+  return s.isValid() && e.isValid() ? e.diff(s, "day") + 1 : 0;
+}
+
+function loadLogo() {
+  const candidates = [
+    path.join(process.cwd(), "assets",           "BM SECURITY LOGO.jpg"),
+    path.join(process.cwd(), "server", "assets", "BM SECURITY LOGO.jpg"),
+    path.join(__dirname, "..",         "assets", "BM SECURITY LOGO.jpg"),
+    path.join(__dirname, "..", "..",   "assets", "BM SECURITY LOGO.jpg"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) { log.info("Logo loaded:", p); return fs.readFileSync(p); }
+  }
+  log.warn("Logo not found — text fallback");
+  return null;
+}
+
+function zoneName(obj) {
+  const pick = (...keys) => { for (const k of keys) if (obj[k]) return cleanPost(obj[k]); return null; };
+  return (
+    pick("zone", "zoneName", "zone_name", "Zone", "post", "postName", "post_name", "SecurityPost", "location") ||
+    (obj.rec_czonanombre ? cleanPost(obj.rec_czonanombre) : null) ||
+    (obj.rec_czona       ? ("Zone " + obj.rec_czona)      : null) ||
+    "Unknown Location"
+  );
+}
+
+function cleanDescription(raw) {
+  if (!raw) return "";
+  return String(raw)
+    .replace(/\[\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(:\d{2})?\]/g, "")
+    .replace(/\[vigicontrol\]/gi, "")
+    .replace(/\[irservices\]/gi,  "")
+    .replace(/^\s*\[.*?\]\s*/g,   "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function perfColor(pct) {
+  if (pct >= 90) return C.success;
+  if (pct >= 70) return C.accent;
+  return C.warning;
+}
+
+function truncateLabel(doc, label, maxWidth, fontSize = 5.5) {
+  doc.fontSize(fontSize).font("Helvetica");
+  if (doc.widthOfString(label) <= maxWidth) return label;
+  let truncated = label;
+  while (truncated.length > 1 && doc.widthOfString(truncated + "…") > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated + "…";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADAPTIVE Y-AXIS
+// ─────────────────────────────────────────────────────────────────────────────
+function niceAxis(rawMax) {
+  if (!rawMax || rawMax <= 0) return { niceMax: 10, gridStep: 2, gridLines: 5 };
+  const tryGridLines = [5, 4, 2];
+  for (const g of tryGridLines) {
+    const rawStep = rawMax / g;
+    const mag     = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const nice    = [1, 2, 2.5, 5, 10].map(f => f * mag).find(v => v >= rawStep) || rawStep;
+    const niceMax = nice * g;
+    if (niceMax >= rawMax) return { niceMax, gridStep: nice, gridLines: g };
+  }
+  return { niceMax: rawMax, gridStep: Math.ceil(rawMax / 4), gridLines: 4 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA PROCESSING
+// ─────────────────────────────────────────────────────────────────────────────
+function processIncidents(reportData) {
+  const result = [];
+
+  function push(raw, dateStr, zone, reportedBy) {
+    const desc = cleanDescription(raw);
+    let date = "N/A", time = "N/A";
+    if (dateStr) {
+      const d = dayjs(dateStr);
+      if (d.isValid()) { date = d.format("DD/MM/YYYY"); time = d.format("HH:mm:ss"); }
+    }
+    result.push({ date, time, zone, description: desc, reportedBy: reportedBy || "Guard" });
+  }
+
+  if (Array.isArray(reportData.guardReports)) {
+    for (const r of reportData.guardReports) {
+      if (r.type === "INCIDENT_REPORT" || r.__type === "INCIDENT_REPORT") {
+        push(r.report || r.description || "", r.date, zoneName(r), r.guardName || r.officer);
+      }
+    }
+  }
+
+  if (result.length === 0 && Array.isArray(reportData.events)) {
+    for (const e of reportData.events) {
+      const code = (e.rec_calarma || e.AlarmCode || "").toString().trim().toUpperCase();
+      if (code === "V03") {
+        push(
+          e.rec_cObservaciones || e.Observaciones || e.observaciones || "",
+          e.rec_tfechahora,
+          zoneName(e),
+          e.rec_coperador || e.Operator,
+        );
+      }
+    }
+  }
+
+  if (result.length === 0 && Array.isArray(reportData.incidents)) {
+    for (const i of reportData.incidents) {
+      push(i.description || i.notes || i.details || "", i.date || i.incidentDate, zoneName(i), i.reportedBy || i.reporter);
+    }
+  }
+
+  log.info("Processed " + result.length + " incidents");
+  return result;
+}
+
 function processPatrolEvents(reportData) {
-  const patrolEvents = [];
-  
+  const result = [];
   if (Array.isArray(reportData.events)) {
-    reportData.events.forEach(event => {
-      const alarmCode = (event.rec_calarma || event.AlarmCode || '').toString().trim().toUpperCase();
-      
-      // Only include patrol arrivals in activity log
-      if (alarmCode === 'V04') {
-        const zoneName = getZoneName(event);
-        
-        patrolEvents.push({
-          Date: event.Date || formatDate(event.rec_tfechahora) || 'N/A',
-          Time: event.Time || (event.rec_tfechahora ? dayjs(event.rec_tfechahora).format('HH:mm:ss') : 'N/A'),
-          Event: 'VigiControl Arrival',
-          Zone: zoneName
+    for (const e of reportData.events) {
+      const code = (e.rec_calarma || e.AlarmCode || "").toString().trim().toUpperCase();
+      if (code === "V04") {
+        result.push({
+          Date:  e.Date || fmtDate(e.rec_tfechahora) || "N/A",
+          Time:  e.Time || (e.rec_tfechahora ? dayjs(e.rec_tfechahora).format("HH:mm:ss") : "N/A"),
+          Event: "VigiControl Arrival",
+          Zone:  zoneName(e),
         });
       }
-    });
+    }
   }
-  
-  logger.info(`📊 Processed ${patrolEvents.length} patrol events for activity log`);
-  return patrolEvents;
+  log.info("Processed " + result.length + " patrol events (no cap — all will render)");
+  return result;
 }
 
-/**
- * MAIN: Generate Dashboard PDF
- */
-async function generateDashboardPDF(clientData) {
-  const startTime = Date.now();
-  
-  logger.info('='.repeat(60));
-  logger.info('PDF GENERATION STARTED');
-  logger.info('='.repeat(60));
-  
-  try {
-    const { clientId, clientName = "Unknown Client", startDate, endDate } = clientData;
+function resolveClient(clientData) {
+  const id   = clientData.clientId   || clientData.ClientID   || null;
+  const name = clientData.clientName || clientData.client     || clientData.ClientName || "";
+  const resolvedId   = id   ? id   : name;
+  const resolvedName = name ? name : (id ? String(id) : "Unknown Client");
+  log.info("Resolved client -> id=\"" + resolvedId + "\" name=\"" + resolvedName + "\"");
+  return { resolvedId, resolvedName };
+}
 
-    // Validate inputs
-    if (!clientId) {
-      throw new Error('Client ID is required');
-    }
-    if (!startDate || !endDate) {
-      throw new Error('Start and end dates are required');
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+// CHART ROW RENDERER
+// ─────────────────────────────────────────────────────────────────────────────
+function drawChartRow(doc, x, y, width, rows, rowIndex, totalRows, globalMax) {
+  if (!rows.length) return 0;
 
-    logger.info(`📋 Requesting report for Client ID: ${clientId}`);
-    logger.info(`📅 Date Range: ${startDate} to ${endDate}`);
+  const { TITLE_H, PAD_L, PAD_R, PAD_TOP, PAD_BOT, BAR_GAP, MIN_BAR_W, MAX_BAR_W, BAR_H } = CHART;
+  const cardH    = TITLE_H + PAD_TOP + BAR_H + PAD_BOT;
+  const drawW    = width - PAD_L - PAD_R;
+  const colW     = Math.floor(drawW / rows.length);
+  const barW     = Math.min(MAX_BAR_W, Math.max(MIN_BAR_W, colW - BAR_GAP));
+  const barBaseY = y + TITLE_H + PAD_TOP + BAR_H;
 
-    // Fetch all data from report model
-    const reportData = await fetchPatrolReport(clientId, startDate, endDate, true, 'custom');
-    
-    logger.info('📦 Report data received from fetchPatrolReport');
+  const { niceMax, gridStep, gridLines } = niceAxis(globalMax);
 
-    // Check if report generation was successful
-    if (!reportData.metadata || !reportData.metadata.success) {
-      const errorMsg = reportData.metadata?.error?.message || 'Unknown error during report generation';
-      logger.error(`❌ Report generation failed: ${errorMsg}`);
-      throw new Error(`Report generation failed: ${errorMsg}`);
-    }
+  doc.fillColor(C.gray100).roundedRect(x, y, width, cardH, 4).fill();
 
-    // Process data correctly
-    const posts = Array.isArray(reportData.posts) ? reportData.posts : [];
-    const incidents = processGuardReports(reportData);
-    const patrolEvents = processPatrolEvents(reportData);
-    
-    logger.info(`✅ Data processed:`);
-    logger.info(`   - Security Posts: ${posts.length}`);
-    logger.info(`   - Incidents: ${incidents.length}`);
-    logger.info(`   - Patrol Events: ${patrolEvents.length}`);
+  const titleSuffix = totalRows > 1 ? " (Row " + (rowIndex + 1) + " of " + totalRows + ")" : "";
+  doc.fillColor(C.primary).fontSize(10).font("Helvetica-Bold")
+     .text("Patrols Completed Per Zone" + titleSuffix, x + PAD_L, y + 8, {
+       width: width - PAD_L - PAD_R, lineBreak: false,
+     });
 
-    // ==================== FIXED METADATA EXTRACTION ====================
-    // Extract metadata with fallbacks - USING CORRECT FIELD NAMES
-    const {
-      clientName: reportClientName = clientName,
-      overallPatrolPerformance = 0,  // ✅ Changed from overallPerformance
-      totalCompletedPatrols = 0,     // ✅ Changed from totalCompleted
-      totalExpectedPatrols = 0,
-      dataQuality = {}
-    } = reportData.metadata || {};
-
-    const displayClientName = clientName || reportClientName || 'Unknown Client';
-
-    // ✅ Calculate from actual post data as backup
-    const calculatedCompleted = posts.reduce((sum, post) => sum + (post.Completed || 0), 0);
-    const calculatedExpected = posts.reduce((sum, post) => sum + (post.Expected || 0), 0);
-    const calculatedPerformance = calculatedExpected > 0 
-      ? Math.round((calculatedCompleted / calculatedExpected) * 100)
-      : 0;
-
-    // Use calculated values if metadata values are 0
-    const totalCompleted = totalCompletedPatrols || calculatedCompleted;
-    const overallPerformance = overallPatrolPerformance || calculatedPerformance;
-
-    logger.info(`📊 Using totals: ${totalCompleted}/${totalExpectedPatrols} = ${overallPerformance}%`);
-
-    // Calculate actual days for display
-    const actualDays = calculateActualDays(startDate, endDate);
-    
-    const totalIncidents = incidents.length;
-    const highPriorityIncidents = incidents.filter(i => i.priority === 'HIGH').length;
-    
-    logger.info(`📊 Performance Metrics:`);
-    logger.info(`   - Overall: ${overallPerformance}%`);
-    logger.info(`   - Completed Patrols: ${totalCompleted}`);
-    logger.info(`   - Expected Patrols: ${totalExpectedPatrols}`);
-    logger.info(`   - Incidents Reported: ${totalIncidents}`);
-    logger.info(`   - Period: ${actualDays} days`);
-    
-    // Log all incident zones for debugging
-    incidents.forEach((incident, idx) => {
-      logger.info(`   Incident ${idx + 1}: Zone="${incident.zone}"`);
-    });
-
-    // Warn if no data
-    if (posts.length === 0 && patrolEvents.length === 0 && totalIncidents === 0) {
-      logger.warn('⚠️ WARNING: No data found for this report!');
-    }
-
-    // Date formatting
-    const startDateFormatted = formatDate(startDate);
-    const endDateFormatted = formatDate(endDate);
-    const startDay = dayjs(startDate).format('dddd');
-    const endDay = dayjs(endDate).format('dddd');
-
-    // Load logo
-    const logoData = loadLogoFromFile();
-
-    // Create PDF document
-    const doc = new PDFDocument({ 
-      margin: 40,
-      size: "A4",
-      bufferPages: true,
-      info: {
-        Title: `Security Report - ${displayClientName}`,
-        Author: 'BM Security',
-        Subject: `Security Performance ${startDateFormatted} to ${endDateFormatted}`,
-        Creator: 'BM Security PDF Service'
-      }
-    });
-
-    const buffers = [];
-    doc.on("data", (chunk) => buffers.push(chunk));
-    
-    const pdfPromise = new Promise((resolve, reject) => {
-      doc.on("end", () => {
-        logger.info('✅ PDF buffer completed');
-        resolve(Buffer.concat(buffers));
-      });
-      doc.on("error", (err) => {
-        logger.error('❌ PDF error:', err);
-        reject(err);
-      });
-    });
-
-    // PDF Layout constants
-    let yPos = 40;
-    const pageWidth = 515;
-    const pageHeight = 750;
-
-    const checkPageBreak = (neededSpace) => {
-      if (yPos + neededSpace > pageHeight) {
-        doc.addPage();
-        yPos = 40;
-        return true;
-      }
-      return false;
-    };
-
-    logger.info('📝 Starting PDF content generation...');
-
-    // ==================== HEADER WITH LOGO ====================
-    const logoWidth = 160;
-    const logoHeight = 80;
-    const logoX = 40;
-    const logoY = yPos;
-
-    if (logoData && logoData.buffer) {
-      try {
-        logger.info('Adding BM Security logo to PDF...');
-        doc.image(logoData.buffer, logoX, logoY, {
-          width: logoWidth,
-          height: logoHeight,
-          fit: [logoWidth, logoHeight]
-        });
-      } catch (error) {
-        logger.error('Error adding logo:', error.message);
-        doc.font('Helvetica-Bold')
-           .fillColor(COLORS.primary)
-           .fontSize(16)
-           .text('BM SECURITY', logoX, logoY + 10);
-      }
-    } else {
-      doc.font('Helvetica-Bold')
-         .fillColor(COLORS.primary)
-         .fontSize(16)
-         .text('BM SECURITY', logoX, logoY + 10);
-    }
-
-    // Header text content
-    const headerTextX = logoX + logoWidth + 15;
-    const headerTextY = logoY + 15;
-    
-    doc.font('Helvetica-Bold')
-       .fillColor(COLORS.primary)
-       .fontSize(20)
-       .text('SECURITY PATROL REPORT', headerTextX, headerTextY);
-    
-    doc.fillColor(COLORS.black)
-       .fontSize(14)
-       .text(displayClientName.toUpperCase(), headerTextX, headerTextY + 28);
-    
-    doc.fillColor(COLORS.gray[600])
-       .fontSize(10)
-       .text(`Period: ${startDateFormatted} to ${endDateFormatted} (${startDay} to ${endDay})`, headerTextX, headerTextY + 50);
-    
-    yPos += Math.max(logoHeight, 90) + 10;
-
-    // ==================== PERFORMANCE OVERVIEW ====================
-    checkPageBreak(130);
-    
-    doc.fillColor(COLORS.primary)
-       .fontSize(16)
-       .font('Helvetica-Bold')
-       .text('PERFORMANCE OVERVIEW', 40, yPos);
-    
-    yPos += 30;
-
-    const performanceLevel = overallPerformance >= 90 ? 'EXCELLENT' : 
-                           overallPerformance >= 80 ? 'GOOD' : 
-                           overallPerformance >= 70 ? 'SATISFACTORY' : 'NEEDS IMPROVEMENT';
-
-    // Metrics with client-friendly language
-    const metrics = [
-      { 
-        label: 'Overall Performance', 
-        value: `${overallPerformance}%`, 
-        subtext: `${totalCompleted}/${totalExpectedPatrols} patrols completed (${performanceLevel})`
-      },
-      { 
-        label: 'Security Posts', 
-        value: dataQuality.postsCount || posts.length, 
-        subtext: `${dataQuality.excellentZones || 0} excellent, ${dataQuality.underperformingZones || 0} needs attention`
-      },
-      { 
-        label: 'Security Incidents', 
-        value: totalIncidents, 
-        subtext: totalIncidents === 0 ? 'All clear - no incidents' : 
-                 `${highPriorityIncidents} high priority incidents reported`
-      },
-      { 
-        label: 'Patrol Activities', 
-        value: patrolEvents.length, 
-        subtext: `${patrolEvents.length} patrol logs recorded`
-      }
-    ];
-
-    logger.info('📊 Rendering performance metrics...');
-
-    // Metrics grid
-    metrics.forEach((metric, index) => {
-      const xPos = 40 + (index % 2) * 270;
-      const yMetric = yPos + Math.floor(index / 2) * 55;
-      
-      doc.fillColor(COLORS.primary)
-         .fontSize(22)
-         .font('Helvetica-Bold')
-         .text(String(metric.value), xPos, yMetric);
-      
-      doc.fillColor(COLORS.black)
-         .fontSize(10)
-         .font('Helvetica-Bold')
-         .text(metric.label, xPos, yMetric + 24);
-      
-      doc.fillColor(COLORS.gray[600])
-         .fontSize(8)
-         .font('Helvetica')
-         .text(metric.subtext, xPos, yMetric + 38, { width: 250 });
-    });
-
-    yPos += 125;
-
-    // ==================== INCIDENT REPORTS SECTION - DETAILED WITH ZONES ====================
-    logger.info(`📋 Rendering detailed incident reports section (${totalIncidents} incidents)...`);
-    
-    checkPageBreak(120);
-    
-    doc.fillColor(COLORS.primary)
-       .fontSize(16)
-       .font('Helvetica-Bold')
-       .text('SECURITY INCIDENTS REPORTED', 40, yPos);
-    
-    yPos += 30;
-
-    if (totalIncidents === 0) {
-      // Show positive message
-      doc.strokeColor(COLORS.gray[300])
-         .lineWidth(1)
-         .rect(40, yPos, pageWidth, 50)
-         .stroke();
-      
-      doc.fillColor('#f0f9ff')
-         .rect(40, yPos, pageWidth, 50)
-         .fill();
-      
-      doc.fillColor(COLORS.primary)
-         .fontSize(11)
-         .font('Helvetica-Bold')
-         .text('✓ All Clear', 50, yPos + 10);
-      
-      doc.fillColor(COLORS.gray[600])
-         .fontSize(9)
-         .font('Helvetica')
-         .text('No security incidents were reported during this period', 50, yPos + 28);
-      
-      yPos += 65;
-    } else {
-      // Show total count
-      doc.fillColor(COLORS.black)
-         .fontSize(11)
-         .font('Helvetica-Bold')
-         .text(`Total Security Incidents Reported: ${totalIncidents}`, 40, yPos);
-      
-      yPos += 30;
-
-      // Table header
-      doc.fillColor(COLORS.primary)
-         .rect(40, yPos, pageWidth, 24)
-         .fill();
-      
-      doc.fillColor(COLORS.white)
-         .fontSize(9)
-         .font('Helvetica-Bold')
-         .text('#', 45, yPos + 8, { width: 25 })
-         .text('DATE', 75, yPos + 8, { width: 80 })
-         .text('TIME', 160, yPos + 8, { width: 60 })
-         .text('LOCATION/ZONE', 225, yPos + 8, { width: 120 })
-         .text('INCIDENT DESCRIPTION', 350, yPos + 8, { width: 195 });
-      
-      yPos += 24;
-
-      // Display each incident with full details including zone
-      incidents.forEach((incident, index) => {
-        // Calculate row height based on description and zone length
-        const descriptionLines = wrapText(doc, incident.description, 195, 8);
-        const zoneLines = wrapText(doc, incident.zone, 120, 8);
-        const maxLines = Math.max(descriptionLines.length, zoneLines.length);
-        const rowHeight = Math.max(30, maxLines * 11 + 15);
-        
-        checkPageBreak(rowHeight + 5);
-        
-        // Alternating row colors
-        if (index % 2 === 0) {
-          doc.fillColor(COLORS.gray[100])
-             .rect(40, yPos, pageWidth, rowHeight)
-             .fill();
-        }
-        
-        // Row number
-        doc.fillColor(COLORS.black)
-           .fontSize(9)
-           .font('Helvetica-Bold')
-           .text(String(index + 1), 45, yPos + 10, { width: 25 });
-        
-        // Date
-        doc.fillColor(COLORS.black)
-           .fontSize(8)
-           .font('Helvetica')
-           .text(incident.date || 'N/A', 75, yPos + 10, { width: 80 });
-        
-        // Time
-        doc.text(incident.time || 'N/A', 160, yPos + 10, { width: 60 });
-        
-        // Zone/Location - Display with proper wrapping
-        zoneLines.forEach((line, lineIndex) => {
-          doc.text(line, 225, yPos + 10 + (lineIndex * 11), { width: 120 });
-        });
-        
-        // Incident description - FULL TEXT
-        descriptionLines.forEach((line, lineIndex) => {
-          doc.text(line, 350, yPos + 10 + (lineIndex * 11), { width: 195 });
-        });
-        
-        yPos += rowHeight + 2;
-      });
-      
-      yPos += 15;
-      
-      // Summary box
-      doc.strokeColor(COLORS.gray[300])
-         .lineWidth(1)
-         .rect(40, yPos, pageWidth, 35)
-         .stroke();
-      
-      doc.fillColor(COLORS.gray[100])
-         .rect(40, yPos, pageWidth, 35)
-         .fill();
-      
-      doc.fillColor(COLORS.black)
-         .fontSize(10)
-         .font('Helvetica-Bold')
-         .text('Total Incidents', 50, yPos + 12);
-      
-      doc.fillColor(COLORS.primary)
-         .fontSize(14)
-         .text(String(totalIncidents), 480, yPos + 10);
-    }
-
-    yPos += 50;
-
-    // ==================== PATROL PERFORMANCE TABLE ====================
-    if (posts.length > 0) {
-      logger.info(`📊 Rendering patrol performance table (${posts.length} posts)...`);
-      
-      checkPageBreak(90);
-      
-      doc.fillColor(COLORS.primary)
-         .fontSize(16)
-         .font('Helvetica-Bold')
-         .text('PATROL PERFORMANCE BY LOCATION', 40, yPos);
-      
-      yPos += 35;
-
-      // Table header
-      doc.fillColor(COLORS.primary)
-         .rect(40, yPos, pageWidth, 22)
-         .fill();
-      
-      doc.fillColor(COLORS.white)
-         .fontSize(9)
-         .font('Helvetica-Bold')
-         .text('SECURITY POST / ZONE', 45, yPos + 8, { width: 200 })
-         .text('COMPLETED', 255, yPos + 8, { width: 70 })
-         .text('EXPECTED', 335, yPos + 8, { width: 70 })
-         .text('PERFORMANCE', 415, yPos + 8, { width: 80 });
-      
-      yPos += 22;
-
-      const sortedPosts = [...posts].sort((a, b) => (b.Performance || 0) - (a.Performance || 0));
-
-      // Table rows
-      sortedPosts.forEach((post, index) => {
-        checkPageBreak(18);
-        
-        if (index % 2 === 0) {
-          doc.fillColor(COLORS.gray[100])
-             .rect(40, yPos, pageWidth, 18)
-             .fill();
-        }
-        
-        const performance = post.Percentage || '0%';
-        const performanceText = performance.toString();
-        
-        doc.fillColor(COLORS.black)
-           .fontSize(8)
-           .font('Helvetica')
-           .text(cleanPostName(post.SecurityPost || post.Zone || 'Unknown'), 45, yPos + 6, { width: 200 })
-           .text(String(post.Completed || 0), 255, yPos + 6)
-           .text(String(post.Expected || 0), 335, yPos + 6)
-           .text(performanceText, 415, yPos + 6, { width: 80 });
-        
-        yPos += 18;
-      });
-
-      checkPageBreak(24);
-      
-      // ==================== FIXED: GRAND TOTAL ROW ====================
-      // ✅ CALCULATE ACTUAL TOTALS FROM PERFORMANCE DATA
-      const actualTotalCompleted = posts.reduce((sum, post) => sum + (post.Completed || 0), 0);
-      const actualTotalExpected = posts.reduce((sum, post) => sum + (post.Expected || 0), 0);
-      const actualOverallPerformance = actualTotalExpected > 0 
-        ? Math.round((actualTotalCompleted / actualTotalExpected) * 100)
-        : 0;
-
-      logger.info(`📊 Grand Total Verification:`);
-      logger.info(`   Completed: ${actualTotalCompleted} (reported: ${totalCompleted})`);
-      logger.info(`   Expected: ${actualTotalExpected} (reported: ${totalExpectedPatrols})`);
-      logger.info(`   Performance: ${actualOverallPerformance}% (reported: ${overallPerformance}%)`);
-
-      // Grand total row
-      doc.fillColor(COLORS.primary)
-         .rect(40, yPos, pageWidth, 24)
-         .fill();
-
-      doc.fillColor(COLORS.white)
-         .fontSize(10)
-         .font('Helvetica-Bold')
-         .text('TOTAL PATROLS', 45, yPos + 9)
-         .text(String(actualTotalCompleted), 255, yPos + 9)
-         .text(String(actualTotalExpected), 335, yPos + 9)
-         .text(`${actualOverallPerformance}%`, 415, yPos + 9, { width: 80 });
-      
-      yPos += 40;
-    } else {
-      logger.warn('⚠️ No posts to display in performance table');
-    }
-
-    // ==================== SECURITY ACTIVITY LOG ====================
-    if (patrolEvents.length > 0) {
-      logger.info(`📋 Rendering security activity log (${patrolEvents.length} patrol events)...`);
-      
-      checkPageBreak(110);
-      
-      doc.fillColor(COLORS.primary)
-         .fontSize(16)
-         .font('Helvetica-Bold')
-         .text('SECURITY ACTIVITY LOG', 40, yPos);
-      
-      yPos += 35;
-
-      doc.fillColor(COLORS.gray[600])
-         .fontSize(9)
-         .font('Helvetica')
-         .text(`Showing all ${patrolEvents.length} patrol arrival logs`, 40, yPos);
-      
-      yPos += 22;
-
-      // Table header
-      doc.fillColor(COLORS.primary)
-         .rect(40, yPos, pageWidth, 26)
-         .fill();
-      
-      doc.fillColor(COLORS.white)
-         .fontSize(10)
-         .font('Helvetica-Bold')
-         .text('DATE', 45, yPos + 10, { width: 75 })
-         .text('TIME', 125, yPos + 10, { width: 60 })
-         .text('EVENT', 195, yPos + 10, { width: 150 })
-         .text('LOCATION', 355, yPos + 10, { width: 155 });
-      
-      yPos += 32;
-
-      // Event rows
-      patrolEvents.forEach((event, index) => {
-        const eventText = event.Event || 'Patrol Arrival';
-        
-        const eventLines = wrapText(doc, eventText, 150, 9);
-        const zoneLines = wrapText(doc, event.Zone || 'Unknown', 150, 9);
-        const maxLines = Math.max(eventLines.length, zoneLines.length);
-        const rowHeight = Math.max(20, maxLines * 12);
-        
-        checkPageBreak(rowHeight + 6);
-        
-        if (index % 2 === 0) {
-          doc.fillColor(COLORS.gray[100])
-             .rect(40, yPos, pageWidth, rowHeight)
-             .fill();
-        }
-        
-        doc.fillColor(COLORS.black)
-           .fontSize(9)
-           .font('Helvetica')
-           .text(event.Date || 'N/A', 45, yPos + 7, { width: 75 })
-           .text(event.Time || 'N/A', 125, yPos + 7, { width: 60 });
-        
-        eventLines.forEach((line, lineIndex) => {
-          doc.text(line, 195, yPos + 7 + (lineIndex * 12), { width: 150 });
-        });
-        
-        zoneLines.forEach((line, lineIndex) => {
-          doc.text(line, 355, yPos + 7 + (lineIndex * 12), { width: 150 });
-        });
-        
-        yPos += rowHeight + 3;
-      });
-
-      yPos += 20;
-    } else {
-      logger.warn('⚠️ No patrol events to display in activity log');
-    }
-
-    // ==================== DATA SUMMARY SECTION ====================
-    checkPageBreak(80);
-    
-    doc.fillColor(COLORS.primary)
-       .fontSize(14)
-       .font('Helvetica-Bold')
-       .text('REPORT SUMMARY', 40, yPos);
-    
-    yPos += 25;
-    
-    doc.strokeColor(COLORS.gray[300])
-       .lineWidth(0.5)
-       .rect(40, yPos, pageWidth, 60)
+  for (let g = 0; g <= gridLines; g++) {
+    const gy  = barBaseY - Math.round((BAR_H / gridLines) * g);
+    const val = Math.round(gridStep * g);
+    doc.strokeColor(C.gray300).lineWidth(0.4)
+       .moveTo(x + PAD_L, gy)
+       .lineTo(x + width - PAD_R, gy)
        .stroke();
-    
-    doc.fillColor(COLORS.gray[100])
-       .rect(40, yPos, pageWidth, 60)
-       .fill();
-    
-    doc.fillColor(COLORS.black)
-       .fontSize(9)
-       .font('Helvetica-Bold')
-       .text('Activity Breakdown:', 50, yPos + 10);
-    
-    doc.fillColor(COLORS.gray[600])
-       .fontSize(8)
-       .font('Helvetica')
-       .text(`• Patrol Activities: ${patrolEvents.length} arrival logs`, 60, yPos + 25)
-       .text(`• Incident Reports: ${totalIncidents} incident${totalIncidents !== 1 ? 's' : ''}`, 60, yPos + 38)
-       .text(`• Reporting Period: ${actualDays} day${actualDays !== 1 ? 's' : ''} (${startDateFormatted} to ${endDateFormatted})`, 60, yPos + 51);
-    
-    doc.fillColor(COLORS.gray[600])
-       .fontSize(7)
-       .font('Helvetica')
-       .text(`Report generated: ${dayjs().format('DD/MM/YYYY HH:mm')}`, 40, yPos + 75);
-    
-    yPos += 90;
-
-    // ==================== FOOTER ====================
-    logger.info('📄 Adding page footers...');
-    
-    const pageCount = doc.bufferedPageRange().count;
-    for (let i = 0; i < pageCount; i++) {
-      doc.switchToPage(i);
-      
-      const footerY = 780;
-      
-      doc.fillColor(COLORS.gray[600])
-         .fontSize(8)
-         .font('Helvetica')
-         .text('Confidential Security Report - For Authorized Personnel Only', 40, footerY)
-         .text(`Page ${i + 1} of ${pageCount}`, 480, footerY);
-    }
-
-    logger.info('✅ PDF content generation complete');
-    doc.end();
-    
-    const totalTime = Date.now() - startTime;
-    logger.info('='.repeat(60));
-    logger.info(`✅ PDF GENERATED SUCCESSFULLY in ${totalTime}ms`);
-    logger.info(`   - Pages: ${pageCount}`);
-    logger.info(`   - Security Posts: ${posts.length}`);
-    logger.info(`   - Patrol Events: ${patrolEvents.length}`);
-    logger.info(`   - Incident Reports: ${totalIncidents} (all with zone names)`);
-    logger.info(`   - Reporting Period: ${actualDays} days`);
-    logger.info('='.repeat(60));
-    
-    return pdfPromise;
-
-  } catch (error) {
-    logger.error('='.repeat(60));
-    logger.error('❌ PDF GENERATION FAILED');
-    logger.error(`   Error: ${error.message}`);
-    if (error.stack) {
-      logger.error(`   Stack trace: ${error.stack.split('\n')[1]}`);
-    }
-    logger.error('='.repeat(60));
-    throw error;
+    doc.fillColor(C.gray400).fontSize(5.5).font("Helvetica")
+       .text(String(val), x + 2, gy - 4, { width: PAD_L - 4, align: "right", lineBreak: false });
   }
+
+  doc.strokeColor(C.gray400).lineWidth(0.6)
+     .moveTo(x + PAD_L, barBaseY)
+     .lineTo(x + width - PAD_R, barBaseY)
+     .stroke();
+
+  rows.forEach((post, i) => {
+    const completed = post.Completed || 0;
+    const expected  = post.Expected  || 0;
+    const pct       = expected > 0 ? (completed / expected) * 100 : 100;
+    const colX      = x + PAD_L + i * colW;
+    const centerX   = colX + colW / 2;
+
+    const clampedExpected = Math.min(expected, niceMax);
+    if (clampedExpected > 0) {
+      const expH = Math.max(2, Math.round((clampedExpected / niceMax) * BAR_H));
+      doc.fillColor(C.gray200).rect(centerX - barW / 2, barBaseY - expH, barW, expH).fill();
+    }
+
+    const clampedCompleted = Math.min(completed, niceMax);
+    if (clampedCompleted > 0) {
+      const fillH = Math.max(2, Math.round((clampedCompleted / niceMax) * BAR_H));
+      doc.fillColor(perfColor(pct))
+         .roundedRect(centerX - barW / 2, barBaseY - fillH, barW, fillH, 2)
+         .fill();
+    }
+
+    const countH = niceMax > 0 ? Math.round((clampedCompleted / niceMax) * BAR_H) : 2;
+    doc.fillColor(C.gray800).fontSize(6).font("Helvetica-Bold")
+       .text(String(completed), centerX - 12, barBaseY - countH - 11, {
+         width: 24, align: "center", lineBreak: false,
+       });
+
+    const rawLabel = cleanPost(post.SecurityPost || post.Zone || "Unknown");
+    const labelStr = truncateLabel(doc, rawLabel, colW - 1);
+    doc.fillColor(C.gray600).fontSize(5.5).font("Helvetica")
+       .text(labelStr, centerX - colW / 2, barBaseY + 4, {
+         width: colW, align: "center", lineBreak: true, height: 28, ellipsis: true,
+       });
+  });
+
+  if (rowIndex === totalRows - 1) {
+    const legendY = y + cardH - 14;
+    const items   = [
+      { color: C.success, label: ">=90%"    },
+      { color: C.accent,  label: "70-89%"   },
+      { color: C.warning, label: "<70%"     },
+      { color: C.gray200, label: "Expected" },
+    ];
+    let lx = x + PAD_L;
+    items.forEach(({ color, label }) => {
+      doc.fillColor(color).rect(lx, legendY, 7, 7).fill();
+      doc.fillColor(C.gray600).fontSize(5.5).font("Helvetica")
+         .text(label, lx + 9, legendY + 0.5, { width: 44, lineBreak: false });
+      lx += 58;
+    });
+  }
+
+  return cardH;
 }
 
-/**
- * Generate historical report PDF (alias)
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC CHART DRAW
+// ─────────────────────────────────────────────────────────────────────────────
+function drawPatrolsChart(layout, posts) {
+  if (!posts || posts.length === 0) return;
+
+  const doc   = layout.doc;
+  const x     = layout.left;
+  const width = layout.contentW;
+
+  const sorted = [...posts].sort((a, b) => (b.Completed || 0) - (a.Completed || 0));
+  const globalMax = Math.max(
+    ...sorted.map(p => Math.max(p.Completed || 0, p.Expected || 0)),
+    1,
+  );
+
+  const zpp  = zonesPerRow(width);
+  const rows = [];
+  for (let i = 0; i < sorted.length; i += zpp) rows.push(sorted.slice(i, i + zpp));
+
+  log.info("Chart: " + sorted.length + " zone(s) -> " + rows.length + " row(s), ~" + zpp + " zones/row");
+
+  const cardH = computeRowCardHeight();
+  if (cardH <= 0) return;
+
+  rows.forEach((rowData, rowIdx) => {
+    layout.ensure(cardH);
+    drawChartRow(doc, x, layout.y, width, rowData, rowIdx, rows.length, globalMax);
+    layout.y = Math.ceil(layout.y + cardH);
+    if (rowIdx < rows.length - 1) layout.gap(8);
+  });
+
+  layout.gap(20);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALL CLEAR BOX
+// ─────────────────────────────────────────────────────────────────────────────
+function drawAllClearBox(doc, L, W, y) {
+  const BOX_H = 52;
+  doc.fillColor("#eff6ff").rect(L, y, W, BOX_H).fill();
+  doc.strokeColor("#3b82f6").lineWidth(0.5).rect(L, y, W, BOX_H).stroke();
+
+  const cx = L + 22, cy = y + 26, r = 8;
+  doc.fillColor(C.success).circle(cx, cy, r).fill();
+  doc.strokeColor(C.white).lineWidth(1.8).lineJoin("round")
+     .moveTo(cx - 3.5, cy + 0.5)
+     .lineTo(cx - 0.5, cy + 3.5)
+     .lineTo(cx + 4,   cy - 3)
+     .stroke();
+
+  doc.fillColor(C.success).fontSize(10).font("Helvetica-Bold")
+     .text("ALL CLEAR", cx + r + 8, y + 12, { lineBreak: false });
+  doc.fillColor(C.gray600).fontSize(8.5).font("Helvetica")
+     .text(
+       "No security incidents were reported during this period.",
+       cx + r + 8, y + 28,
+       { width: W - (cx + r + 8 - L) - 12 },
+     );
+  return BOX_H;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FOOTER — written during post-generation page sweep
+// ─────────────────────────────────────────────────────────────────────────────
+function drawPageFooter(doc, pageIndex, pageCount, left, contentW, pageH) {
+  const savedX  = doc.x;
+  const savedY  = doc.y;
+  const footerY = pageH - 36;
+
+  doc.strokeColor(C.gray300).lineWidth(0.5)
+     .moveTo(left, footerY - 4)
+     .lineTo(left + contentW, footerY - 4)
+     .stroke();
+
+  doc.fillColor(C.gray600).fontSize(7).font("Helvetica")
+     .text(
+       "Confidential Security Report - For Authorized Personnel Only",
+       left, footerY,
+       { width: 300, lineBreak: false },
+     );
+
+  const pageStr  = "Page " + (pageIndex + 1) + " of " + pageCount;
+  const strWidth = doc.widthOfString(pageStr);
+  doc.fillColor(C.gray600).fontSize(7).font("Helvetica")
+     .text(
+       pageStr,
+       left + contentW - strWidth, footerY,
+       { width: strWidth + 2, lineBreak: false },
+     );
+
+  doc.x = savedX;
+  doc.y = savedY;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PERFORMANCE OVERVIEW — 2×2 metric grid
+// ─────────────────────────────────────────────────────────────────────────────
+function drawPerformanceOverview(layout, metrics) {
+  const doc   = layout.doc;
+  const L     = layout.left;
+  const ROW_H = 58;
+  const COL_W = Math.floor(layout.contentW / 2);
+  const ROWS  = Math.ceil(metrics.length / 2);
+  const totalH = ROWS * ROW_H;
+
+  layout.ensure(totalH + 8);
+
+  metrics.forEach((m, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const mx  = L + col * COL_W;
+    const my  = layout.y + row * ROW_H;
+
+    doc.fillColor(C.primary).fontSize(22).font("Helvetica-Bold")
+       .text(String(m.value), mx, my, { lineBreak: false });
+    doc.fillColor(C.black).fontSize(9).font("Helvetica-Bold")
+       .text(m.label, mx, my + 25, { lineBreak: false });
+    doc.fillColor(C.gray600).fontSize(7.5).font("Helvetica")
+       .text(m.sub, mx, my + 37, { width: COL_W - 10, lineBreak: true });
+  });
+
+  layout.y = Math.ceil(layout.y + totalH);
+  layout.gap(8);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN PDF GENERATOR
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateDashboardPDF(clientData) {
+  const t0 = Date.now();
+  log.info("=".repeat(60));
+  log.info("PDF GENERATION START");
+
+  const {
+    startDate,
+    endDate,
+    // shiftType drives which window (day/night/both) the report covers.
+    // sqlStartDate/sqlEndDate may be supplied by the caller (e.g.
+    // schedulerController.js's getDatabaseQueryDates()) but are NOT used
+    // below — reportModel.js's fetchPatrolReport builds its own
+    // shift-scoped window internally from the shiftType string alone.
+    shiftType,
+  } = clientData;
+
+  if (!startDate || !endDate) throw new Error("Start and end dates are required");
+
+  const normalizedShift = normaliseShiftType(shiftType);
+  const shiftLabel       = clientData.shiftLabel || SHIFT_LABELS[normalizedShift] || "";
+
+  const { resolvedId, resolvedName } = resolveClient(clientData);
+  if (!resolvedId) throw new Error("Client ID or name is required");
+
+  log.info(
+    "Requesting report data: client=" + resolvedId +
+    " range=" + startDate + "→" + endDate +
+    " shift=" + normalizedShift
+  );
+
+  // ✅ FIX 22: pass normalizedShift as a plain STRING — the 6th positional
+  // argument of fetchPatrolReport(clientIdOrName, startDate, endDate,
+  // usePartitions, reportType, requestedShiftType). Previously this was an
+  // object ({ shiftType, sqlStartDate, sqlEndDate }), which
+  // reportModel.js's normaliseShiftType() stringifies to "[object object]"
+  // and silently treats as "no shift requested" — discarding whatever
+  // shift was explicitly asked for. Passing the string directly means an
+  // explicit request always reaches reportModel and is honored; only a
+  // genuinely absent/null shiftType falls through to reportModel's own
+  // fallback (the client's configured shift).
+  //
+  // "both" is passed through as-is (not converted to null) so a caller
+  // that explicitly wants the full day, regardless of the client's
+  // configured shift, still gets that — only a fully absent/undefined
+  // shiftType should trigger reportModel's client-config fallback.
+  const requestedShiftType = shiftType ? normalizedShift : null;
+
+  const reportData = await fetchPatrolReport(
+    resolvedId,
+    startDate,
+    endDate,
+    true,
+    "custom",
+    requestedShiftType,
+  );
+
+  if (!reportData?.metadata?.success) {
+    throw new Error(reportData?.metadata?.error?.message || "Report generation failed");
+  }
+
+  const posts        = Array.isArray(reportData.posts) ? reportData.posts : [];
+  const incidents    = processIncidents(reportData);
+  const patrolEvents = processPatrolEvents(reportData);
+
+  const {
+    clientName: repName          = resolvedName,
+    overallPatrolPerformance     = 0,
+    totalCompletedPatrols        = 0,
+    totalExpectedPatrols         = 0,
+    dataQuality                  = {},
+  } = reportData.metadata || {};
+
+  const displayName    = resolvedName || repName || "Unknown Client";
+  const calcCompleted  = posts.reduce((s, p) => s + (p.Completed || 0), 0);
+  const calcExpected   = posts.reduce((s, p) => s + (p.Expected  || 0), 0);
+  const calcPerf       = calcExpected > 0 ? Math.round((calcCompleted / calcExpected) * 100) : 0;
+
+  const totalCompleted = totalCompletedPatrols || calcCompleted;
+  const totalExpected  = totalExpectedPatrols  || calcExpected;
+  const overallPerf    = overallPatrolPerformance || calcPerf;
+
+  const perfLabel = overallPerf >= 90 ? "EXCELLENT"
+                  : overallPerf >= 80 ? "GOOD"
+                  : overallPerf >= 70 ? "SATISFACTORY"
+                  :                     "NEEDS IMPROVEMENT";
+
+  const actualDays     = dayCount(startDate, endDate);
+  const startFmt        = fmtDate(startDate);
+  const endFmt           = fmtDate(endDate);
+  const totalIncidents = incidents.length;
+  const highPriority   = incidents.filter(i => i.priority === "HIGH").length;
+
+  const logo     = loadLogo();
+  const CONT_TOP = 12 + CONTINUATION_HEADER_H + 10;
+
+  const doc = new PDFDocument({
+    margin: 40, size: "A4", bufferPages: true,
+    info: {
+      Title:   "Security Report - " + displayName + (shiftLabel ? " (" + shiftLabel + ")" : ""),
+      Author:  "BM Security",
+      Subject: "Patrol Report " + startFmt + " to " + endFmt,
+      Creator: "BM Security PDF Service v18",
+    },
+  });
+
+  // ── Continuation header handler ──────────────────────────────────────────
+  const onPageAdded = () => {
+    const { count } = doc.bufferedPageRange();
+    if (count <= 1) return;
+    drawContinuationHeader(doc, logo, displayName, startFmt, endFmt, 40, 595.28 - 80, shiftLabel);
+  };
+  doc.on("pageAdded", onPageAdded);
+
+  const buffers = [];
+  doc.on("data",  c => buffers.push(c));
+  const pdfDone = new Promise((res, rej) => {
+    doc.on("end",   () => res(Buffer.concat(buffers)));
+    doc.on("error", rej);
+  });
+
+  const layout = new Layout(doc, {
+    left:         40,
+    firstPageTop: 40,
+    contPageTop:  CONT_TOP,
+    bottom:       50,
+  });
+  const { left: L, contentW: W } = layout;
+
+  // =========================================================================
+  // 1. HEADER
+  // =========================================================================
+  const LOGO_W = 155, LOGO_H = 75;
+
+  if (logo) {
+    try { doc.image(logo, L, layout.y, { width: LOGO_W, height: LOGO_H, fit: [LOGO_W, LOGO_H] }); }
+    catch { doc.fillColor(C.primary).fontSize(16).font("Helvetica-Bold").text("BM SECURITY", L, layout.y + 10); }
+  } else {
+    doc.fillColor(C.primary).fontSize(16).font("Helvetica-Bold").text("BM SECURITY", L, layout.y + 10);
+  }
+
+  const hx = L + LOGO_W + 18;
+  const hy = layout.y + 10;
+
+  doc.fillColor(C.primary).fontSize(18).font("Helvetica-Bold")
+     .text("SECURITY PATROL REPORT", hx, hy, { lineBreak: false });
+  doc.fillColor(C.black).fontSize(13).font("Helvetica-Bold")
+     .text(displayName.toUpperCase(), hx, hy + 26, { lineBreak: false });
+  doc.fillColor(C.gray600).fontSize(9).font("Helvetica")
+     .text(
+       "Period: " + startFmt + " to " + endFmt +
+       "  (" + dayjs(startDate).format("dddd") + " – " + dayjs(endDate).format("dddd") + ")" +
+       (shiftLabel ? "   ·   " + shiftLabel : ""),
+       hx, hy + 48, { lineBreak: false },
+     );
+  doc.fillColor(C.gray400).fontSize(8).font("Helvetica")
+     .text("Generated: " + dayjs().tz(TZ).format("DD/MM/YYYY HH:mm"), hx, hy + 62, { lineBreak: false });
+
+  layout.y = Math.ceil(layout.y + Math.max(LOGO_H, 85) + 18);
+
+  // =========================================================================
+  // 2. PERFORMANCE OVERVIEW
+  // =========================================================================
+  layout.sectionTitle("PERFORMANCE OVERVIEW");
+  layout.gap(4);
+
+  drawPerformanceOverview(layout, [
+    {
+      label: "Overall Performance",
+      value: overallPerf + "%",
+      sub:   totalCompleted + "/" + totalExpected + " patrols (" + perfLabel + ")",
+    },
+    {
+      label: "Security Posts",
+      value: dataQuality.postsCount != null ? dataQuality.postsCount : posts.length,
+      sub:   (dataQuality.excellentZones || 0) + " excellent, " + (dataQuality.underperformingZones || 0) + " need attention",
+    },
+    {
+      label: "Incidents Reported",
+      value: totalIncidents,
+      sub:   totalIncidents === 0 ? "All clear — no incidents" : (highPriority + " high-priority"),
+    },
+    {
+      label: "Patrol Logs",
+      value: patrolEvents.length,
+      sub:   patrolEvents.length + " arrival records",
+    },
+  ]);
+
+  // =========================================================================
+  // 3. SECURITY INCIDENTS
+  // =========================================================================
+  layout.sectionTitle("SECURITY INCIDENTS REPORTED");
+  layout.gap(6);
+
+  if (totalIncidents === 0) {
+    layout.ensure(70);
+    drawAllClearBox(doc, L, W, layout.y);
+    layout.y = Math.ceil(layout.y + 52);
+    layout.gap(18);
+  } else {
+    layout.ensure(28);
+    doc.fillColor(C.black).fontSize(9).font("Helvetica-Bold")
+       .text("Total Incidents Reported: " + totalIncidents, L, layout.y, { lineBreak: false });
+    layout.y = Math.ceil(layout.y + 22);
+
+    const iCols = [
+      { label: "#",                    cx: L + 5,   w: 20  },
+      { label: "DATE",                 cx: L + 28,  w: 68  },
+      { label: "TIME",                 cx: L + 100, w: 56  },
+      { label: "LOCATION / ZONE",      cx: L + 160, w: 118 },
+      { label: "INCIDENT DESCRIPTION", cx: L + 282, w: 228 },
+    ];
+    layout.tableHeader(iCols, 22);
+
+    const DESC_W  = 228;
+    const ZONE_W  = 118;
+    const LINE_PAD = 14;
+    const MIN_ROW  = 28;
+
+    incidents.forEach((inc, i) => {
+      doc.font("Helvetica").fontSize(8);
+      const descH = doc.heightOfString(String(inc.description || ""), { width: DESC_W });
+      const zoneH = doc.heightOfString(String(inc.zone        || ""), { width: ZONE_W });
+      const rowH  = Math.ceil(Math.max(MIN_ROW, descH, zoneH) + LINE_PAD);
+
+      const wentToNewPage = layout.ensure(rowH + 2);
+      if (wentToNewPage) layout.tableHeader(iCols, 22);
+
+      if (i % 2 === 0) doc.fillColor(C.gray100).rect(L, layout.y, W, rowH).fill();
+
+      const textY = layout.y + 6;
+      doc.fillColor(C.black).fontSize(8).font("Helvetica-Bold")
+         .text(String(i + 1), L + 5, textY, { width: 20, lineBreak: false });
+      doc.font("Helvetica")
+         .text(inc.date || "N/A", L + 28,  textY, { width: 68,  lineBreak: false })
+         .text(inc.time || "N/A", L + 100, textY, { width: 56,  lineBreak: false });
+      doc.text(String(inc.zone        || ""), L + 160, textY, { width: ZONE_W, height: rowH - LINE_PAD, lineBreak: true, ellipsis: true });
+      doc.text(String(inc.description || ""), L + 282, textY, { width: DESC_W, height: rowH - LINE_PAD, lineBreak: true, ellipsis: true });
+
+      layout.y = Math.ceil(layout.y + rowH + 2);
+    });
+
+    layout.gap(10);
+    layout.ensure(34);
+    doc.fillColor(C.gray200).rect(L, layout.y, W, 30).fill();
+    doc.fillColor(C.gray800).fontSize(9).font("Helvetica-Bold")
+       .text("Total Incidents", L + 10, layout.y + 10, { lineBreak: false });
+    doc.fillColor(C.primary).fontSize(13).font("Helvetica-Bold")
+       .text(String(totalIncidents), L + W - 38, layout.y + 8, { width: 30, align: "right", lineBreak: false });
+    layout.y = Math.ceil(layout.y + 44);
+  }
+
+  // =========================================================================
+  // 4. PATROLS PER ZONE — BAR CHART
+  // =========================================================================
+  const CHART_MAX_POSTS = 25;
+
+  if (posts.length > 0 && posts.length <= CHART_MAX_POSTS) {
+    layout.sectionTitle("PATROLS PER ZONE - VISUAL OVERVIEW");
+    layout.gap(6);
+    drawPatrolsChart(layout, posts);
+  } else if (posts.length > CHART_MAX_POSTS) {
+    layout.sectionTitle("PATROLS PER ZONE - VISUAL OVERVIEW");
+    layout.gap(6);
+
+    const noticeH = 48;
+    layout.ensure(noticeH + 6);
+    doc.fillColor(C.gray100).rect(L, layout.y, W, noticeH).fill();
+    doc.strokeColor(C.gray300).lineWidth(0.5).rect(L, layout.y, W, noticeH).stroke();
+
+    const icx = L + 22, icy = layout.y + 24, ir = 8;
+    doc.fillColor(C.accent).circle(icx, icy, ir).fill();
+    doc.fillColor(C.white).fontSize(9).font("Helvetica-Bold")
+       .text("i", icx - 2, icy - 6, { width: 10, align: "center", lineBreak: false });
+    doc.fillColor(C.primary).fontSize(10).font("Helvetica-Bold")
+       .text("Chart Not Shown — Too Many Locations", icx + ir + 8, layout.y + 10, { lineBreak: false });
+    doc.fillColor(C.gray600).fontSize(8.5).font("Helvetica")
+       .text(
+         "This report covers " + posts.length + " security posts (" + CHART_MAX_POSTS +
+         " max for chart). See the performance table below for full data.",
+         icx + ir + 8, layout.y + 26,
+         { width: W - (icx + ir + 8 - L) - 12, lineBreak: false },
+       );
+
+    layout.y = Math.ceil(layout.y + noticeH);
+    layout.gap(16);
+  }
+
+  // =========================================================================
+  // 5. PATROL PERFORMANCE TABLE — ALL zones
+  // =========================================================================
+  if (posts.length > 0) {
+    layout.sectionTitle("PATROL PERFORMANCE BY LOCATION");
+    layout.gap(6);
+
+    const pCols = [
+      { label: "SECURITY POST / ZONE", cx: L + 5,   w: 205 },
+      { label: "COMPLETED",            cx: L + 218, w: 72  },
+      { label: "EXPECTED",             cx: L + 298, w: 72  },
+      { label: "PERFORMANCE %",        cx: L + 378, w: 88  },
+    ];
+    layout.tableHeader(pCols);
+
+    const sortedPosts = [...posts].sort((a, b) => (b.Performance || 0) - (a.Performance || 0));
+
+    sortedPosts.forEach((post, i) => {
+      doc.font("Helvetica").fontSize(8);
+      const postName = cleanPost(post.SecurityPost || post.Zone || "Unknown");
+      const nameH    = doc.heightOfString(postName, { width: 205 });
+      const rowH     = Math.ceil(Math.max(18, nameH) + 10);
+
+      const wentToNewPage = layout.ensure(rowH + 2);
+      if (wentToNewPage) layout.tableHeader(pCols);
+
+      if (i % 2 === 0) doc.fillColor(C.gray100).rect(L, layout.y, W, rowH).fill();
+
+      const textY = layout.y + 5;
+      doc.fillColor(C.black).fontSize(8).font("Helvetica")
+         .text(postName,                          L + 5,   textY, { width: 205, height: rowH - 8, lineBreak: true, ellipsis: true })
+         .text(String(post.Completed || 0),       L + 218, textY, { width: 72,  lineBreak: false })
+         .text(String(post.Expected  || 0),       L + 298, textY, { width: 72,  lineBreak: false })
+         .text(String(post.Percentage || "0%"),   L + 378, textY, { width: 88,  lineBreak: false });
+
+      layout.y = Math.ceil(layout.y + rowH + 2);
+    });
+
+    const gtCompleted = posts.reduce((s, p) => s + (p.Completed || 0), 0);
+    const gtExpected  = posts.reduce((s, p) => s + (p.Expected  || 0), 0);
+    const gtPerf      = gtExpected > 0 ? Math.round((gtCompleted / gtExpected) * 100) : 0;
+
+    layout.totalRow([
+      { text: "TOTAL PATROLS",     cx: L + 5,   w: 205 },
+      { text: String(gtCompleted), cx: L + 218, w: 72  },
+      { text: String(gtExpected),  cx: L + 298, w: 72  },
+      { text: gtPerf + "%",        cx: L + 378, w: 88  },
+    ]);
+
+    layout.gap(22);
+  }
+
+  // =========================================================================
+  // 6. SECURITY ACTIVITY LOG
+  // =========================================================================
+  if (patrolEvents.length > 0) {
+    layout.sectionTitle("SECURITY ACTIVITY LOG");
+    layout.gap(4);
+
+    layout.ensure(20);
+    doc.fillColor(C.gray600).fontSize(8).font("Helvetica")
+       .text(patrolEvents.length + " patrol arrival records for this period", L, layout.y, { lineBreak: false });
+    layout.y = Math.ceil(layout.y + 18);
+
+    const aCols = [
+      { label: "DATE",     cx: L + 5,   w: 74  },
+      { label: "TIME",     cx: L + 84,  w: 60  },
+      { label: "EVENT",    cx: L + 149, w: 148 },
+      { label: "LOCATION", cx: L + 302, w: 208 },
+    ];
+    layout.tableHeader(aCols, 24);
+
+    const EVENT_W = 148;
+    const LOC_W   = 208;
+    const ACT_PAD = 10;
+    const ACT_MIN = 20;
+
+    patrolEvents.forEach((ev, i) => {
+      doc.font("Helvetica").fontSize(8.5);
+      const evH  = doc.heightOfString(String(ev.Event || "Patrol Arrival"), { width: EVENT_W });
+      const locH = doc.heightOfString(String(ev.Zone  || "Unknown"),        { width: LOC_W   });
+      const rowH = Math.ceil(Math.max(ACT_MIN, evH, locH) + ACT_PAD);
+
+      const wentToNewPage = layout.ensure(rowH + 5);
+      if (wentToNewPage) layout.tableHeader(aCols, 24);
+
+      if (i % 2 === 0) doc.fillColor(C.gray100).rect(L, layout.y, W, rowH).fill();
+
+      const textY = layout.y + 5;
+      doc.fillColor(C.black).fontSize(8.5).font("Helvetica")
+         .text(ev.Date || "N/A", L + 5,   textY, { width: 74,      lineBreak: false })
+         .text(ev.Time || "N/A", L + 84,  textY, { width: 60,      lineBreak: false })
+         .text(String(ev.Event || "Patrol Arrival"), L + 149, textY, { width: EVENT_W, height: rowH - ACT_PAD, lineBreak: true, ellipsis: true })
+         .text(String(ev.Zone  || "Unknown"),        L + 302, textY, { width: LOC_W,   height: rowH - ACT_PAD, lineBreak: true, ellipsis: true });
+
+      layout.y = Math.ceil(layout.y + rowH + 3);
+    });
+
+    layout.gap(18);
+  }
+
+  // =========================================================================
+  // Remove pageAdded listener BEFORE section 7 — prevents ghost pages
+  // from being stamped with a continuation header during text-wrap reflow.
+  // =========================================================================
+  doc.removeListener("pageAdded", onPageAdded);
+
+  // =========================================================================
+  // 7. REPORT SUMMARY
+  // =========================================================================
+  doc.font("Helvetica").fontSize(8);
+  const summaryLines = [
+    "- Patrol Activities: " + patrolEvents.length + " arrival log" + (patrolEvents.length !== 1 ? "s" : ""),
+    "- Incident Reports:  " + totalIncidents + " incident" + (totalIncidents !== 1 ? "s" : ""),
+    "- Reporting Period:  " + actualDays + " day" + (actualDays !== 1 ? "s" : "") +
+      " (" + startFmt + " – " + endFmt + ")" + (shiftLabel ? "  ·  " + shiftLabel : ""),
+  ];
+  const BOX_INNER_PAD = 12;
+  const lineH  = doc.heightOfString(summaryLines[0], { width: W - 32 });
+  const sumH   = Math.ceil(BOX_INNER_PAD + 16 + summaryLines.length * (lineH + 4) + BOX_INNER_PAD);
+  const SECTION_TITLE_H  = 26;
+  const GAP_AFTER_TITLE  = 8;
+  const GAP_AFTER_BOX    = 10;
+  const END_MARKER_H     = 20 + 8 + 18;
+  const totalSummaryH    = SECTION_TITLE_H + GAP_AFTER_TITLE + sumH + GAP_AFTER_BOX + END_MARKER_H;
+
+  layout.ensure(totalSummaryH);
+
+  doc.fillColor(C.primary).fontSize(13).font("Helvetica-Bold")
+     .text("REPORT SUMMARY", L, layout.y, { lineBreak: false });
+  doc.strokeColor(C.gray300).lineWidth(0.5)
+     .moveTo(L, layout.y + 17).lineTo(L + W, layout.y + 17).stroke();
+  layout.y = Math.ceil(layout.y + SECTION_TITLE_H);
+  layout.gap(GAP_AFTER_TITLE);
+
+  doc.fillColor(C.gray100).rect(L, layout.y, W, sumH).fill();
+  doc.strokeColor(C.gray300).lineWidth(0.5).rect(L, layout.y, W, sumH).stroke();
+  doc.fillColor(C.gray800).fontSize(8.5).font("Helvetica-Bold")
+     .text("Activity Breakdown:", L + BOX_INNER_PAD, layout.y + BOX_INNER_PAD, { lineBreak: false });
+
+  let lineY = layout.y + BOX_INNER_PAD + 16;
+  doc.fillColor(C.gray600).fontSize(8).font("Helvetica");
+  for (const line of summaryLines) {
+    doc.text(line, L + 20, lineY, { width: W - 32, lineBreak: false });
+    lineY += lineH + 4;
+  }
+  layout.y = Math.ceil(layout.y + sumH + GAP_AFTER_BOX);
+
+  layout.y = Math.ceil(layout.y + 20);
+  doc.strokeColor(C.gray300).lineWidth(0.8)
+     .moveTo(L, layout.y).lineTo(L + W, layout.y).stroke();
+  layout.y = Math.ceil(layout.y + 8);
+  doc.fillColor(C.gray400).fontSize(7.5).font("Helvetica")
+     .text("— End of Report —", L, layout.y, { width: W, align: "center", lineBreak: false });
+  layout.y = Math.ceil(layout.y + 18);
+
+  // =========================================================================
+  // Record the last content page after ALL drawing is complete.
+  // =========================================================================
+  const finalRange      = doc.bufferedPageRange();
+  const pageCount       = finalRange.count;
+  const lastContentPage = finalRange.start + pageCount - 1;
+
+  log.info("Content complete — " + pageCount + " page(s), last page index: " + lastContentPage);
+
+  // =========================================================================
+  // 8. FOOTER SWEEP + END
+  // =========================================================================
+  for (let p = 0; p < pageCount; p++) {
+    doc.switchToPage(finalRange.start + p);
+    doc.x = L;
+    doc.y = 400;
+    drawPageFooter(doc, p, pageCount, L, W, layout.pageH);
+  }
+
+  doc.switchToPage(lastContentPage);
+  doc.x = L;
+  doc.y = layout.pageH - 1;
+
+  doc.end();
+
+  const buf = await pdfDone;
+  log.info(
+    "PDF ready — " + pageCount + " page(s), " + posts.length +
+    " zone(s), " + patrolEvents.length + " activity rows, shift=" + normalizedShift +
+    " — " + (Date.now() - t0) + "ms",
+  );
+  return buf;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALIASES
+// ─────────────────────────────────────────────────────────────────────────────
 async function generateHistoricalReportPDF(data, clientName, dateRange) {
-  const pdfData = {
+  return generateDashboardPDF({
     clientId: data.clientId || data.client?.ClientID,
-    clientName: clientName,
-    startDate: dateRange.startDate,
-    endDate: dateRange.endDate
-  };
-  
-  return await generateDashboardPDF(pdfData);
+    clientName,
+    ...dateRange,
+  });
 }
 
-/**
- * Generate patrol report PDF (alias)
- */
 async function generatePatrolReportPDF(data, clientName, dateRange) {
-  const pdfData = {
+  return generateDashboardPDF({
     clientId: data.clientId || data.client?.ClientID,
-    clientName: clientName,
-    startDate: dateRange.startDate,
-    endDate: dateRange.endDate
-  };
-  
-  return await generateDashboardPDF(pdfData);
+    clientName,
+    ...dateRange,
+  });
 }
 
-/**
- * Main PDF generation function with error handling
- */
 async function generatePDFReport(clientData) {
   try {
     const pdfBuffer = await generateDashboardPDF(clientData);
-    
-    return {
-      success: true,
-      pdfBuffer: pdfBuffer,
-      timestamp: new Date(),
-      metadata: {
-        clientId: clientData.clientId,
-        clientName: clientData.clientName,
-        startDate: clientData.startDate,
-        endDate: clientData.endDate
-      }
-    };
-    
+    return { success: true, pdfBuffer, timestamp: new Date(), metadata: clientData };
   } catch (error) {
-    logger.error('PDF report error:', error.message);
-    
-    // Create error PDF
-    const doc = new PDFDocument();
-    const buffers = [];
-    
-    doc.on('data', buffers.push.bind(buffers));
-    doc.on('end', () => {});
-    
-    doc.fontSize(20)
-       .text('Report Generation Error', 50, 50)
-       .fontSize(12)
-       .text(`Error: ${error.message}`, 50, 100)
-       .text(`Time: ${new Date().toISOString()}`, 50, 150)
-       .text(`Client ID: ${clientData.clientId || 'Unknown'}`, 50, 200);
-    
+    log.error("generatePDFReport failed:", error.message);
+    const doc  = new PDFDocument();
+    const bufs = [];
+    doc.on("data", c => bufs.push(c));
+    doc.fontSize(18).text("Report Generation Error", 50, 50)
+       .fontSize(11).text("Error: "  + error.message,                                              50, 90)
+                    .text("Time:  "  + new Date().toISOString(),                                   50, 110)
+                    .text("Client: " + (clientData.clientId || clientData.clientName || "Unknown"), 50, 130);
     doc.end();
-    
-    return {
-      success: false,
-      pdfBuffer: Buffer.concat(buffers),
-      error: error.message,
-      timestamp: new Date()
-    };
+    await new Promise(r => doc.on("end", r));
+    return { success: false, pdfBuffer: Buffer.concat(bufs), error: error.message, timestamp: new Date() };
   }
 }
 
-// Export all functions
 module.exports = {
   generateDashboardPDF,
   generateHistoricalReportPDF,
   generatePatrolReportPDF,
-  generatePDFReport
+  generatePDFReport,
+  normaliseShiftType,
+  VALID_SHIFT_TYPES,
 };
-
-// Keep default export for compatibility
-module.exports.default = {
-  generateDashboardPDF,
-  generateHistoricalReportPDF,
-  generatePatrolReportPDF,
-  generatePDFReport
-};
+module.exports.default = module.exports;

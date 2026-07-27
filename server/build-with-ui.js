@@ -161,8 +161,7 @@ try {
     fs.copyFileSync(envExample, path.join(deploymentPath, '.env'));
   }
   
-  // Create README
-  const readme = `# Guard Report Server - Deployment Package
+const readme = `# Guard Report Server - Deployment Package
 
 ## Quick Start
 
@@ -170,6 +169,7 @@ try {
    - Open the .env file in a text editor
    - Update the database settings (DB_SERVER, DB_USER, DB_PASSWORD, etc.)
    - Set ENABLE_EMAIL_SENDING=true if you want email notifications
+   - (Optional) Set REPORTS_OUTPUT_DIR to specify where PDFs are saved
 
 2. **Run the server:**
    - Double-click guard-report-server.exe
@@ -179,17 +179,31 @@ try {
    - Open your browser and go to: http://localhost:5000
    - The UI is embedded in the executable
 
+## PDF Report Storage
+
+By default, PDF reports are saved to the system temporary directory:
+- Windows: C:\\Users\\[Username]\\AppData\\Local\\Temp\\guard-reports\\
+
+To save reports to a specific location:
+- Set REPORTS_OUTPUT_DIR in .env file
+- Example: REPORTS_OUTPUT_DIR=C:\\GuardReports
+- Make sure the directory is writable by the user running the application
+
+Old temporary files are automatically cleaned up after 24 hours.
+
 ## Important Notes
 
 - The frontend UI is included in the executable
 - Make sure port 5000 is available (or change PORT in .env)
 - Keep the .env file in the same directory as the .exe
 - For production, set NODE_ENV=production in .env
+- PDF files are temporary and cleaned up automatically
 
 ## Troubleshooting
 
 - **Port already in use:** Change PORT in .env file
 - **Database connection fails:** Check DB settings in .env
+- **Can't write reports:** Check REPORTS_OUTPUT_DIR permissions or leave blank to use temp
 - **Can't access UI:** Make sure you're using http://localhost:5000
 
 ## Support

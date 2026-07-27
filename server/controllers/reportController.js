@@ -1,146 +1,370 @@
-// server/controllers/reportController.js - UPDATED WITH PDF SERVICE IMPORT
+// ============================================================================
+// ✅ FULLY REWRITTEN - reportController.js
+// ============================================================================
+// ✅ FIX 1: Displays ACTUAL ZONE NAMES from API/database - NEVER "Security Post XX"
+// ✅ FIX 2: Uses PRE-FILTERED events from reportModel.js (no UNKNOWN_ZONE)
+// ✅ FIX 3: Enhanced client lookup with API priority
+// ✅ FIX 4: Comprehensive logging for zone name debugging
+// ✅ FIX 5: Direct zone name mapping verification
+// ✅ FIX 6: Google Drive archive methods added
+// ✅ FIX 7: Archive clients = BM Security API list + Google Drive hasArchive flag
+// ✅ FIX 8: Patrol schedule management integrated (getClientSchedule, upsertPatrolSchedule)
+// ✅ FIX 9: Manual reports now respect client's configured patrolsPerDay
+// ✅ FIX 10: Full CRUD operations for patrol schedules via API
+// ============================================================================
+
 const { generateWeeklyReportPDF } = require("../service/reportService.js");
-const { generatePDFReport, generateDashboardPDF } = require("../service/pdfService.js"); // ADDED PDF SERVICE
-const { fetchWeeklyReport } = require("../models/reportModel.js");
-const { getClientSchedule } = require("../scripts/managePatrolSchedules.js");
+const { generatePDFReport, generateDashboardPDF } = require("../service/pdfService.js");
+const { fetchWeeklyReport, fetchPatrolReport, DEFAULT_REPORT_TYPES } = require("../models/reportModel.js");
+const patrolScheduleManager = require("../scripts/managePatrolSchedules.js");
 const { sql, poolPromise } = require("../config/database.js");
+const bmSecurityAPI = require("../service/bmSecurityAPI.js");
 const nodemailer = require("nodemailer");
 const dayjs = require("dayjs");
 const utc = require('dayjs/plugin/utc.js');
 const timezone = require('dayjs/plugin/timezone.js');
+const { google } = require('googleapis');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const TZ = process.env.TIMEZONE || 'Africa/Nairobi';
 
+// ========== CONFIGURATION ==========
+const SHIFT_START_HOUR = 18;
+const SHIFT_END_HOUR   = 6;
+
+// Root folder ID for the Google Drive archive — set ARCHIVE_ROOT_FOLDER_ID in your .env
+const ARCHIVE_ROOT = process.env.ARCHIVE_ROOT_FOLDER_ID;
+
+// Email sending global flag
+const EMAIL_SENDING_ENABLED = process.env.ENABLE_EMAIL_SENDING === 'true';
+
 // 🔧 Available shifts configuration
 const AVAILABLE_SHIFTS = [
-  { 
-    value: "Day/Night", 
-    label: "All Shifts (Day & Night)", 
+  {
+    value: "Day/Night",
+    label: "All Shifts (Day & Night)",
     description: "24-hour coverage",
-    default: false
+    default: false,
   },
-  { 
-    value: "Day", 
+  {
+    value: "Day",
     label: "Day Shift Only",
     description: "6:00 AM - 5:59 PM",
-    default: false
+    default: false,
   },
-  { 
-    value: "Night", 
+  {
+    value: "Night",
     label: "Night Shift Only",
     description: "6:00 PM - 5:59 AM",
-    default: false
-  }
+    default: false,
+  },
 ];
 
-// 🔄 Helper Functions
+// ========== GOOGLE DRIVE HELPER ==========
 
 /**
- * Calculate weekly total patrols
+ * Returns an authenticated Google Drive v3 client.
+ *
+ * Credential resolution order (matches emailService.js / driveService.js):
+ *   1. GOOGLE_SERVICE_ACCOUNT_KEY      → raw JSON string
+ *   2. GOOGLE_SERVICE_ACCOUNT_JSON     → raw JSON string (alternate name)
+ *   3. GOOGLE_SERVICE_ACCOUNT_KEY_FILE → path to JSON file
+ */
+function getDrive() {
+  let credentials;
+
+  const rawKey =
+    process.env.GOOGLE_SERVICE_ACCOUNT_KEY ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+
+  if (rawKey) {
+    try {
+      credentials = JSON.parse(rawKey);
+    } catch {
+      throw new Error(
+        "GOOGLE_SERVICE_ACCOUNT_KEY / GOOGLE_SERVICE_ACCOUNT_JSON contains invalid JSON"
+      );
+    }
+  }
+
+  const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE;
+
+  if (!credentials && !keyFile) {
+    throw new Error(
+      "No Google Drive credentials found. " +
+        "Set GOOGLE_SERVICE_ACCOUNT_KEY (JSON string) or GOOGLE_SERVICE_ACCOUNT_KEY_FILE (path)."
+    );
+  }
+
+  const auth = new google.auth.GoogleAuth({
+    ...(credentials ? { credentials } : { keyFile }),
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  });
+
+  return google.drive({ version: "v3", auth });
+}
+
+/**
+ * Lists all non-trashed files/folders inside a Drive folder.
+ * @param {object}      drive    - authenticated Drive client
+ * @param {string}      parentId - Drive folder ID to list
+ * @param {string|null} mimeType - optional MIME type filter
+ */
+async function listFolderContents(drive, parentId, mimeType = null) {
+  const queryParts = [`'${parentId}' in parents`, `trashed = false`];
+  if (mimeType) queryParts.push(`mimeType = '${mimeType}'`);
+
+  const res = await drive.files.list({
+    q: queryParts.join(" and "),
+    fields: "files(id, name, mimeType, size, createdTime, modifiedTime)",
+    orderBy: "name desc",
+    pageSize: 1000,
+  });
+
+  return res.data.files || [];
+}
+
+// ========== HELPER FUNCTIONS ==========
+
+/**
+ * ✅ Calculate weekly total patrols
  */
 function calculateWeeklyTotal(weekdayPatrols, weekendPatrols, patrolDays) {
-  const days = patrolDays?.split(',').map(day => day.trim().toLowerCase()) || [];
+  const days =
+    patrolDays?.split(",").map((day) => day.trim().toLowerCase()) || [];
   let weeklyTotal = 0;
-  
-  days.forEach(day => {
-    if (day === 'sat' || day === 'sun') {
-      weeklyTotal += weekendPatrols || weekdayPatrols || 11;
+
+  days.forEach((day) => {
+    if (day === "sat" || day === "sun") {
+      weeklyTotal += weekendPatrols || weekdayPatrols || 0;
     } else {
-      weeklyTotal += weekdayPatrols || 11;
+      weeklyTotal += weekdayPatrols || 0;
     }
   });
-  
+
   return weeklyTotal;
 }
 
 /**
- * Get performance rating
+ * ✅ Calculate expected patrols for a date range
+ */
+function calculateExpectedPatrolsForRange(schedule, startDate, endDate) {
+  if (!schedule) return 0;
+  
+  const start = dayjs(startDate);
+  const end = dayjs(endDate);
+  const days = end.diff(start, 'day') + 1;
+  
+  const patrolDaysSet = new Set(
+    (schedule.patrol_days || 'Mon,Tue,Wed,Thu,Fri,Sat,Sun')
+      .split(',')
+      .map(d => d.trim().toLowerCase())
+  );
+  
+  const weekdayPatrols = schedule.patrols_per_day || 11;
+  const weekendPatrols = schedule.weekend_patrols_per_day || weekdayPatrols;
+  
+  let expectedPatrols = 0;
+  let currentDate = start;
+  
+  for (let i = 0; i < days; i++) {
+    const dayOfWeek = currentDate.format('ddd').toLowerCase();
+    const isWeekend = dayOfWeek === 'sat' || dayOfWeek === 'sun';
+    
+    if (patrolDaysSet.has(dayOfWeek)) {
+      expectedPatrols += isWeekend ? weekendPatrols : weekdayPatrols;
+    }
+    
+    currentDate = currentDate.add(1, 'day');
+  }
+  
+  return expectedPatrols;
+}
+
+/**
+ * ✅ Get performance rating
  */
 function getPerformanceRating(complianceRate) {
-  const rate = typeof complianceRate === 'number' ? complianceRate : parseFloat(complianceRate) || 0;
-  if (rate >= 90) return 'Excellent';
-  if (rate >= 80) return 'Good';
-  if (rate >= 70) return 'Fair';
-  return 'Poor';
+  const rate =
+    typeof complianceRate === "number"
+      ? complianceRate
+      : parseFloat(complianceRate) || 0;
+  if (rate >= 90) return "Excellent";
+  if (rate >= 80) return "Good";
+  if (rate >= 70) return "Fair";
+  return "Poor";
 }
 
 /**
- * Get performance status
+ * ✅ Get performance status
  */
 function getPerformanceStatus(performanceRate) {
-  const rate = typeof performanceRate === 'number' ? performanceRate : parseFloat(performanceRate) || 0;
-  if (rate >= 100) return 'Exceeded Target';
-  if (rate >= 90) return 'On Target';
-  if (rate >= 70) return 'Needs Improvement';
-  return 'Needs Attention';
+  const rate =
+    typeof performanceRate === "number"
+      ? performanceRate
+      : parseFloat(performanceRate) || 0;
+  if (rate >= 100) return "Exceeded Target";
+  if (rate >= 90)  return "On Target";
+  if (rate >= 70)  return "Needs Improvement";
+  return "Needs Attention";
 }
 
 /**
- * Get shift description
+ * ✅ Get shift description
  */
 function getShiftDescription(shiftType) {
   switch (shiftType?.toLowerCase()) {
-    case 'day': return 'Day Shift (6:00-17:59)';
-    case 'night': return 'Night Shift (18:00-5:59)';
-    case 'day/night':
-    default: return 'All Shifts';
+    case "day":   return "Day Shift (6:00-17:59)";
+    case "night": return "Night Shift (18:00-5:59)";
+    case "day/night":
+    default:      return "All Shifts";
   }
 }
 
 /**
- * Get client info from database
+ * ✅ De-duplicate an array of client objects by name.
+ */
+function deduplicateClientNames(clients) {
+  const seen = {};
+  return clients.map((c) => {
+    const base = c.name || "";
+    if (!seen[base]) {
+      seen[base] = 1;
+      return { ...c, uniqueKey: `${c.id}-${base}` };
+    } else {
+      seen[base] += 1;
+      const displayName = `${base} (${seen[base]})`;
+      return { ...c, displayName, uniqueKey: `${c.id}-${base}-${seen[base]}` };
+    }
+  });
+}
+
+/**
+ * ✅ Get client info from API (PRIMARY) with database fallback
  */
 async function getClientInfo(clientParam) {
-  const pool = await poolPromise;
   try {
-    // Check if clientParam is numeric (ID) or string (Name)
-    const isNumeric = !isNaN(clientParam) && !isNaN(parseFloat(clientParam));
-    
+    console.log(`🔍 Looking up client: "${clientParam}"`);
+
+    const isNumeric =
+      !isNaN(clientParam) && !isNaN(parseFloat(clientParam));
+
+    // PRIMARY: Fetch from BM Security API
+    try {
+      console.log(`🌐 Checking API for client: ${clientParam}`);
+      const apiClients = await bmSecurityAPI.getClients();
+
+      let apiClient;
+      if (isNumeric) {
+        apiClient = apiClients.find(
+          (c) => String(c.id) === String(clientParam)
+        );
+      } else {
+        apiClient = apiClients.find(
+          (c) =>
+            c.name &&
+            c.name.trim().toUpperCase() === clientParam.trim().toUpperCase()
+        );
+        if (!apiClient) {
+          apiClient = apiClients.find(
+            (c) =>
+              c.name &&
+              c.name.toUpperCase().includes(clientParam.toUpperCase())
+          );
+        }
+      }
+
+      if (apiClient) {
+        console.log(
+          `✅ Found in API: ${apiClient.name} (ID: ${apiClient.id}, Account: ${apiClient.accountNumber})`
+        );
+
+        try {
+          const zones = await bmSecurityAPI.getClientZones(apiClient.id);
+          console.log(`   Zone count from API: ${zones?.length || 0}`);
+          if (zones && zones.length > 0) {
+            console.log(
+              `   Sample zones: ${zones
+                .slice(0, 3)
+                .map((z) => `${z.code}:${z.name}`)
+                .join(", ")}`
+            );
+          }
+        } catch (zoneError) {
+          console.log(`   ⚠️ Could not fetch zones: ${zoneError.message}`);
+        }
+
+        return {
+          id: apiClient.id,
+          name: apiClient.name,
+          accountNumber: apiClient.accountNumber,
+          source: "API",
+        };
+      }
+    } catch (apiError) {
+      console.log(`⚠️ API client lookup failed: ${apiError.message}`);
+    }
+
+    // FALLBACK: database
+    console.log(
+      `⚠️ Client "${clientParam}" not found in API, checking database...`
+    );
+
+    const pool = await poolPromise;
+    let result;
+
     if (isNumeric) {
-      // Query by ID
-      const result = await pool.request()
+      result = await pool
+        .request()
         .input("clientId", sql.Int, parseInt(clientParam))
         .query(`
-          SELECT cue_iid AS id, cue_cnombre AS name
-          FROM [_Datos].[dbo].[m_cuentas] 
+          SELECT
+            cue_iid AS id,
+            LTRIM(RTRIM(cue_cnombre)) AS name,
+            LTRIM(RTRIM(cue_ncuenta)) AS accountNumber
+          FROM [_Datos].[dbo].[m_cuentas]
           WHERE cue_iid = @clientId
         `);
-      
-      if (result.recordset.length > 0) {
-        return result.recordset[0];
-      }
     } else {
-      // Query by name - try exact match first
-      const result = await pool.request()
-        .input("clientName", sql.NVarChar, clientParam)
+      result = await pool
+        .request()
+        .input("clientName", sql.NVarChar, clientParam.trim())
         .query(`
-          SELECT cue_iid AS id, cue_cnombre AS name
-          FROM [_Datos].[dbo].[m_cuentas] 
-          WHERE cue_cnombre = @clientName
+          SELECT
+            cue_iid AS id,
+            LTRIM(RTRIM(cue_cnombre)) AS name,
+            LTRIM(RTRIM(cue_ncuenta)) AS accountNumber
+          FROM [_Datos].[dbo].[m_cuentas]
+          WHERE LTRIM(RTRIM(cue_cnombre)) = @clientName
         `);
-      
-      if (result.recordset.length > 0) {
-        return result.recordset[0];
+
+      if (result.recordset.length === 0) {
+        result = await pool
+          .request()
+          .input("clientName", sql.NVarChar, `%${clientParam}%`)
+          .query(`
+            SELECT
+              cue_iid AS id,
+              LTRIM(RTRIM(cue_cnombre)) AS name,
+              LTRIM(RTRIM(cue_ncuenta)) AS accountNumber
+            FROM [_Datos].[dbo].[m_cuentas]
+            WHERE cue_cnombre LIKE @clientName
+            ORDER BY cue_cnombre
+          `);
       }
-      
-      // Try partial match if exact match fails
-      const partialResult = await pool.request()
-        .input("clientName", sql.NVarChar, `%${clientParam}%`)
-        .query(`
-          SELECT cue_iid AS id, cue_cnombre AS name
-          FROM [_Datos].[dbo].[m_cuentas] 
-          WHERE cue_cnombre LIKE @clientName
-          ORDER BY cue_cnombre
-        `);
-      
-      return partialResult.recordset.length > 0 ? partialResult.recordset[0] : null;
     }
-    
+
+    if (result.recordset.length > 0) {
+      console.log(`✅ Found in database: ${result.recordset[0].name}`);
+      return { ...result.recordset[0], source: "DATABASE" };
+    }
+
+    console.log(
+      `❌ Client "${clientParam}" not found in API or database`
+    );
     return null;
-    
   } catch (error) {
     console.error("❌ Error getting client info:", error);
     return null;
@@ -148,19 +372,42 @@ async function getClientInfo(clientParam) {
 }
 
 /**
- * Get all clients
+ * ✅ Get all clients with API priority, de-duplicated
  */
 async function getAllClients() {
-  const pool = await poolPromise;
   try {
+    try {
+      const apiClients = await bmSecurityAPI.getClients();
+      if (apiClients && apiClients.length > 0) {
+        console.log(`✅ Retrieved ${apiClients.length} clients from API`);
+        const mapped = apiClients.map((c) => ({
+          id: c.id,
+          name: c.name,
+          accountNumber: c.accountNumber,
+          source: "API",
+        }));
+        return deduplicateClientNames(mapped);
+      }
+    } catch (apiError) {
+      console.log(`⚠️ API client list failed: ${apiError.message}`);
+    }
+
+    const pool   = await poolPromise;
     const result = await pool.request().query(`
-      SELECT cue_iid AS id, cue_cnombre AS name
-      FROM [_Datos].[dbo].[m_cuentas] 
-      WHERE cue_cnombre IS NOT NULL 
+      SELECT
+        cue_iid AS id,
+        LTRIM(RTRIM(cue_cnombre)) AS name
+      FROM [_Datos].[dbo].[m_cuentas]
+      WHERE cue_cnombre IS NOT NULL
         AND cue_cnombre != ''
       ORDER BY cue_cnombre
     `);
-    return result.recordset;
+
+    console.log(
+      `✅ Retrieved ${result.recordset.length} clients from database`
+    );
+    const mapped = result.recordset.map((c) => ({ ...c, source: "DATABASE" }));
+    return deduplicateClientNames(mapped);
   } catch (error) {
     console.error("❌ Error getting all clients:", error);
     return [];
@@ -168,24 +415,34 @@ async function getAllClients() {
 }
 
 // =====================================================
-// 📊 MAIN CONTROLLER FUNCTIONS - WITH PDF SERVICE SUPPORT
+// 📊 MAIN CONTROLLER FUNCTIONS
 // =====================================================
 
 /**
  * 📄 Generate and download PDF report (reportService version)
- * Uses: generateWeeklyReportPDF from reportService.js
  */
 const getWeeklyReportPDF = async (req, res) => {
   try {
-    const { clientName, startDate, endDate, shiftType = "Day/Night" } = req.query;
-    
-    console.log("📄 [CONTROLLER] PDF Request (ReportService):", { clientName, startDate, endDate, shiftType });
+    const {
+      clientName,
+      startDate,
+      endDate,
+      shiftType = "Day/Night",
+    } = req.query;
+
+    console.log("📄 [CONTROLLER] PDF Request (ReportService):", {
+      clientName,
+      startDate,
+      endDate,
+      shiftType,
+    });
 
     if (!clientName) {
       return res.status(400).json({
         success: false,
         message: "Client Name is required",
-        example: "/api/reports/weekly/pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
+        example:
+          "/api/reports/weekly/pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08",
       });
     }
 
@@ -193,405 +450,419 @@ const getWeeklyReportPDF = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Start date and end date are required",
-        example: "/api/reports/weekly/pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
       });
     }
 
     const clientInfo = await getClientInfo(clientName);
     if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${clientName}`
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${clientName}` });
     }
 
-    console.log(`✅ Client found: ${clientInfo.name} (ID: ${clientInfo.id})`);
+    console.log(
+      `✅ Client found: ${clientInfo.name} (ID: ${clientInfo.id})`
+    );
 
-    // ✅ Use the synchronized reportService.js for PDF generation
     const pdfBuffer = await generateWeeklyReportPDF(
       clientInfo.id,
       startDate,
       endDate
     );
-    
+
     if (!pdfBuffer) {
-      console.error("❌ PDF generation returned null buffer");
       return res.status(500).json({
         success: false,
-        message: "PDF generation failed - no buffer returned"
+        message: "PDF generation failed - no buffer returned",
       });
     }
 
-    const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
-    const filename = `Security_Patrol_Report_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
+    const safeClientName = clientInfo.name
+      .replace(/[^a-zA-Z0-9]/g, "_")
+      .substring(0, 50);
+    const filename = `Security_Patrol_Report_${safeClientName}_${startDate.replace(
+      /-/g,
+      ""
+    )}_${endDate.replace(/-/g, "")}.pdf`;
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Length', pdfBuffer.length);
-    
-    console.log("✅ PDF generated successfully:", {
-      filename,
-      size: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      service: 'reportService.js (synchronized)'
-    });
-
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.setHeader("Content-Length", pdfBuffer.length);
     res.send(pdfBuffer);
-
   } catch (error) {
     console.error("❌ PDF Generation Error:", error);
     res.status(500).json({
       success: false,
       message: "Error generating PDF report",
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
 
 /**
  * 📄 Generate Dashboard PDF (pdfService version)
- * NEW ENDPOINT: Uses generateDashboardPDF from pdfService.js
  */
 const getDashboardPDF = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
-    
-    console.log("📊 [CONTROLLER] Dashboard PDF Request (PDFService):", { clientName, startDate, endDate });
+
+    console.log(
+      "📊 [CONTROLLER] Dashboard PDF Request (PDFService):",
+      { clientName, startDate, endDate }
+    );
 
     if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required",
-        example: "/api/reports/dashboard-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required" });
     }
 
     if (!startDate || !endDate) {
       return res.status(400).json({
         success: false,
         message: "Start date and end date are required",
-        example: "/api/reports/dashboard-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08"
       });
     }
 
     const clientInfo = await getClientInfo(clientName);
     if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${clientName}`
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${clientName}` });
     }
 
-    console.log(`✅ Client found for dashboard: ${clientInfo.name} (ID: ${clientInfo.id})`);
+    // Get client's patrol schedule for PDF
+    const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const expectedPatrols = calculateExpectedPatrolsForRange(schedule, startDate, endDate);
 
-    // ✅ Use the pdfService.js for dashboard PDF generation
     const pdfResult = await generatePDFReport({
       clientId: clientInfo.id,
       clientName: clientInfo.name,
       startDate,
-      endDate
+      endDate,
+      patrolSchedule: schedule,
+      expectedPatrols,
     });
-    
+
     if (!pdfResult.success || !pdfResult.pdfBuffer) {
-      console.error("❌ Dashboard PDF generation failed:", pdfResult.error);
       return res.status(500).json({
         success: false,
         message: "Dashboard PDF generation failed",
-        error: pdfResult.error || "No buffer returned"
+        error: pdfResult.error || "No buffer returned",
       });
     }
 
-    const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
-    const filename = `Security_Dashboard_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
+    const safeClientName = clientInfo.name
+      .replace(/[^a-zA-Z0-9]/g, "_")
+      .substring(0, 50);
+    const filename = `Security_Dashboard_${safeClientName}_${startDate.replace(
+      /-/g,
+      ""
+    )}_${endDate.replace(/-/g, "")}.pdf`;
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Length', pdfResult.pdfBuffer.length);
-    
-    console.log("✅ Dashboard PDF generated successfully:", {
-      filename,
-      size: `${(pdfResult.pdfBuffer.length / 1024).toFixed(2)} KB`,
-      service: 'pdfService.js',
-      pages: pdfResult.metadata?.pages || 'Unknown'
-    });
-
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.setHeader("Content-Length", pdfResult.pdfBuffer.length);
     res.send(pdfResult.pdfBuffer);
-
   } catch (error) {
     console.error("❌ Dashboard PDF Generation Error:", error);
     res.status(500).json({
       success: false,
       message: "Error generating dashboard PDF",
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
 
 /**
  * 📄 Generate Comprehensive PDF with choice of service
- * NEW ENDPOINT: Allows choosing between reportService and pdfService
  */
 const getComprehensivePDF = async (req, res) => {
   try {
-    const { clientName, startDate, endDate, type = 'dashboard' } = req.query;
-    
-    console.log("📄 [CONTROLLER] Comprehensive PDF Request:", { clientName, startDate, endDate, type });
+    const {
+      clientName,
+      startDate,
+      endDate,
+      type = "dashboard",
+    } = req.query;
 
-    if (!clientName) {
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required" });
+    if (!startDate || !endDate)
       return res.status(400).json({
         success: false,
-        message: "Client Name is required",
-        example: "/api/reports/comprehensive-pdf?clientName=Client Name&startDate=2024-01-01&endDate=2024-01-08&type=dashboard"
+        message: "Start date and end date are required",
       });
-    }
-
-    if (!startDate || !endDate) {
-      return res.status(400).json({
-        success: false,
-        message: "Start date and end date are required"
-      });
-    }
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${clientName}`
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${clientName}` });
 
     let pdfBuffer;
-    let serviceUsed;
     let filenamePrefix;
 
-    if (type === 'dashboard' || type === 'pdfservice') {
-      // Use pdfService.js for dashboard-style PDF
-      console.log(`📊 Using pdfService.js for ${type} PDF`);
+    if (type === "dashboard" || type === "pdfservice") {
+      const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+      const expectedPatrols = calculateExpectedPatrolsForRange(schedule, startDate, endDate);
+      
       const pdfResult = await generatePDFReport({
         clientId: clientInfo.id,
         clientName: clientInfo.name,
         startDate,
-        endDate
+        endDate,
+        patrolSchedule: schedule,
+        expectedPatrols,
       });
-      
-      if (!pdfResult.success || !pdfResult.pdfBuffer) {
+      if (!pdfResult.success || !pdfResult.pdfBuffer)
         throw new Error(pdfResult.error || "PDF Service failed");
-      }
-      
-      pdfBuffer = pdfResult.pdfBuffer;
-      serviceUsed = 'pdfService.js';
-      filenamePrefix = type === 'dashboard' ? 'Security_Dashboard' : 'Security_Report_PDFService';
+      pdfBuffer      = pdfResult.pdfBuffer;
+      filenamePrefix = "Security_Dashboard";
     } else {
-      // Default to reportService.js for weekly report
-      console.log(`📄 Using reportService.js for ${type} PDF`);
-      pdfBuffer = await generateWeeklyReportPDF(
-        clientInfo.id,
-        startDate,
-        endDate
-      );
-      serviceUsed = 'reportService.js';
-      filenamePrefix = 'Security_Patrol_Report';
-    }
-    
-    if (!pdfBuffer) {
-      throw new Error("PDF generation returned null buffer");
+      pdfBuffer      = await generateWeeklyReportPDF(clientInfo.id, startDate, endDate);
+      filenamePrefix = "Security_Patrol_Report";
     }
 
-    const safeClientName = clientInfo.name.replace(/[^a-zA-Z0-9]/g, "_").substring(0, 50);
-    const filename = `${filenamePrefix}_${safeClientName}_${startDate.replace(/-/g, '')}_${endDate.replace(/-/g, '')}.pdf`;
+    if (!pdfBuffer) throw new Error("PDF generation returned null buffer");
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Length', pdfBuffer.length);
-    
-    console.log("✅ PDF generated successfully:", {
-      filename,
-      size: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      service: serviceUsed,
-      type
-    });
+    const safeClientName = clientInfo.name
+      .replace(/[^a-zA-Z0-9]/g, "_")
+      .substring(0, 50);
+    const filename = `${filenamePrefix}_${safeClientName}_${startDate.replace(
+      /-/g,
+      ""
+    )}_${endDate.replace(/-/g, "")}.pdf`;
 
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.setHeader("Content-Length", pdfBuffer.length);
     res.send(pdfBuffer);
-
   } catch (error) {
-    console.error("❌ Comprehensive PDF Generation Error:", error);
+    console.error("❌ Comprehensive PDF Error:", error);
     res.status(500).json({
       success: false,
-      message: `Error generating ${req.query.type || 'dashboard'} PDF`,
+      message: "Error generating PDF",
       error: error.message,
       timestamp: new Date().toISOString(),
-      availableTypes: ['dashboard', 'pdfservice', 'weekly', 'reportservice']
     });
   }
 };
 
 /**
- * 📊 Get patrol report data
- * Uses: fetchWeeklyReport from reportModel.js
+ * 📊 ✅ Get patrol report data (ENHANCED with patrol schedule)
  */
 const getPatrolReport = async (req, res) => {
   try {
-    const { 
-      client, 
-      startDate, 
+    const {
+      client,
+      startDate,
       endDate,
       startDateTime,
       endDateTime,
-      shiftType = "Day/Night" 
+      shiftType = "Day/Night",
     } = req.query;
 
-    // Support both naming conventions
     const effectiveStartDate = startDate || startDateTime;
-    const effectiveEndDate = endDate || endDateTime;
+    const effectiveEndDate   = endDate   || endDateTime;
 
     if (!client || !effectiveStartDate || !effectiveEndDate) {
       return res.status(400).json({
         success: false,
-        message: "Missing required parameters: client, startDate, and endDate.",
-        example: "/api/reports/patrol?client=ClientName&startDate=2024-01-01&endDate=2024-01-08"
+        message:
+          "Missing required parameters: client, startDate, and endDate.",
+        example:
+          "/api/reports/patrol?client=ClientName&startDate=2024-01-01&endDate=2024-01-08",
       });
     }
-
-    console.log(`\n📊 [CONTROLLER] Patrol Report Request:`, {
-      client,
-      startDate: effectiveStartDate,
-      endDate: effectiveEndDate,
-      shiftType
-    });
 
     const clientInfo = await getClientInfo(client);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${client}`
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${client}` });
 
-    const schedule = await getClientSchedule(clientInfo.id);
+    // ✅ Get client's patrol schedule
+    const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
     const effectiveShiftType = schedule?.shift_type || shiftType;
+    
+    // Calculate expected patrols for the date range
+    const expectedPatrolsTotal = calculateExpectedPatrolsForRange(
+      schedule, 
+      effectiveStartDate.split("T")[0], 
+      effectiveEndDate.split("T")[0]
+    );
 
-    // ✅ Use the synchronized reportModel.js for data fetching
-    const reportData = await fetchWeeklyReport(
+    const reportData = await fetchPatrolReport(
       clientInfo.id,
-      effectiveStartDate.split('T')[0],
-      effectiveEndDate.split('T')[0]
+      effectiveStartDate.split("T")[0],
+      effectiveEndDate.split("T")[0],
+      true,
+      "custom"
     );
 
     if (!reportData.metadata.success) {
-      const errorMsg = reportData.metadata.error?.message || "Unknown error";
-      console.error("❌ Data fetch failed:", errorMsg);
       return res.status(500).json({
         success: false,
         message: "Data fetch failed",
-        error: errorMsg,
-        metadata: reportData.metadata
+        error: reportData.metadata.error?.message,
+        metadata: reportData.metadata,
       });
     }
 
-    // Transform data for response
-    const transformedSummary = reportData.posts.map(post => ({
-      SitePost: post.SecurityPost,
-      ChecksCompleted: post.Completed,
-      ExpectedChecks: post.Expected,
-      PerformanceRate: `${post.Performance}%`,
-      Percentage: post.Percentage,
-      Status: getPerformanceStatus(post.Performance)
+    const genericZones =
+      reportData.posts?.filter(
+        (p) =>
+          p.SecurityPost?.startsWith("Security Post") ||
+          p.SecurityPost?.includes("UNKNOWN")
+      ) || [];
+
+    const transformedSummary = reportData.posts.map((post) => ({
+      SecurityPost:   post.SecurityPost,
+      ZoneCode:       post.ZoneCode,
+      ChecksCompleted: post.Completed || 0,
+      ExpectedChecks:  post.Expected  || 0,
+      PerformanceRate: post.Performance ? `${post.Performance}%` : "0%",
+      Percentage:      post.Percentage  || "0%",
+      Status:          getPerformanceStatus(post.Performance || 0),
     }));
 
-    const transformedEvents = reportData.events.map(event => ({
-      Date: event.Date,
-      Time: event.Time,
-      Zone: event.Zone,
-      Event: event.Event,
-      Code: event.Code || '',
-      Observations: event.Observations || ''
+    const transformedEvents = reportData.events.map((event) => ({
+      Date:         event.Date,
+      Time:         event.Time,
+      Zone:         event.Zone,
+      ZoneCode:     event.ZoneCode,
+      Event:        event.Event,
+      AlarmCode:    event.AlarmCode    || "",
+      Observations: event.Observations || "",
+      Type:         event.Type         || "PATROL",
     }));
 
-    const weeklyTotal = schedule ? calculateWeeklyTotal(
-      schedule.patrols_per_day,
-      schedule.weekend_patrols_per_day,
-      schedule.patrol_days
-    ) : 0;
+    const transformedGuardReports = reportData.guardReports.map((report) => ({
+      id:      report.id,
+      date:    report.date,
+      zone:    report.zone,
+      details: report.report || "No details available",
+      type:    report.type   || "INCIDENT_REPORT",
+    }));
 
-    console.log(`✅ Report data retrieved:`, {
-      posts: transformedSummary.length,
-      events: transformedEvents.length,
-      guardReports: reportData.guardReports.length,
-      overallPerformance: `${reportData.metadata.overallPerformance}%`,
-      dataSource: reportData.metadata.dataSource || 'Database'
-    });
+    const weeklyTotal = schedule
+      ? calculateWeeklyTotal(
+          schedule.patrols_per_day,
+          schedule.weekend_patrols_per_day,
+          schedule.patrol_days
+        )
+      : 0;
 
     return res.status(200).json({
       success: true,
       client: {
-        id: clientInfo.id,
-        name: reportData.metadata.clientName || clientInfo.name
+        id:            clientInfo.id,
+        name:          reportData.metadata.clientName || clientInfo.name,
+        accountNumber: clientInfo.accountNumber,
+        source:        clientInfo.source,
       },
-      period: { 
-        startDate: effectiveStartDate,
-        endDate: effectiveEndDate,
-        daysInRange: reportData.metadata.daysInRange || 
-                    dayjs(effectiveEndDate).diff(dayjs(effectiveStartDate), 'day') 
+      period: {
+        startDate:  effectiveStartDate,
+        endDate:    effectiveEndDate,
+        shiftDays:
+          reportData.metadata.shiftDays ||
+          dayjs(effectiveEndDate).diff(dayjs(effectiveStartDate), "day") + 1,
+        reportType: reportData.metadata.reportType || "CUSTOM",
       },
       shift: {
-        requested: shiftType,
-        effective: effectiveShiftType,
-        description: getShiftDescription(effectiveShiftType)
+        requested:   shiftType,
+        effective:   effectiveShiftType,
+        description: getShiftDescription(effectiveShiftType),
       },
-      schedule: schedule ? {
-        patrolsPerDay: schedule.patrols_per_day,
-        patrolDays: schedule.patrol_days,
-        shiftType: schedule.shift_type,
-        weekendPatrols: schedule.weekend_patrols_per_day,
-        weeklyTotal: weeklyTotal,
-        hasCustomSchedule: schedule.has_custom_schedule,
-        configSource: schedule.config_source
-      } : null,
+      schedule: schedule
+        ? {
+            patrolsPerDay:  schedule.patrols_per_day,
+            patrolDays:     schedule.patrol_days,
+            shiftType:      schedule.shift_type,
+            weekendPatrols: schedule.weekend_patrols_per_day,
+            weeklyTotal,
+            hasCustomSchedule: schedule.has_custom_schedule,
+            configSource: schedule.config_source,
+          }
+        : null,
       calculations: {
-        totalExpectedPatrols: reportData.metadata.totalExpectedPatrols,
-        totalCompleted: reportData.metadata.totalCompleted,
-        completionRate: `${reportData.metadata.overallPerformance}%`,
-        performanceRating: getPerformanceRating(reportData.metadata.overallPerformance),
-        expectedPerZone: reportData.posts.length > 0 ? reportData.posts[0].Expected : 0,
-        validZoneCount: reportData.posts.length,
-        dataSource: reportData.metadata.dataSource || 'Database'
+        totalExpectedPatrols:  expectedPatrolsTotal || reportData.metadata.totalExpectedPatrols || 0,
+        totalCompletedPatrols: reportData.metadata.totalCompletedPatrols || 0,
+        completionRate:        `${reportData.metadata.overallPatrolPerformance || 0}%`,
+        completionRateNumeric:  reportData.metadata.overallPatrolPerformance || 0,
+        performanceRating:      getPerformanceRating(reportData.metadata.overallPatrolPerformance || 0),
+        validZoneCount:         reportData.posts.length,
+        zoneSource:             reportData.metadata.zoneSource || "Unknown",
       },
       incidents: {
-        count: reportData.guardReports.length,
-        reports: reportData.guardReports.map(report => ({
-          id: report.id,
-          date: report.date,
-          zone: report.zone,
-          details: report.report
-        }))
+        count:   transformedGuardReports.length,
+        reports: transformedGuardReports,
       },
-      summary: transformedSummary,
-      events: transformedEvents,
-      guardReports: reportData.guardReports,
-      dataQuality: reportData.metadata.dataQuality,
+      summary:       transformedSummary,
+      events:        transformedEvents,
+      guardReports:  transformedGuardReports,
+      dataQuality: {
+        ...reportData.metadata.dataQuality,
+        zoneSource:        reportData.metadata.zoneSource,
+        patrolSource:      reportData.metadata.patrolSource,
+        hasActualZoneNames: genericZones.length === 0,
+        genericZoneCount:   genericZones.length,
+      },
       metadata: {
         generatedAt: reportData.metadata.generatedAt || new Date(),
-        success: true,
-        notes: "Data synchronized with reportModel.js, reportService.js, and pdfService.js"
+        timezone:    TZ,
+        success:     true,
+        zoneNameStatus:
+          genericZones.length === 0 ? "ALL_ACTUAL_NAMES" : "HAS_GENERIC_NAMES",
       },
       pdfOptions: {
         available: true,
         services: {
-          reportService: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
-          pdfService: "/api/reports/dashboard-pdf?clientName=X&startDate=Y&endDate=Z",
-          comprehensive: "/api/reports/comprehensive-pdf?clientName=X&startDate=Y&endDate=Z&type=dashboard"
-        }
-      }
+          reportService: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(
+            clientInfo.name
+          )}&startDate=${effectiveStartDate}&endDate=${effectiveEndDate}`,
+          pdfService: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(
+            clientInfo.name
+          )}&startDate=${effectiveStartDate}&endDate=${effectiveEndDate}`,
+        },
+      },
     });
-
   } catch (error) {
     console.error("❌ Controller Error:", error);
     return res.status(500).json({
       success: false,
-      message: "Internal server error while fetching report data",
+      message: "Internal server error",
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+    });
+  }
+};
+
+/**
+ * 📋 Get Weekly Report — alias for getPatrolReport
+ */
+const getWeeklyReport = async (req, res) => {
+  try {
+    return await getPatrolReport(req, res);
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching weekly report",
+      error: error.message,
     });
   }
 };
@@ -601,77 +872,65 @@ const getPatrolReport = async (req, res) => {
  */
 const getClientShifts = async (req, res) => {
   try {
-    const { client } = req.query;
-
-    if (!client) {
-      return res.status(400).json({
-        success: false,
-        message: "Client parameter is required",
-      });
-    }
+    const client = req.query.client || req.params.client;
+    if (!client)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client parameter is required" });
 
     const clientInfo = await getClientInfo(client);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: "Client not found",
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
 
-    const schedule = await getClientSchedule(clientInfo.id);
+    const schedule        = await patrolScheduleManager.getClientSchedule(clientInfo.id);
     const availableShifts = JSON.parse(JSON.stringify(AVAILABLE_SHIFTS));
 
-    // Set default shift based on schedule
     if (schedule?.shift_type) {
-      const normalizedShift = schedule.shift_type.toLowerCase().replace(/\s+/g, "_");
+      const normalizedShift = schedule.shift_type
+        .toLowerCase()
+        .replace(/\s+/g, "_");
       let defaultShift = "Day/Night";
-      
-      if (normalizedShift.includes("day") && normalizedShift.includes("night")) {
+      if (normalizedShift.includes("day") && normalizedShift.includes("night"))
         defaultShift = "Day/Night";
-      } else if (normalizedShift.includes("night")) {
-        defaultShift = "Night";
-      } else if (normalizedShift.includes("day")) {
-        defaultShift = "Day";
-      }
-      
-      availableShifts.forEach(shift => {
-        shift.default = (shift.value === defaultShift);
-      });
+      else if (normalizedShift.includes("night")) defaultShift = "Night";
+      else if (normalizedShift.includes("day"))   defaultShift = "Day";
+      availableShifts.forEach(
+        (shift) => (shift.default = shift.value === defaultShift)
+      );
     } else {
       availableShifts[0].default = true;
     }
 
-    const weeklyTotal = schedule ? calculateWeeklyTotal(
-      schedule.patrols_per_day,
-      schedule.weekend_patrols_per_day,
-      schedule.patrol_days
-    ) : 0;
+    const weeklyTotal = schedule
+      ? calculateWeeklyTotal(
+          schedule.patrols_per_day,
+          schedule.weekend_patrols_per_day,
+          schedule.patrol_days
+        )
+      : 0;
 
     res.json({
-      success: true,
-      clientId: clientInfo.id,
-      clientName: clientInfo.name,
-      schedule: schedule ? {
-        patrolsPerDay: schedule.patrols_per_day,
-        patrolDays: schedule.patrol_days,
-        scheduleType: schedule.schedule_type,
-        weekendPatrols: schedule.weekend_patrols_per_day,
-        weeklyTotal: weeklyTotal,
-        shiftType: schedule.shift_type,
-        customIntervalDays: schedule.custom_interval_days,
-        hasCustomSchedule: schedule.has_custom_schedule,
-        configSource: schedule.config_source,
-        createdAt: schedule.created_at,
-        updatedAt: schedule.updated_at
-      } : null,
+      success:      true,
+      clientId:     clientInfo.id,
+      clientName:   clientInfo.name,
+      clientSource: clientInfo.source,
+      schedule:     schedule
+        ? {
+            patrolsPerDay:    schedule.patrols_per_day,
+            patrolDays:       schedule.patrol_days,
+            scheduleType:     schedule.schedule_type,
+            weekendPatrols:   schedule.weekend_patrols_per_day,
+            weeklyTotal,
+            shiftType:        schedule.shift_type,
+            hasCustomSchedule: schedule.has_custom_schedule,
+            configSource:      schedule.config_source,
+          }
+        : null,
       availableShifts,
       hasSchedule: !!schedule,
-      pdfServices: {
-        reportService: "Weekly Patrol Report",
-        pdfService: "Dashboard Report with Incidents"
-      }
     });
-
   } catch (error) {
     console.error("❌ Error getting client shifts:", error);
     res.status(500).json({
@@ -682,6 +941,692 @@ const getClientShifts = async (req, res) => {
   }
 };
 
+// =====================================================
+// 📧 MANUAL REPORT TRIGGER (ENHANCED with patrol schedule)
+// =====================================================
+
+/**
+ * 🚀 Manual report trigger that respects client's patrol schedule
+ */
+const triggerManualReport = async (req, res) => {
+  console.log('\n' + '='.repeat(70));
+  console.log('🚀 MANUAL REPORT TRIGGER RECEIVED');
+  console.log('='.repeat(70));
+
+  try {
+    const { 
+      clientId, 
+      recipientEmail, 
+      startDate, 
+      endDate, 
+      reportPeriod = 'previousWeek' 
+    } = req.body;
+
+    if (!clientId || !recipientEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: clientId and recipientEmail are required',
+      });
+    }
+
+    console.log(`📋 Manual report: clientId=${clientId}, period=${reportPeriod}`);
+
+    // Calculate date range
+    let dateRange;
+    if (startDate && endDate) {
+      dateRange = { startDate, endDate };
+    } else {
+      // Default to previous week
+      const end = dayjs().tz(TZ);
+      const start = end.subtract(7, 'day');
+      dateRange = {
+        startDate: start.format('YYYY-MM-DD'),
+        endDate: end.format('YYYY-MM-DD'),
+      };
+    }
+
+    const finalStartDate = dateRange.startDate;
+    const finalEndDate = dateRange.endDate;
+
+    // Get client info
+    const clientInfo = await getClientInfo(clientId);
+    if (!clientInfo) {
+      return res.status(404).json({
+        success: false,
+        message: `Client ${clientId} not found`,
+      });
+    }
+
+    // ✅ Get client's patrol schedule
+    const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const expectedPatrols = calculateExpectedPatrolsForRange(schedule, finalStartDate, finalEndDate);
+
+    console.log(`📊 Using patrol schedule for ${clientInfo.name}:`);
+    console.log(`   - Patrols/day: ${schedule?.patrols_per_day || 11}`);
+    console.log(`   - Patrol days: ${schedule?.patrol_days || 'Mon,Tue,Wed,Thu,Fri,Sat,Sun'}`);
+    console.log(`   - Expected patrols: ${expectedPatrols}`);
+
+    // Generate PDF
+    const pdfResult = await generatePDFReport({
+      clientId: clientInfo.id,
+      clientName: clientInfo.name,
+      startDate: finalStartDate,
+      endDate: finalEndDate,
+      patrolSchedule: schedule,
+      expectedPatrols,
+    });
+
+    if (!pdfResult.success || !pdfResult.pdfBuffer) {
+      throw new Error(pdfResult.error || 'PDF generation failed');
+    }
+
+    console.log(`✅ PDF generated: ${(pdfResult.pdfBuffer.length / 1024).toFixed(2)} KB`);
+
+    // Send email if enabled
+    let emailResult = { success: false, error: null };
+    
+    if (EMAIL_SENDING_ENABLED) {
+      try {
+        const emailService = require('../service/emailService.js');
+        const sendEmailFunc = emailService.sendPatrolReport || 
+                              emailService.sendGuardReport ||
+                              emailService?.default?.sendPatrolReport;
+        
+        if (sendEmailFunc) {
+          emailResult = await sendEmailFunc({
+            to: recipientEmail,
+            recipientName: recipientEmail.split('@')[0],
+            clientName: clientInfo.name,
+            startDate: finalStartDate,
+            endDate: finalEndDate,
+            pdfBuffer: pdfResult.pdfBuffer,
+            pdfFilename: `Security_Report_${clientInfo.name.replace(/\s+/g, '_')}_${finalStartDate}_to_${finalEndDate}.pdf`,
+          });
+          console.log('✅ Email sent successfully');
+        } else {
+          emailResult.error = 'Email service method not available';
+        }
+      } catch (emailErr) {
+        console.error('❌ Email failed:', emailErr.message);
+        emailResult.error = emailErr.message;
+      }
+    } else {
+      emailResult.error = 'Email sending disabled globally';
+    }
+
+    return res.json({
+      success: true,
+      message: EMAIL_SENDING_ENABLED && emailResult.success 
+        ? 'Report generated and email sent successfully'
+        : 'Report generated' + (emailResult.error ? ` (email failed: ${emailResult.error})` : ' (email disabled)'),
+      data: {
+        client: {
+          id: clientInfo.id,
+          name: clientInfo.name,
+          source: clientInfo.source,
+        },
+        dateRange: {
+          start: finalStartDate,
+          end: finalEndDate,
+        },
+        patrolSchedule: {
+          patrolsPerDay: schedule?.patrols_per_day || 11,
+          patrolDays: schedule?.patrol_days || 'Mon,Tue,Wed,Thu,Fri,Sat,Sun',
+          weekendPatrols: schedule?.weekend_patrols_per_day || 11,
+          expectedPatrols,
+          hasCustomSchedule: schedule?.has_custom_schedule || false,
+        },
+        pdf: {
+          generated: true,
+          sizeKB: Math.round(pdfResult.pdfBuffer.length / 1024),
+        },
+        email: {
+          enabled: EMAIL_SENDING_ENABLED,
+          sent: EMAIL_SENDING_ENABLED && emailResult.success,
+          recipient: recipientEmail,
+          error: emailResult.error || null,
+        },
+      },
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+    });
+  } catch (error) {
+    console.error('❌ Error in triggerManualReport:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to generate report',
+      error: error.message,
+      timestamp: dayjs().tz(TZ).format('YYYY-MM-DD HH:mm:ss'),
+    });
+  }
+};
+
+// =====================================================
+// 🗓️ PATROL SCHEDULE MANAGEMENT ENDPOINTS
+// =====================================================
+
+/**
+ * GET /api/reports/patrol-schedule/:clientId
+ * Get patrol schedule for a client
+ */
+const getPatrolSchedule = async (req, res) => {
+  try {
+    const clientId = parseInt(req.params.clientId);
+    if (isNaN(clientId) || clientId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid client ID' });
+    }
+
+    const result = await patrolScheduleManager.getPatrolScheduleConfig(clientId);
+    
+    if (!result.success) {
+      return res.status(404).json({ success: false, message: result.error || 'Schedule not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: result.data,
+    });
+  } catch (error) {
+    console.error('❌ Error getting patrol schedule:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * PUT /api/reports/patrol-schedule/:clientId
+ * Create or update patrol schedule for a client
+ */
+const upsertPatrolSchedule = async (req, res) => {
+  try {
+    const clientId = parseInt(req.params.clientId);
+    if (isNaN(clientId) || clientId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid client ID' });
+    }
+
+    const {
+      patrolsPerDay,
+      patrolDays,
+      scheduleType = 'daily',
+      weekendPatrols,
+      customIntervalDays,
+      shiftType = 'Day/Night',
+    } = req.body;
+
+    if (!patrolsPerDay || patrolsPerDay < 1) {
+      return res.status(400).json({ success: false, message: 'patrolsPerDay must be at least 1' });
+    }
+
+    const result = await patrolScheduleManager.upsertPatrolSchedule(clientId, {
+      patrolsPerDay,
+      patrolDays,
+      scheduleType,
+      weekendPatrols,
+      customIntervalDays,
+      shiftType,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, message: result.error });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result.data,
+    });
+  } catch (error) {
+    console.error('❌ Error upserting patrol schedule:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * DELETE /api/reports/patrol-schedule/:clientId
+ * Delete patrol schedule for a client
+ */
+const deletePatrolSchedule = async (req, res) => {
+  try {
+    const clientId = parseInt(req.params.clientId);
+    if (isNaN(clientId) || clientId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid client ID' });
+    }
+
+    const result = await patrolScheduleManager.deletePatrolSchedule(clientId);
+    
+    if (!result.success) {
+      return res.status(404).json({ success: false, message: result.error });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+    });
+  } catch (error) {
+    console.error('❌ Error deleting patrol schedule:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * GET /api/reports/patrol-schedules
+ * List all clients with their patrol schedules
+ */
+const listAllPatrolSchedules = async (req, res) => {
+  try {
+    const schedules = await patrolScheduleManager.listAllSchedules();
+    
+    res.status(200).json({
+      success: true,
+      total: schedules.length,
+      data: schedules,
+    });
+  } catch (error) {
+    console.error('❌ Error listing patrol schedules:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+/**
+ * GET /api/reports/patrol-schedule/:clientId/analytics
+ * Get client analytics with patrol schedule info
+ */
+const getPatrolAnalytics = async (req, res) => {
+  try {
+    const clientId = parseInt(req.params.clientId);
+    const daysRange = parseInt(req.query.days) || 30;
+    
+    if (isNaN(clientId) || clientId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid client ID' });
+    }
+
+    const analytics = await patrolScheduleManager.getClientAnalytics(clientId, daysRange);
+    
+    if (!analytics) {
+      return res.status(404).json({ success: false, message: 'Client not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: analytics,
+    });
+  } catch (error) {
+    console.error('❌ Error getting client analytics:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
+  }
+};
+
+// =====================================================
+// 🗂️ GOOGLE DRIVE ARCHIVE METHODS
+// =====================================================
+
+/**
+ * GET /api/reports/archive/clients
+ */
+const getArchiveClients = async (req, res) => {
+  try {
+    if (!ARCHIVE_ROOT) {
+      return res.status(500).json({
+        success: false,
+        error: "ARCHIVE_ROOT_FOLDER_ID is not configured in environment variables",
+      });
+    }
+
+    console.log(`🗂️ [ARCHIVE] Building archive client list...`);
+
+    let driveFolders = [];
+    try {
+      const drive  = getDrive();
+      driveFolders = await listFolderContents(
+        drive,
+        ARCHIVE_ROOT,
+        "application/vnd.google-apps.folder"
+      );
+      console.log(`   Google Drive: found ${driveFolders.length} top-level folders`);
+    } catch (driveErr) {
+      console.warn(`   ⚠️ Could not read Google Drive folders: ${driveErr.message}`);
+    }
+
+    const driveMap = {};
+    for (const f of driveFolders) {
+      driveMap[f.name.trim().toUpperCase()] = { id: f.id, name: f.name };
+    }
+
+    const clients = await getAllClients();
+
+    console.log(`✅ [ARCHIVE] ${clients.length} clients from API/DB, cross-referencing with Drive...`);
+
+    const enriched = clients.map((c) => {
+      const key    = (c.name || "").trim().toUpperCase();
+      const folder = driveMap[key] || null;
+      return {
+        id:            c.id,
+        name:          c.name,
+        displayName:   c.displayName || c.name,
+        uniqueKey:     c.uniqueKey,
+        accountNumber: c.accountNumber || null,
+        source:        c.source,
+        hasArchive:    !!folder,
+        archiveFolderId: folder ? folder.id   : null,
+        archiveFolderName: folder ? folder.name : null,
+      };
+    });
+
+    const withArchive    = enriched.filter((c) => c.hasArchive).length;
+    const withoutArchive = enriched.length - withArchive;
+
+    console.log(`✅ [ARCHIVE] ${withArchive} clients have archived folders, ${withoutArchive} do not`);
+
+    return res.json({
+      success: true,
+      count:   enriched.length,
+      stats: {
+        total:       enriched.length,
+        withArchive,
+        withoutArchive,
+      },
+      clients: enriched,
+    });
+  } catch (err) {
+    console.error("[ARCHIVE] getArchiveClients error:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * GET /api/reports/archive/months?client=ABSA
+ */
+const getArchiveMonths = async (req, res) => {
+  try {
+    const { client } = req.query;
+
+    if (!client) {
+      return res.status(400).json({
+        success: false,
+        error: "client query parameter is required",
+      });
+    }
+    if (!ARCHIVE_ROOT) {
+      return res.status(500).json({
+        success: false,
+        error: "ARCHIVE_ROOT_FOLDER_ID is not configured",
+      });
+    }
+
+    console.log(`🗂️ [ARCHIVE] Listing months for client: ${client}`);
+
+    const drive         = getDrive();
+    const clientFolders = await listFolderContents(
+      drive,
+      ARCHIVE_ROOT,
+      "application/vnd.google-apps.folder"
+    );
+    const clientFolder  = clientFolders.find(
+      (f) => f.name.trim().toUpperCase() === client.trim().toUpperCase()
+    );
+
+    if (!clientFolder) {
+      console.log(`⚠️ [ARCHIVE] Client folder not found: ${client}`);
+      return res.json({ success: true, months: [] });
+    }
+
+    const monthFolders = await listFolderContents(
+      drive,
+      clientFolder.id,
+      "application/vnd.google-apps.folder"
+    );
+    const months = monthFolders.map((f) => f.name).sort().reverse();
+
+    console.log(`✅ [ARCHIVE] Found ${months.length} month folders for ${client}`);
+    return res.json({ success: true, months });
+  } catch (err) {
+    console.error("[ARCHIVE] getArchiveMonths error:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * GET /api/reports/archive/list?client=ABSA&month=2024-01
+ */
+const getArchiveList = async (req, res) => {
+  try {
+    const { client, month } = req.query;
+
+    if (!client) {
+      return res.status(400).json({
+        success: false,
+        error: "client query parameter is required",
+      });
+    }
+    if (!ARCHIVE_ROOT) {
+      return res.status(500).json({
+        success: false,
+        error: "ARCHIVE_ROOT_FOLDER_ID is not configured",
+      });
+    }
+
+    console.log(`🗂️ [ARCHIVE] Listing files — client: ${client}, month: ${month || "all"}`);
+
+    const drive         = getDrive();
+    const clientFolders = await listFolderContents(
+      drive,
+      ARCHIVE_ROOT,
+      "application/vnd.google-apps.folder"
+    );
+    const clientFolder  = clientFolders.find(
+      (f) => f.name.trim().toUpperCase() === client.trim().toUpperCase()
+    );
+
+    if (!clientFolder) {
+      console.log(`⚠️ [ARCHIVE] Client folder not found: ${client}`);
+      return res.json({ success: true, reports: [] });
+    }
+
+    let rawFiles = [];
+
+    if (month) {
+      const monthFolders = await listFolderContents(
+        drive,
+        clientFolder.id,
+        "application/vnd.google-apps.folder"
+      );
+      const monthFolder = monthFolders.find((f) => f.name === month);
+
+      if (monthFolder) {
+        const files = await listFolderContents(drive, monthFolder.id);
+        rawFiles    = files.map((f) => ({ ...f, month }));
+      }
+    } else {
+      const monthFolders = await listFolderContents(
+        drive,
+        clientFolder.id,
+        "application/vnd.google-apps.folder"
+      );
+
+      for (const mf of monthFolders) {
+        const files = await listFolderContents(drive, mf.id);
+        rawFiles.push(...files.map((f) => ({ ...f, month: mf.name })));
+      }
+    }
+
+    const reports = rawFiles.map((f) => ({
+      id:          f.id,
+      name:        f.name,
+      month:       f.month || month || null,
+      size:        f.size  || null,
+      createdTime: f.createdTime || null,
+      mimeType:    f.mimeType,
+    }));
+
+    console.log(`✅ [ARCHIVE] Found ${reports.length} files for ${client}${month ? ` / ${month}` : ""}`);
+    return res.json({ success: true, reports });
+  } catch (err) {
+    console.error("[ARCHIVE] getArchiveList error:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+/**
+ * GET /api/reports/archive/download/:fileId
+ */
+const downloadArchiveFile = async (req, res) => {
+  try {
+    const { fileId } = req.params;
+
+    if (!fileId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "fileId is required" });
+    }
+
+    console.log(`⬇️ [ARCHIVE] Downloading file: ${fileId}`);
+
+    const drive = getDrive();
+
+    const meta     = await drive.files.get({ fileId, fields: "name, mimeType" });
+    const fileName = meta.data.name  || `report-${fileId}.pdf`;
+    const mimeType = meta.data.mimeType || "application/pdf";
+
+    const fileStream = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "stream" }
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(fileName)}"`
+    );
+    res.setHeader("Content-Type", mimeType);
+
+    fileStream.data.pipe(res);
+
+    fileStream.data.on("error", (streamErr) => {
+      console.error("[ARCHIVE] Stream error:", streamErr.message);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, error: "File stream error" });
+      }
+    });
+
+    fileStream.data.on("end", () => {
+      console.log(`✅ [ARCHIVE] File streamed successfully: ${fileName}`);
+    });
+  } catch (err) {
+    console.error("[ARCHIVE] downloadArchiveFile error:", err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  }
+};
+
+/**
+ * DELETE /api/reports/archive/:fileId
+ */
+const deleteArchiveFile = async (req, res) => {
+  try {
+    const { fileId } = req.params;
+
+    if (!fileId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "fileId is required" });
+    }
+
+    console.log(`🗑️ [ARCHIVE] Trashing file: ${fileId}`);
+
+    const drive = getDrive();
+
+    await drive.files.update({
+      fileId,
+      requestBody: { trashed: true },
+    });
+
+    console.log(`✅ [ARCHIVE] File moved to trash: ${fileId}`);
+    return res.json({
+      success: true,
+      message: "File moved to trash. Recoverable from Google Drive within 30 days.",
+    });
+  } catch (err) {
+    console.error("[ARCHIVE] deleteArchiveFile error:", err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+// =====================================================
+// 🧪 DEBUG / TESTING METHODS
+// =====================================================
+
+/**
+ * 🧪 DEBUG: Zone name verification endpoint
+ */
+const debugZoneNames = async (req, res) => {
+  try {
+    const { clientId, clientName } = req.query;
+
+    let clientInfo;
+    if (clientId)        clientInfo = await getClientInfo(clientId);
+    else if (clientName) clientInfo = await getClientInfo(clientName);
+    else
+      return res
+        .status(400)
+        .json({ success: false, message: "Either clientId or clientName is required" });
+
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
+
+    const { fetchZoneData } = require("../models/reportModel.js");
+    const zoneData = await fetchZoneData(clientInfo.id);
+
+    const testEndDate   = dayjs().format("YYYY-MM-DD");
+    const testStartDate = dayjs().subtract(1, "day").format("YYYY-MM-DD");
+
+    const reportData = await fetchPatrolReport(
+      clientInfo.id,
+      testStartDate,
+      testEndDate,
+      true,
+      "custom"
+    );
+
+    res.json({
+      success: true,
+      client: clientInfo,
+      zoneData: {
+        source:     zoneData.source,
+        totalZones: zoneData.allPosts.length,
+        zones:      zoneData.allPosts
+          .slice(0, 20)
+          .map((z) => ({ code: z.zoneCode, name: z.zoneName, id: z.zoneId })),
+        mapKeys: Array.from(zoneData.zoneMap.keys()).slice(0, 30),
+      },
+      reportSample: {
+        posts:  reportData.posts?.slice(0, 10).map((p) => ({
+          code:      p.ZoneCode,
+          name:      p.SecurityPost,
+          completed: p.Completed,
+          expected:  p.Expected,
+        })),
+        events: reportData.events?.slice(0, 5).map((e) => ({
+          date:     e.Date,
+          time:     e.Time,
+          zoneCode: e.ZoneCode,
+          zoneName: e.Zone,
+          event:    e.Event,
+        })),
+      },
+      hasGenericNames:
+        reportData.posts?.some(
+          (p) =>
+            p.SecurityPost?.startsWith("Security Post") ||
+            p.SecurityPost?.includes("UNKNOWN")
+        ) || false,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("❌ Debug error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 /**
  * 🧪 Test PDF services
  */
@@ -689,98 +1634,83 @@ const testPDFServices = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
 
-    console.log("🧪 [CONTROLLER] Test PDF Services:", { clientName, startDate, endDate });
-
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required for testing"
-      });
-    }
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required for testing" });
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${clientName}`
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${clientName}` });
 
-    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+    const testStartDate = startDate || dayjs().subtract(7, "day").format("YYYY-MM-DD");
+    const testEndDate   = endDate   || dayjs().format("YYYY-MM-DD");
 
-    // Test both PDF services
     const results = {
       reportService: { success: false, size: 0, error: null },
-      pdfService: { success: false, size: 0, error: null }
+      pdfService:    { success: false, size: 0, error: null },
     };
 
-    // Test reportService.js
     try {
-      const reportServicePDF = await generateWeeklyReportPDF(
+      const buf = await generateWeeklyReportPDF(
         clientInfo.id,
         testStartDate,
         testEndDate
       );
       results.reportService = {
-        success: !!reportServicePDF,
-        size: reportServicePDF ? reportServicePDF.length : 0,
-        service: 'reportService.js'
+        success: !!buf,
+        size:    buf ? buf.length : 0,
+        service: "reportService.js",
       };
-    } catch (error) {
-      results.reportService.error = error.message;
+    } catch (e) {
+      results.reportService.error = e.message;
     }
 
-    // Test pdfService.js
     try {
-      const pdfServiceResult = await generatePDFReport({
-        clientId: clientInfo.id,
+      const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+      const expectedPatrols = calculateExpectedPatrolsForRange(schedule, testStartDate, testEndDate);
+      
+      const r = await generatePDFReport({
+        clientId:   clientInfo.id,
         clientName: clientInfo.name,
-        startDate: testStartDate,
-        endDate: testEndDate
+        startDate:  testStartDate,
+        endDate:    testEndDate,
+        patrolSchedule: schedule,
+        expectedPatrols,
       });
       results.pdfService = {
-        success: pdfServiceResult.success,
-        size: pdfServiceResult.pdfBuffer ? pdfServiceResult.pdfBuffer.length : 0,
-        service: 'pdfService.js',
-        metadata: pdfServiceResult.metadata
+        success:  r.success,
+        size:     r.pdfBuffer ? r.pdfBuffer.length : 0,
+        service:  "pdfService.js",
+        metadata: r.metadata,
       };
-    } catch (error) {
-      results.pdfService.error = error.message;
+    } catch (e) {
+      results.pdfService.error = e.message;
     }
 
     res.json({
       success: true,
-      client: {
-        id: clientInfo.id,
-        name: clientInfo.name
-      },
-      period: {
-        startDate: testStartDate,
-        endDate: testEndDate
-      },
+      client: { id: clientInfo.id, name: clientInfo.name, source: clientInfo.source },
+      period: { startDate: testStartDate, endDate: testEndDate },
       pdfServices: results,
       recommendations: [
-        results.reportService.success ? "✅ reportService.js is working" : "❌ reportService.js failed",
-        results.pdfService.success ? "✅ pdfService.js is working" : "❌ pdfService.js failed",
-        "Use /api/reports/weekly/pdf for weekly reports",
-        "Use /api/reports/dashboard-pdf for dashboard reports",
-        "Use /api/reports/comprehensive-pdf?type=dashboard for comprehensive reports"
+        results.reportService.success
+          ? "✅ reportService.js is working"
+          : "❌ reportService.js failed",
+        results.pdfService.success
+          ? "✅ pdfService.js is working"
+          : "❌ pdfService.js failed",
       ],
-      endpoints: {
-        weeklyReport: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
-        dashboardPDF: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
-        comprehensivePDF: `/api/reports/comprehensive-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}&type=dashboard`
-      }
     });
-
   } catch (error) {
     console.error("❌ Test PDF Services Error:", error);
     res.status(500).json({
       success: false,
       message: "Test failed",
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
@@ -792,127 +1722,82 @@ const testReportData = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
 
-    console.log("🧪 [CONTROLLER] Test Report Request:", { clientName, startDate, endDate });
-
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required for testing"
-      });
-    }
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required for testing" });
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: `Client not found: ${clientName}`
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: `Client not found: ${clientName}` });
 
-    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+    const testStartDate = startDate || dayjs().subtract(7, "day").format("YYYY-MM-DD");
+    const testEndDate   = endDate   || dayjs().format("YYYY-MM-DD");
 
-    // ✅ Use synchronized reportModel.js
-    const reportData = await fetchWeeklyReport(
+    const reportData = await fetchPatrolReport(
       clientInfo.id,
       testStartDate,
-      testEndDate
+      testEndDate,
+      true,
+      "custom"
     );
-
-    const schedule = await getClientSchedule(clientInfo.id);
-
-    const analysis = {
-      client: {
-        id: clientInfo.id,
-        name: clientInfo.name,
-        valid: true
-      },
-      dataStructure: {
-        hasPosts: Array.isArray(reportData.posts),
-        hasEvents: Array.isArray(reportData.events),
-        hasGuardReports: Array.isArray(reportData.guardReports),
-        hasMetadata: !!reportData.metadata,
-        success: reportData.metadata?.success !== false
-      },
-      dataContent: {
-        postsCount: reportData.posts?.length || 0,
-        eventsCount: reportData.events?.length || 0,
-        guardReportsCount: reportData.guardReports?.length || 0,
-        postsSample: reportData.posts?.slice(0, 2).map(p => ({
-          zone: p.SecurityPost,
-          completed: p.Completed,
-          expected: p.Expected,
-          performance: p.Percentage
-        })) || [],
-        eventsSample: reportData.events?.slice(0, 2) || [],
-        guardReportsSample: reportData.guardReports?.slice(0, 1) || []
-      },
-      schedule: schedule ? {
-        configured: true,
-        patrolsPerDay: schedule.patrols_per_day,
-        weekendPatrols: schedule.weekend_patrols_per_day,
-        patrolDays: schedule.patrol_days,
-        shiftType: schedule.shift_type,
-        hasCustomSchedule: schedule.has_custom_schedule
-      } : { configured: false },
-      metadata: {
-        clientName: reportData.metadata?.clientName,
-        overallPerformance: reportData.metadata?.overallPerformance,
-        dataSource: reportData.metadata?.dataSource || 'Database',
-        dataQuality: reportData.metadata?.dataQuality || {}
-      },
-      pdfServices: {
-        available: true,
-        reportService: "Weekly Patrol Report",
-        pdfService: "Dashboard with Incidents"
-      }
-    };
-
-    const recommendations = [];
-    if (analysis.dataContent.postsCount === 0) {
-      recommendations.push("⚠️ No data found - check client name and date range");
-    }
-    
-    if (analysis.dataStructure.success) {
-      recommendations.push("✅ Data fetch successful using synchronized reportModel.js");
-    } else {
-      recommendations.push("❌ Data fetch failed");
-    }
-    
-    if (analysis.metadata.dataQuality?.isValid) {
-      recommendations.push("✅ Data quality validation passed");
-    } else if (analysis.metadata.dataQuality?.issues) {
-      recommendations.push("⚠️ Data quality issues detected");
-    }
-    
-    if (schedule?.has_custom_schedule) {
-      recommendations.push("✅ Using custom schedule from " + schedule.config_source);
-    } else {
-      recommendations.push("ℹ️ Using default schedule");
-    }
+    const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const expectedPatrols = calculateExpectedPatrolsForRange(schedule, testStartDate, testEndDate);
 
     res.json({
       success: true,
       testTimestamp: new Date().toISOString(),
-      client: analysis.client,
-      period: { startDate: testStartDate, endDate: testEndDate },
-      analysis,
-      recommendations,
-      pdfEndpoints: {
-        weekly: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
-        dashboard: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`,
-        test: `/api/reports/test-pdf-services?clientName=${encodeURIComponent(clientName)}&startDate=${testStartDate}&endDate=${testEndDate}`
+      client: {
+        id:     clientInfo.id,
+        name:   clientInfo.name,
+        source: clientInfo.source,
+        valid:  true,
       },
-      notes: "Using synchronized data model with API/Database integration"
+      period: { startDate: testStartDate, endDate: testEndDate },
+      analysis: {
+        zoneData: {
+          source:       reportData.metadata.zoneSource,
+          totalZones:   reportData.posts?.length || 0,
+          genericZones: reportData.posts?.filter(
+            (p) =>
+              p.SecurityPost?.startsWith("Security Post") ||
+              p.SecurityPost?.includes("UNKNOWN")
+          ).length || 0,
+          sampleZones: reportData.posts
+            ?.slice(0, 5)
+            .map((p) => ({ code: p.ZoneCode, name: p.SecurityPost })) || [],
+        },
+        eventData: {
+          total: reportData.events?.length || 0,
+          unknownZoneEvents: reportData.events?.filter(
+            (e) =>
+              e.Zone === "UNKNOWN_ZONE" || e.Zone?.includes("UNKNOWN")
+          ).length || 0,
+        },
+        schedule: schedule
+          ? {
+              configured:   true,
+              patrolsPerDay: schedule.patrols_per_day,
+              shiftType:    schedule.shift_type,
+              expectedPatrols,
+            }
+          : { configured: false, expectedPatrols: 0 },
+        metadata: {
+          overallPerformance: reportData.metadata?.overallPatrolPerformance,
+          patrolSource:       reportData.metadata?.patrolSource,
+          zoneSource:         reportData.metadata?.zoneSource,
+        },
+      },
     });
-
   } catch (error) {
     console.error("❌ Test Error:", error);
     res.status(500).json({
       success: false,
       message: "Test failed",
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
@@ -922,136 +1807,103 @@ const testReportData = async (req, res) => {
  */
 const testReportGeneration = async (req, res) => {
   try {
-    const { clientName } = req.params;
-    const { startDate, endDate } = req.body;
+    const { clientName }         = req.params;
+    const { startDate, endDate } = req.body || req.query;
 
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required",
-      });
-    }
-
-    console.log(`\n🧪 [CONTROLLER] Test PDF Generation:`, { clientName, startDate, endDate });
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required" });
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: 'Client not found',
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
 
-    const testStartDate = startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD');
-    const testEndDate = endDate || dayjs().format('YYYY-MM-DD');
+    const testStartDate = startDate || dayjs().subtract(7, "day").format("YYYY-MM-DD");
+    const testEndDate   = endDate   || dayjs().format("YYYY-MM-DD");
 
-    console.log(`   Period: ${testStartDate} → ${testEndDate}`);
-
-    // Test data fetch
-    const reportData = await fetchWeeklyReport(
+    const reportData = await fetchPatrolReport(
       clientInfo.id,
       testStartDate,
-      testEndDate
+      testEndDate,
+      true,
+      "custom"
     );
 
-    // Test both PDF services
-    let pdfTestReport = { success: false, message: "Not attempted" };
+    let pdfTestReport    = { success: false, message: "Not attempted" };
     let pdfTestDashboard = { success: false, message: "Not attempted" };
-    
+
     try {
-      const pdfBuffer = await generateWeeklyReportPDF(
+      const buf = await generateWeeklyReportPDF(
         clientInfo.id,
         testStartDate,
         testEndDate
       );
       pdfTestReport = {
-        success: !!pdfBuffer,
-        message: pdfBuffer ? "PDF generated successfully" : "No data for PDF generation",
-        size: pdfBuffer ? pdfBuffer.length : 0,
-        service: 'reportService.js (weekly report)'
+        success: !!buf,
+        message: buf ? "PDF generated successfully" : "No data",
+        size:    buf ? buf.length : 0,
+        service: "reportService.js",
       };
-    } catch (pdfError) {
+    } catch (e) {
       pdfTestReport = {
         success: false,
-        message: pdfError.message,
-        service: 'reportService.js'
+        message: e.message,
+        service: "reportService.js",
       };
     }
 
     try {
-      const pdfResult = await generatePDFReport({
-        clientId: clientInfo.id,
+      const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+      const expectedPatrols = calculateExpectedPatrolsForRange(schedule, testStartDate, testEndDate);
+      
+      const r = await generatePDFReport({
+        clientId:   clientInfo.id,
         clientName: clientInfo.name,
-        startDate: testStartDate,
-        endDate: testEndDate
+        startDate:  testStartDate,
+        endDate:    testEndDate,
+        patrolSchedule: schedule,
+        expectedPatrols,
       });
       pdfTestDashboard = {
-        success: pdfResult.success,
-        message: pdfResult.success ? "Dashboard PDF generated" : "Dashboard PDF failed",
-        size: pdfResult.pdfBuffer ? pdfResult.pdfBuffer.length : 0,
-        service: 'pdfService.js (dashboard)',
-        metadata: pdfResult.metadata
+        success: r.success,
+        message: r.success ? "Dashboard PDF generated" : "Dashboard PDF failed",
+        size:    r.pdfBuffer ? r.pdfBuffer.length : 0,
+        service: "pdfService.js",
       };
-    } catch (pdfError) {
+    } catch (e) {
       pdfTestDashboard = {
         success: false,
-        message: pdfError.message,
-        service: 'pdfService.js'
+        message: e.message,
+        service: "pdfService.js",
       };
-    }
-
-    const recommendations = [];
-    if (reportData.posts?.length === 0) {
-      recommendations.push("⚠️ No data found for the specified period");
-    }
-    if (!pdfTestReport.success) {
-      recommendations.push("❌ Weekly PDF generation failed");
-    }
-    if (!pdfTestDashboard.success) {
-      recommendations.push("❌ Dashboard PDF generation failed");
-    }
-    
-    if (reportData.metadata.success !== false) {
-      recommendations.push("✅ Data model working correctly");
-    }
-    
-    if (recommendations.length === 0) {
-      recommendations.push("✅ All tests passed - both PDF services working");
     }
 
     res.json({
       success: true,
       testDetails: {
-        client: {
-          id: clientInfo.id,
-          name: clientInfo.name
-        },
-        period: {
-          startDate: testStartDate,
-          endDate: testEndDate
-        },
+        client: { id: clientInfo.id, name: clientInfo.name, source: clientInfo.source },
+        period: { startDate: testStartDate, endDate: testEndDate },
         dataFetch: {
-          success: reportData.metadata.success !== false,
-          postsCount: reportData.posts?.length || 0,
+          success:    reportData.metadata.success !== false,
+          postsCount: reportData.posts?.length  || 0,
           eventsCount: reportData.events?.length || 0,
-          guardReportsCount: reportData.guardReports?.length || 0,
-          dataQuality: reportData.metadata.dataQuality,
-          dataSource: reportData.metadata.dataSource || 'Database'
+          zoneSource: reportData.metadata.zoneSource,
         },
         pdfGeneration: {
           reportService: pdfTestReport,
-          pdfService: pdfTestDashboard
+          pdfService:    pdfTestDashboard,
         },
-        recommendations
-      }
+      },
     });
-
   } catch (error) {
     console.error("❌ Error testing report generation:", error);
     res.status(500).json({
       success: false,
       message: "Error testing report generation",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -1062,146 +1914,106 @@ const testReportGeneration = async (req, res) => {
 const getComprehensiveClientReport = async (req, res) => {
   try {
     const { clientName } = req.params;
-    const { 
-      period = 'last7days',
-      customStart,
-      customEnd
-    } = req.query;
+    const { period = "last7days", customStart, customEnd } = req.query;
 
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required",
-      });
-    }
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required" });
 
     let startDate, endDate;
     const today = new Date();
-    
+
     switch (period) {
-      case 'last7days':
-        startDate = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-        endDate = today;
+      case "last30days":
+        startDate = new Date(today.getTime() - 30 * 86400000);
+        endDate   = today;
         break;
-      case 'last30days':
-        startDate = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-        endDate = today;
+      case "last90days":
+        startDate = new Date(today.getTime() - 90 * 86400000);
+        endDate   = today;
         break;
-      case 'last90days':
-        startDate = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
-        endDate = today;
-        break;
-      case 'custom':
-        if (!customStart || !customEnd) {
+      case "custom":
+        if (!customStart || !customEnd)
           return res.status(400).json({
             success: false,
-            message: "Custom period requires customStart and customEnd parameters"
+            message: "Custom period requires customStart and customEnd",
           });
-        }
         startDate = new Date(customStart);
-        endDate = new Date(customEnd);
+        endDate   = new Date(customEnd);
         break;
       default:
-        startDate = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-        endDate = today;
+        startDate = new Date(today.getTime() - 7 * 86400000);
+        endDate   = today;
     }
 
-    const startDateStr = startDate.toISOString().split('T')[0];
-    const endDateStr = endDate.toISOString().split('T')[0];
+    const startDateStr = startDate.toISOString().split("T")[0];
+    const endDateStr   = endDate.toISOString().split("T")[0];
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: 'Client not found',
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
 
-    const schedule = await getClientSchedule(clientInfo.id);
+    const schedule   = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const expectedPatrols = calculateExpectedPatrolsForRange(schedule, startDateStr, endDateStr);
     
-    // ✅ Use synchronized reportModel.js
-    const reportData = await fetchWeeklyReport(
+    const reportData = await fetchPatrolReport(
       clientInfo.id,
       startDateStr,
-      endDateStr
+      endDateStr,
+      true,
+      "custom"
     );
 
     if (!reportData.metadata.success) {
       return res.status(500).json({
         success: false,
         message: "Failed to fetch report data",
-        error: reportData.metadata.error?.message || "Unknown error"
+        error: reportData.metadata.error?.message,
       });
     }
 
-    // Test both PDF services
-    const reportServicePDF = await generateWeeklyReportPDF(
-      clientInfo.id,
-      startDateStr,
-      endDateStr
-    );
-
-    const pdfServiceResult = await generatePDFReport({
-      clientId: clientInfo.id,
-      clientName: clientInfo.name,
-      startDate: startDateStr,
-      endDate: endDateStr
-    });
-
     res.json({
       success: true,
-      client: {
-        id: clientInfo.id,
-        name: clientInfo.name
-      },
+      client: { id: clientInfo.id, name: clientInfo.name, source: clientInfo.source },
       period: {
-        type: period,
+        type:  period,
         start: startDateStr,
-        end: endDateStr,
-        days: Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24))
+        end:   endDateStr,
+        days:  Math.ceil((endDate - startDate) / 86400000),
       },
-      schedule: schedule ? {
-        patrolsPerDay: schedule.patrols_per_day,
-        shiftType: schedule.shift_type,
-        patrolDays: schedule.patrol_days,
-        weekendPatrols: schedule.weekend_patrols_per_day,
-        weeklyTotal: calculateWeeklyTotal(
-          schedule.patrols_per_day,
-          schedule.weekend_patrols_per_day,
-          schedule.patrol_days
-        )
-      } : null,
+      schedule: schedule
+        ? {
+            patrolsPerDay: schedule.patrols_per_day,
+            shiftType:     schedule.shift_type,
+            patrolDays:    schedule.patrol_days,
+            expectedPatrols,
+            weeklyTotal:   calculateWeeklyTotal(
+              schedule.patrols_per_day,
+              schedule.weekend_patrols_per_day,
+              schedule.patrol_days
+            ),
+          }
+        : null,
       data: {
-        postsCount: reportData.posts?.length || 0,
-        eventsCount: reportData.events?.length || 0,
-        guardReportsCount: reportData.guardReports?.length || 0,
-        hasData: (reportData.posts?.length > 0) || (reportData.events?.length > 0),
-        overallPerformance: reportData.metadata.overallPerformance,
-        dataQuality: reportData.metadata.dataQuality,
-        dataSource: reportData.metadata.dataSource || 'Database'
+        postsCount:         reportData.posts?.length        || 0,
+        eventsCount:        reportData.events?.length       || 0,
+        guardReportsCount:  reportData.guardReports?.length || 0,
+        overallPerformance: reportData.metadata.overallPatrolPerformance,
+        zoneSource:         reportData.metadata.zoneSource,
       },
-      pdfServices: {
-        reportService: {
-          available: !!reportServicePDF,
-          size: reportServicePDF ? reportServicePDF.length : 0,
-          endpoint: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}`,
-          description: "Weekly Patrol Report"
-        },
-        pdfService: {
-          available: pdfServiceResult.success,
-          size: pdfServiceResult.pdfBuffer ? pdfServiceResult.pdfBuffer.length : 0,
-          endpoint: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}`,
-          description: "Dashboard Report with Incidents",
-          metadata: pdfServiceResult.metadata
-        },
-        comprehensive: {
-          endpoint: `/api/reports/comprehensive-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDateStr}&endDate=${endDateStr}&type=dashboard`,
-          description: "Choose between dashboard or weekly report"
-        }
+      pdfEndpoints: {
+        weeklyReport: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(
+          clientName
+        )}&startDate=${startDateStr}&endDate=${endDateStr}`,
+        dashboardPDF: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(
+          clientName
+        )}&startDate=${startDateStr}&endDate=${endDateStr}`,
       },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
-
   } catch (error) {
     console.error("❌ Error generating comprehensive report:", error);
     res.status(500).json({
@@ -1217,57 +2029,57 @@ const getComprehensiveClientReport = async (req, res) => {
  */
 const getClientPerformanceTrends = async (req, res) => {
   try {
-    const { clientName } = req.params;
-    const { months = 6 } = req.query;
+    const { clientName }     = req.params;
+    const { months = 6 }     = req.query;
 
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "Client Name is required",
-      });
-    }
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "Client Name is required" });
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: 'Client not found',
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
 
-    const schedule = await getClientSchedule(clientInfo.id);
-    const trends = [];
-    const today = new Date();
+    const schedule  = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const trends    = [];
+    const today     = new Date();
     const monthsInt = parseInt(months);
-    
+
     for (let i = 0; i < monthsInt; i++) {
-      const monthDate = new Date(today.getFullYear(), today.getMonth() - i, 1);
+      const monthDate  = new Date(today.getFullYear(), today.getMonth() - i, 1);
       const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
-      const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
+      const monthEnd   = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
       
-      // ✅ Use synchronized reportModel.js
-      const monthData = await fetchWeeklyReport(
+      const startStr = monthStart.toISOString().split("T")[0];
+      const endStr = monthEnd.toISOString().split("T")[0];
+      
+      const monthExpected = calculateExpectedPatrolsForRange(schedule, startStr, endStr);
+
+      const monthData = await fetchPatrolReport(
         clientInfo.id,
-        monthStart.toISOString().split('T')[0],
-        monthEnd.toISOString().split('T')[0]
+        startStr,
+        endStr,
+        true,
+        "custom"
       );
 
-      const totalExpected = monthData.metadata?.totalExpectedPatrols || 0;
-      const totalCompleted = monthData.metadata?.totalCompleted || 0;
-      const performanceRate = monthData.metadata?.overallPerformance || 0;
-      const rating = getPerformanceRating(performanceRate);
-
       trends.push({
-        month: monthDate.toLocaleString('default', { month: 'long', year: 'numeric' }),
-        period: `${monthStart.toISOString().split('T')[0]} to ${monthEnd.toISOString().split('T')[0]}`,
-        expected: totalExpected,
-        completed: totalCompleted,
-        performanceRate: performanceRate,
-        rating: rating,
+        month:  monthDate.toLocaleString("default", {
+          month: "long",
+          year:  "numeric",
+        }),
+        period: `${startStr} to ${endStr}`,
+        expected:       monthExpected || monthData.metadata?.totalExpectedPatrols || 0,
+        completed:      monthData.metadata?.totalCompletedPatrols || 0,
+        performanceRate: monthData.metadata?.overallPatrolPerformance || 0,
+        rating:          getPerformanceRating(
+          monthData.metadata?.overallPatrolPerformance || 0
+        ),
         postsCount: monthData.posts?.length || 0,
-        expectedPerZone: monthData.posts.length > 0 ? monthData.posts[0].Expected : 0,
-        dataQuality: monthData.metadata.dataQuality,
-        dataSource: monthData.metadata.dataSource || 'Database'
+        zoneSource: monthData.metadata.zoneSource,
       });
     }
 
@@ -1275,41 +2087,39 @@ const getClientPerformanceTrends = async (req, res) => {
 
     res.json({
       success: true,
-      client: {
-        id: clientInfo.id,
-        name: clientInfo.name
-      },
+      client: { id: clientInfo.id, name: clientInfo.name, source: clientInfo.source },
       period: {
         months: monthsInt,
-        start: trends[0]?.period.split(' to ')[0],
-        end: trends[trends.length - 1]?.period.split(' to ')[1]
+        start:  trends[0]?.period.split(" to ")[0],
+        end:    trends[trends.length - 1]?.period.split(" to ")[1],
       },
-      schedule: schedule ? {
-        patrolsPerDay: schedule.patrols_per_day,
-        shiftType: schedule.shift_type,
-        weekendPatrols: schedule.weekend_patrols_per_day
-      } : null,
+      schedule: schedule
+        ? { patrolsPerDay: schedule.patrols_per_day, shiftType: schedule.shift_type }
+        : null,
       trends,
       summary: {
-        averagePerformance: (trends.reduce((sum, month) => sum + parseFloat(month.performanceRate), 0) / trends.length).toFixed(1),
-        totalCompleted: trends.reduce((sum, month) => sum + month.completed, 0),
-        bestMonth: trends.reduce((best, month) => 
-          parseFloat(month.performanceRate) > parseFloat(best.performanceRate) ? month : trends[0]
+        averagePerformance: (
+          trends.reduce((s, m) => s + parseFloat(m.performanceRate), 0) /
+          trends.length
+        ).toFixed(1),
+        totalCompleted: trends.reduce((s, m) => s + m.completed, 0),
+        bestMonth:  trends.reduce(
+          (best, m) =>
+            parseFloat(m.performanceRate) > parseFloat(best.performanceRate)
+              ? m
+              : best,
+          trends[0]
         ),
-        worstMonth: trends.reduce((worst, month) => 
-          parseFloat(month.performanceRate) < parseFloat(worst.performanceRate) ? month : trends[0]
-        )
+        worstMonth: trends.reduce(
+          (worst, m) =>
+            parseFloat(m.performanceRate) < parseFloat(worst.performanceRate)
+              ? m
+              : worst,
+          trends[0]
+        ),
       },
-      pdfServices: {
-        available: true,
-        endpoints: {
-          monthlyReport: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${trends[0]?.period.split(' to ')[0]}&endDate=${trends[trends.length - 1]?.period.split(' to ')[1]}`,
-          dashboardReport: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${trends[0]?.period.split(' to ')[0]}&endDate=${trends[trends.length - 1]?.period.split(' to ')[1]}`
-        }
-      },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
-
   } catch (error) {
     console.error("❌ Error getting performance trends:", error);
     res.status(500).json({
@@ -1326,31 +2136,24 @@ const getClientPerformanceTrends = async (req, res) => {
 const getAllClientsList = async (req, res) => {
   try {
     const clients = await getAllClients();
-    
     res.json({
       success: true,
-      count: clients.length,
-      clients: clients.map(client => ({
-        id: client.id,
-        name: client.name
+      count:   clients.length,
+      clients: clients.map((c) => ({
+        id:          c.id,
+        name:        c.name,
+        displayName: c.displayName || c.name,
+        uniqueKey:   c.uniqueKey,
+        source:      c.source,
       })),
-      pdfServicesInfo: {
-        reportService: "Weekly patrol report PDF",
-        pdfService: "Dashboard report with incidents PDF",
-        endpoints: {
-          weeklyPDF: "/api/reports/weekly/pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
-          dashboardPDF: "/api/reports/dashboard-pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
-          comprehensivePDF: "/api/reports/comprehensive-pdf?clientName={name}&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&type=dashboard"
-        }
-      },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     console.error("❌ Error getting clients list:", error);
     res.status(500).json({
       success: false,
       message: "Error fetching clients list",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -1361,42 +2164,71 @@ const getAllClientsList = async (req, res) => {
 const searchClients = async (req, res) => {
   try {
     const { query } = req.query;
-    
-    if (!query || query.length < 2) {
+
+    if (!query || query.length < 2)
       return res.status(400).json({
         success: false,
-        message: "Search query must be at least 2 characters long"
+        message: "Search query must be at least 2 characters long",
       });
+
+    try {
+      const apiClients = await bmSecurityAPI.getClients();
+      const filtered   = apiClients
+        .filter(
+          (c) =>
+            c.name &&
+            c.name.toUpperCase().includes(query.toUpperCase())
+        )
+        .map((c) => ({
+          id:            c.id,
+          name:          c.name,
+          accountNumber: c.accountNumber,
+          source:        "API",
+        }));
+
+      const deduped = deduplicateClientNames(filtered);
+      if (deduped.length > 0)
+        return res.json({
+          success: true,
+          count:   deduped.length,
+          clients: deduped,
+          source:  "API",
+          timestamp: new Date().toISOString(),
+        });
+    } catch (apiError) {
+      console.log(`⚠️ API search failed: ${apiError.message}`);
     }
 
-    const pool = await poolPromise;
-    const result = await pool.request()
+    const pool   = await poolPromise;
+    const result = await pool
+      .request()
       .input("searchQuery", sql.NVarChar, `%${query}%`)
       .query(`
-        SELECT cue_iid AS id, cue_cnombre AS name
-        FROM [_Datos].[dbo].[m_cuentas] 
+        SELECT cue_iid AS id, LTRIM(RTRIM(cue_cnombre)) AS name
+        FROM [_Datos].[dbo].[m_cuentas]
         WHERE cue_cnombre LIKE @searchQuery
           AND cue_cnombre IS NOT NULL
           AND cue_cnombre != ''
         ORDER BY cue_cnombre
       `);
 
+    const deduped = deduplicateClientNames(
+      result.recordset.map((c) => ({ ...c, source: "DATABASE" }))
+    );
+
     res.json({
       success: true,
-      count: result.recordset.length,
-      clients: result.recordset,
-      pdfServices: {
-        note: "Use client names with /api/reports/weekly/pdf or /api/reports/dashboard-pdf endpoints",
-        example: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(query)}&startDate=2024-01-01&endDate=2024-01-08`
-      },
-      timestamp: new Date().toISOString()
+      count:   deduped.length,
+      clients: deduped,
+      source:  "DATABASE",
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     console.error("❌ Error searching clients:", error);
     res.status(500).json({
       success: false,
       message: "Error searching clients",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -1407,77 +2239,65 @@ const searchClients = async (req, res) => {
 const debugPerformanceCalc = async (req, res) => {
   try {
     const { clientName, startDate, endDate } = req.query;
-    
-    if (!clientName) {
-      return res.status(400).json({
-        success: false,
-        message: "clientName is required"
-      });
-    }
+
+    if (!clientName)
+      return res
+        .status(400)
+        .json({ success: false, message: "clientName is required" });
 
     const clientInfo = await getClientInfo(clientName);
-    if (!clientInfo) {
-      return res.status(404).json({
-        success: false,
-        message: "Client not found"
-      });
-    }
+    if (!clientInfo)
+      return res
+        .status(404)
+        .json({ success: false, message: "Client not found" });
 
-    // ✅ Use synchronized reportModel.js
-    const reportData = await fetchWeeklyReport(
+    const schedule = await patrolScheduleManager.getClientSchedule(clientInfo.id);
+    const effectiveStartDate = startDate || dayjs().subtract(7, "day").format("YYYY-MM-DD");
+    const effectiveEndDate = endDate || dayjs().format("YYYY-MM-DD");
+    const expectedPatrols = calculateExpectedPatrolsForRange(schedule, effectiveStartDate, effectiveEndDate);
+
+    const reportData = await fetchPatrolReport(
       clientInfo.id,
-      startDate || dayjs().subtract(7, 'day').format('YYYY-MM-DD'),
-      endDate || dayjs().format('YYYY-MM-DD')
+      effectiveStartDate,
+      effectiveEndDate,
+      true,
+      "custom"
     );
-    
-    const debug = {
-      client: reportData.metadata.clientName,
-      calculationMethod: "Synchronized with reportModel.js",
-      totalExpected: reportData.metadata.totalExpectedPatrols,
-      totalCompleted: reportData.metadata.totalCompleted,
-      completionRate: `${reportData.metadata.overallPerformance}%`,
-      performanceRating: getPerformanceRating(reportData.metadata.overallPerformance),
-      expectedPerZone: reportData.posts.length > 0 ? reportData.posts[0].Expected : 0,
-      validZoneCount: reportData.posts.length,
-      zones: reportData.posts.slice(0, 3).map(post => ({
-        name: post.SecurityPost,
-        completed: post.Completed,
-        expected: post.Expected,
-        performance: `${post.Performance}%`,
-        calculation: `${post.Completed} / ${post.Expected} × 100 = ${post.Performance}%`
-      })),
-      events: reportData.events.slice(0, 3).map(e => ({
-        date: e.Date,
-        zone: e.Zone,
-        event: e.Event
-      })),
-      guardReports: reportData.guardReports.slice(0, 2).map(r => ({
-        date: r.date,
-        zone: r.zone,
-        report: r.report.substring(0, 100) + '...'
-      })),
-      dataQuality: reportData.metadata.dataQuality,
-      dataSource: reportData.metadata.dataSource || 'Database',
-      pdfServices: {
-        reportService: "Generates weekly patrol reports",
-        pdfService: "Generates dashboard reports with incidents",
-        endpoints: {
-          weekly: `/api/reports/weekly/pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDate}&endDate=${endDate}`,
-          dashboard: `/api/reports/dashboard-pdf?clientName=${encodeURIComponent(clientName)}&startDate=${startDate}&endDate=${endDate}`
-        }
-      }
-    };
-    
-    res.json({ 
-      success: true, 
-      debug,
-      notes: "Using synchronized data model with unified calculations and dual PDF services"
+
+    res.json({
+      success: true,
+      debug: {
+        client:           reportData.metadata.clientName,
+        schedule: schedule ? {
+          patrolsPerDay: schedule.patrols_per_day,
+          patrolDays: schedule.patrol_days,
+          weekendPatrols: schedule.weekend_patrols_per_day,
+        } : null,
+        calculatedExpected: expectedPatrols,
+        reportExpected: reportData.metadata.totalExpectedPatrols,
+        totalCompleted:   reportData.metadata.totalCompletedPatrols,
+        completionRate:   `${reportData.metadata.overallPatrolPerformance}%`,
+        performanceRating: getPerformanceRating(
+          reportData.metadata.overallPatrolPerformance
+        ),
+        validZoneCount: reportData.posts.length,
+        zoneSource:     reportData.metadata.zoneSource,
+        patrolSource:   reportData.metadata.patrolSource,
+        zones:          reportData.posts.slice(0, 5).map((p) => ({
+          name:        p.SecurityPost,
+          code:        p.ZoneCode,
+          completed:   p.Completed,
+          expected:    p.Expected,
+          performance: `${p.Performance}%`,
+        })),
+        dataQuality: reportData.metadata.dataQuality,
+      },
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       error: error.message,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   }
 };
@@ -1488,133 +2308,110 @@ const debugPerformanceCalc = async (req, res) => {
 const healthCheck = async (req, res) => {
   try {
     const pool = await poolPromise;
-    await pool.request().query('SELECT 1 as test');
-    
-    // Test data model
-    const testData = await fetchWeeklyReport(1001, 
-      dayjs().subtract(1, 'day').format('YYYY-MM-DD'),
-      dayjs().format('YYYY-MM-DD')
+    await pool.request().query("SELECT 1 as test");
+
+    const testData = await fetchPatrolReport(
+      1001,
+      dayjs().subtract(1, "day").format("YYYY-MM-DD"),
+      dayjs().format("YYYY-MM-DD"),
+      true,
+      "custom"
     );
-    
+
     res.json({
       success: true,
-      message: "Report controller is healthy - DUAL PDF SERVICES ✅",
+      message: "Report controller is healthy ✅",
       timestamp: new Date().toISOString(),
       database: "Connected",
       services: {
-        pdfService: "reportService.js (weekly reports)",
-        pdfService2: "pdfService.js (dashboard reports)",
-        dataModel: "reportModel.js (synchronized)",
-        dataFetch: testData.metadata.success ? "Working" : "Failed"
+        pdfService:  "reportService.js",
+        pdfService2: "pdfService.js",
+        dataModel:   "reportModel.js",
+        scheduleManager: "managePatrolSchedules.js",
+        archive:     "Google Drive",
       },
-      pdfServices: {
-        reportService: "Weekly patrol report generation",
-        pdfService: "Dashboard report with incident details",
-        endpoints: {
-          weeklyPDF: "/api/reports/weekly/pdf?clientName=X&startDate=Y&endDate=Z",
-          dashboardPDF: "/api/reports/dashboard-pdf?clientName=X&startDate=Y&endDate=Z",
-          comprehensivePDF: "/api/reports/comprehensive-pdf?clientName=X&startDate=Y&endDate=Z&type=dashboard",
-          testPDF: "/api/reports/test-pdf-services?clientName=X&startDate=Y&endDate=Z"
-        }
+      archiveConfig: {
+        rootFolderConfigured: !!ARCHIVE_ROOT,
+        credentialSource: process.env.GOOGLE_SERVICE_ACCOUNT_KEY
+          ? "GOOGLE_SERVICE_ACCOUNT_KEY"
+          : process.env.GOOGLE_SERVICE_ACCOUNT_JSON
+          ? "GOOGLE_SERVICE_ACCOUNT_JSON"
+          : process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE
+          ? "GOOGLE_SERVICE_ACCOUNT_KEY_FILE"
+          : "NOT_CONFIGURED",
       },
-      synchronization: {
-        dataFlow: "Controller → reportModel.js → API/Database → reportService.js/pdfService.js → PDF",
-        consistency: "All modules use same data source and calculations",
-        apiIntegration: process.env.USE_BMSECURITY_API === 'true' ? "Enabled" : "Disabled",
-        fallback: "Automatic database fallback if API fails"
-      }
+      emailConfig: {
+        enabled: EMAIL_SENDING_ENABLED,
+      },
+      zoneNameStatus: {
+        zoneSource: testData.metadata.zoneSource || "Unknown",
+      },
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: "Health check failed",
       error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-};
-
-/**
- * 📋 Get Weekly Report - Alias for getPatrolReport
- */
-const getWeeklyReport = async (req, res) => {
-  try {
-    console.log("📋 [CONTROLLER] Weekly Report Alias - Using getPatrolReport...");
-    return await getPatrolReport(req, res);
-  } catch (error) {
-    console.error("❌ Error in weekly report alias:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error fetching weekly report",
-      error: error.message,
+      timestamp: new Date().toISOString(),
     });
   }
 };
 
 // =====================================================
-// 🎯 EXPORT HELPER FUNCTIONS
+// 🎯 EXPORTS
 // =====================================================
 
-// Export all functions
 module.exports = {
-  // Main endpoints
+  // PDF endpoints
   getWeeklyReportPDF,
-  getDashboardPDF,          // NEW: PDF Service endpoint
-  getComprehensivePDF,      // NEW: Comprehensive PDF with choice
+  getDashboardPDF,
+  getComprehensivePDF,
+
+  // Data endpoints
   getPatrolReport,
   getWeeklyReport,
   getClientShifts,
-  
-  // Testing endpoints
-  testReportData,
-  testReportGeneration,
-  testPDFServices,          // NEW: Test both PDF services
-  
+
+  // Manual report trigger
+  triggerManualReport,
+
+  // Patrol Schedule Management
+  getPatrolSchedule,
+  upsertPatrolSchedule,
+  deletePatrolSchedule,
+  listAllPatrolSchedules,
+  getPatrolAnalytics,
+
+  // Archive (Google Drive)
+  getArchiveClients,
+  getArchiveMonths,
+  getArchiveList,
+  downloadArchiveFile,
+  deleteArchiveFile,
+
   // Client endpoints
-  getComprehensiveClientReport,
-  getClientPerformanceTrends,
   getAllClientsList,
   searchClients,
-  
-  // Debug endpoints
+  getComprehensiveClientReport,
+  getClientPerformanceTrends,
+
+  // Debug / testing
+  debugZoneNames,
+  testReportData,
+  testReportGeneration,
+  testPDFServices,
   debugPerformanceCalc,
   healthCheck,
-  
-  // Helper functions
+
+  // Helpers (exported for reuse)
   calculateWeeklyTotal,
+  calculateExpectedPatrolsForRange,
   getPerformanceRating,
   getPerformanceStatus,
-  getShiftDescription
+  getShiftDescription,
+  deduplicateClientNames,
+  getClientInfo,
+  getAllClients,
 };
 
-// Keep default export for compatibility
-module.exports.default = {
-  // Main endpoints
-  getWeeklyReportPDF,
-  getDashboardPDF,          // NEW: PDF Service endpoint
-  getComprehensivePDF,      // NEW: Comprehensive PDF with choice
-  getPatrolReport,
-  getWeeklyReport,
-  getClientShifts,
-  
-  // Testing endpoints
-  testReportData,
-  testReportGeneration,
-  testPDFServices,          // NEW: Test both PDF services
-  
-  // Client endpoints
-  getComprehensiveClientReport,
-  getClientPerformanceTrends,
-  getAllClientsList,
-  searchClients,
-  
-  // Debug endpoints
-  debugPerformanceCalc,
-  healthCheck,
-  
-  // Helper functions
-  calculateWeeklyTotal,
-  getPerformanceRating,
-  getPerformanceStatus,
-  getShiftDescription
-};
+module.exports.default = module.exports;

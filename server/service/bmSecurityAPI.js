@@ -27,7 +27,7 @@ const rawCache = new Map();
 const accountResolutionCache = new Map();
 const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-// Concurrency limiter for parallel chunk fetching
+// Concurrency limiter for parallel chunk  fetching
 class ConcurrencyLimiter {
   constructor(maxConcurrent) {
     this.maxConcurrent = maxConcurrent;
@@ -693,6 +693,15 @@ class BMSecurityAPI {
               console.log(`      Alarm: "${events[0].rec_calarma}"`);
               console.log(`      Client: "${events[0].rec_iidcuenta}"`);
             }
+
+            // ✅ FIX: Log earliest timestamp returned by the API for this chunk.
+            // If this is always newer than the requested FechaDesde, the API itself
+            // is enforcing a rolling history window (typically 60–90 days).
+            // In that case the missing Jan/Feb data must be retrieved from the
+            // archive DB tables (p_recepcion202601, p_recepcion202602) or a
+            // deeper endpoint such as /Rest/Search/Recepcion.
+            console.log(`    🕐 Earliest timestamp returned by API: "${events[0].rec_tfechahora}"`);
+            console.log(`    🕐 Latest  timestamp returned by API: "${events[events.length - 1].rec_tfechahora}"`);
             
             // Quick analysis of alarm codes
             const alarmCodes = events.map(e => String(e.rec_calarma || '').trim().toUpperCase()).filter(c => c);
@@ -782,7 +791,13 @@ class BMSecurityAPI {
 
     let cursor = dayjs(startDate).tz('Africa/Nairobi').startOf('day');
     const endDateObj = dayjs(endDate).tz('Africa/Nairobi').endOf('day');
-    const daysInRange = endDateObj.diff(cursor, 'day');
+
+    // ✅ FIX: Include both start and end day in the count (+1).
+    // Previously endDateObj.diff(cursor, 'day') excluded the last day,
+    // making the stats report show one fewer day than actually requested.
+    // This only affects the summary log and hasCompleteCoverage flag —
+    // chunk generation and data fetching are unaffected.
+    const daysInRange = endDateObj.diff(cursor, 'day') + 1;
 
     const chunks = [];
     const CHUNK_SIZE_DAYS = 3;
@@ -1330,6 +1345,158 @@ class BMSecurityAPI {
       throw error;
     }
   }
+
+/**
+   * 🏢 Fetch zones for a specific client from BM Security API
+   *
+   * Confirmed working pattern (tested 2026-02-15):
+   *   GET /Rest/Zona/
+   *   Header: OAuth_Token: {token}    ← capital O, capital T — NOT a query param
+   *   Params: _dc, page, start, limit, sort, filter:[{property:"zon_iidcuenta",value:{INT}}]
+   *
+   * Returns SimpleZona objects: { Id, zon_ccodigo, zon_cdescripcion, zon_iidcuenta, ... }
+   *
+   * Test results:
+   *   Client 4276 (ABSA WESTEND) → 7 zones  ✅
+   *   Client 28   (SARIT CENTRE) → 41 zones ✅
+   */
+  async getClientZones(clientId) {
+    try {
+      await this.ensureAuthenticated();
+
+      console.log(`🏢 Fetching zones for client ${clientId} from API...`);
+
+      const cacheKey = `zones_${clientId}`;
+      const cached = rawCache.get(cacheKey);
+      if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+        console.log(`📦 Serving zones from cache for client ${clientId}`);
+        return cached.data;
+      }
+
+      const allZones = [];
+      let page = 1;
+      const limit = 400;
+      let hasMore = true;
+
+      while (hasMore) {
+        const params = {
+          _dc:    Date.now(),   // cache-buster — required by SoftGuard
+          page,
+          start:  (page - 1) * limit,
+          limit,
+          sort:   JSON.stringify([{ property: 'zon_ccodigo', direction: 'ASC' }]),
+          filter: JSON.stringify([{ property: 'zon_iidcuenta', value: parseInt(clientId) }])
+        };
+
+        console.log(`  📄 Page ${page}: fetching zones for client ${clientId}...`);
+
+        const response = await axiosInstance.get(
+          `${this.baseURL}/Rest/Zona/`,
+          {
+            params,
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept':       'application/json',
+              'OAuth_Token':  this.token   // ← capital O, capital T
+            },
+            timeout: 30000
+          }
+        );
+
+        const zones = response.data?.data || response.data?.rows || [];
+        console.log(`  ✅ Page ${page}: ${zones.length} zones`);
+
+        if (zones.length === 0) {
+          hasMore = false;
+          break;
+        }
+
+        allZones.push(...zones);
+
+        // Stop when we get less than a full page
+        hasMore = zones.length >= limit;
+        if (hasMore) {
+          page++;
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+
+      console.log(`✅ Retrieved ${allZones.length} total zones for client ${clientId}`);
+
+      if (allZones.length === 0) {
+        console.log(`⚠️  API returned 0 zones for client ${clientId}`);
+        return [];
+      }
+
+      // Map SimpleZona → consistent format
+      const formattedZones = allZones
+        .map(zone => ({
+          code:     String(zone.zon_ccodigo   || '').trim(),
+          name:     String(zone.zon_cdescripcion || '').trim(),
+          zoneCode: String(zone.zon_ccodigo   || '').trim(),
+          zoneName: String(zone.zon_cdescripcion || '').trim(),
+          id:       zone.Id || zone.zon_idKey,
+          clientId: zone.zon_iidcuenta,
+          enabled:  true
+        }))
+        .filter(z => z.code && z.name); // drop blank-code or blank-name rows
+
+      // Sort numerically by zone code so original low-numbered zones win dedup
+      // (BM Security API sorts as strings: "1","10","11"..."38","39"..."7","8","9"
+      //  which means duplicate codes like "38" arrive before "7" — wrong order)
+      formattedZones.sort((a, b) => {
+        const na = parseInt(a.code);
+        const nb = parseInt(b.code);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;  // numeric sort
+        return a.code.localeCompare(b.code);            // alpha fallback
+      });
+
+      // Deduplicate by code AND by name
+      // BM Security admin sometimes has duplicate entries: same checkpoint added
+      // multiple times with different IDs but identical names (e.g. zones 7, 38, 39
+      // all named "7. Parking 5th Flr"). Keep only the lowest-ID (oldest) entry.
+      const seenCodes = new Set();
+      const seenNames = new Set();
+      const dupeLog   = [];
+
+      const uniqueZones = formattedZones.filter(z => {
+        if (seenCodes.has(z.code)) {
+          dupeLog.push(`duplicate code [${z.code}] "${z.name}"`);
+          return false;
+        }
+        if (seenNames.has(z.name.toLowerCase())) {
+          dupeLog.push(`duplicate name [${z.code}] "${z.name}"`);
+          return false;
+        }
+        seenCodes.add(z.code);
+        seenNames.add(z.name.toLowerCase());
+        return true;
+      });
+
+      if (dupeLog.length > 0) {
+        console.log(`⚠️  Removed ${dupeLog.length} duplicate zone entries for client ${clientId}:`);
+        dupeLog.forEach(d => console.log(`   - ${d}`));
+        console.log(`   → Fix: delete duplicate checkpoints in BM Security admin`);
+      }
+
+      console.log(`📋 Sample zones (client ${clientId}):`);
+      uniqueZones.slice(0, 5).forEach((z, i) =>
+        console.log(`   ${i + 1}. [${z.code}] "${z.name}"`)
+      );
+
+      // Cache result
+      rawCache.set(cacheKey, { data: uniqueZones, timestamp: Date.now() });
+
+      return uniqueZones;
+
+    } catch (error) {
+      console.error(`❌ Zone fetch failed for client ${clientId}:`);
+      console.error(`   Status: ${error.response?.status}`);
+      console.error(`   Error:  ${error.message}`);
+      return []; // triggers DB fallback in fetchZoneData
+    }
+  }
+
 } // <-- Class closes HERE
 
 const apiInstance = new BMSecurityAPI();

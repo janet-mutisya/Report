@@ -1,0 +1,456 @@
+/**
+ * /api/auth
+ *
+ * Unified authentication for two user types that live in separate tables:
+ *
+ *   Staff / Admin  →  Users    table  (UserID, Email, Password bcrypt, IsActive)
+ *   Portal Client  →  Clients  table  (ClientID, Email_Address, Password bcrypt, IsActive)
+ *
+ * Flow:
+ *   1. Admin creates a client account via POST /api/clients
+ *      → backend generates a temp password, bcrypt-hashes it, stores it,
+ *        and emails the plain-text copy to the client.
+ *   2. Client logs in with email + password  →  POST /api/auth/login
+ *   3. Client changes password on first login →  PUT /api/auth/change-password
+ *   4. Forgot password re-sends a new temp password via email →  POST /api/auth/forgot-password
+ *
+ * Staff/admin login works through the same /login endpoint
+ * (email looked up in Users table first, then Clients table).
+ */
+
+const express = require('express');
+const jwt     = require('jsonwebtoken');
+const bcrypt  = require('bcryptjs');
+const crypto  = require('crypto');
+
+const router = express.Router();
+
+// ─── lazy-load deps ───────────────────────────────────────────
+let db, authMiddleware, emailService, emailTemplates;
+try { db             = require('../config/db');                            } catch (e) { console.error('[auth] db:',            e.message); }
+try { authMiddleware = require('../middleware/auth');                      } catch (e) { console.error('[auth] middleware:',    e.message); }
+try { emailService   = require('../service/emailService');                } catch (e) { console.error('[auth] emailService:',  e.message); }
+try { emailTemplates = require('../utils/accountEmailTemplates');         } catch (e) { console.error('[auth] templates:',     e.message); }
+
+// ─── guards ───────────────────────────────────────────────────
+function requireDb(req, res, next) {
+  if (!db) return res.status(503).json({ success: false, message: 'Database unavailable' });
+  next();
+}
+
+function useAuth(req, res, next) {
+  if (typeof authMiddleware?.auth !== 'function')
+    return res.status(503).json({ success: false, message: 'Auth middleware unavailable' });
+  authMiddleware.auth(req, res, next);
+}
+
+// ─── helpers ──────────────────────────────────────────────────
+function makeToken(payload) {
+  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '24h' });
+}
+
+/** Generate a readable temp password  e.g. "Kx7!mQ2$" */
+function genTempPassword(len = 12) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+  return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
+
+/** Hash with bcrypt salt 12 */
+function hashPassword(plain) {
+  return bcrypt.hash(plain, 12);
+}
+
+// ─── email helpers ────────────────────────────────────────────
+async function sendCredentialsEmail({ to, name, accountName, accountNumber, email, password, isReset = false }) {
+  if (!emailService) {
+    console.log(`[auth] email service unavailable — credentials for ${to}: password=${password}`);
+    return false;
+  }
+  if (process.env.ENABLE_EMAIL_SENDING !== 'true') {
+    console.log(`[auth] DEV — would email ${to} | password: ${password}`);
+    return false;
+  }
+  try {
+    let html;
+    if (emailTemplates?.generateClientWelcomeEmail && !isReset) {
+      html = emailTemplates.generateClientWelcomeEmail({ contactName: name, accountName, clientId: null, accountNumber, email, password });
+    } else if (emailTemplates?.generatePasswordResetEmail && isReset) {
+      html = emailTemplates.generatePasswordResetEmail({ name, email, newPassword: password });
+    } else {
+      // Plain-text fallback
+      html = `
+        <p>Hi ${name},</p>
+        <p>${isReset ? 'Your password has been reset.' : 'Your BM Security Portal account has been created.'}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Temporary Password:</strong> <code>${password}</code></p>
+        <p>Please log in and change your password immediately.</p>
+        <p>Login at: ${process.env.FRONTEND_URL || 'http://localhost:5173'}</p>
+      `;
+    }
+    await emailService.sendSimpleEmail({
+      to,
+      subject: isReset
+        ? '🔑 Your BM Security Portal — Password Reset'
+        : '🛡️ Your BM Security Portal — Account Created',
+      html,
+    });
+    console.log(`[auth] credentials email sent → ${to}`);
+    return true;
+  } catch (err) {
+    console.error('[auth] credentials email failed:', err.message);
+    return false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+// POST /api/auth/login
+//
+// Accepts:  { email, password }
+// Checks Users first (staff/admin), then Clients.
+// Returns a JWT with role = 'admin' | 'staff' | 'client'
+// and a mustChangePassword flag when the account was freshly created.
+// ════════════════════════════════════════════════════════════════
+router.post('/login', requireDb, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password)
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+
+    const emailLower = email.trim().toLowerCase();
+
+    // ── 1. Check Users table (staff / admin) ─────────────────
+    const [staffRows] = await db.query(
+      `SELECT UserID, FirstName, Surname, Email, Password, Position, StaffCode, IsActive,
+              CASE WHEN Position = 'admin' OR Position = 'Admin' THEN 'admin' ELSE 'staff' END AS Role
+       FROM Users
+       WHERE Email = ? AND IsActive = 1`,
+      [emailLower]
+    );
+
+    if (staffRows.length) {
+      const u = staffRows[0];
+      const match = await bcrypt.compare(password, u.Password || '');
+      if (!match)
+        return res.status(401).json({ success: false, message: 'Incorrect email or password' });
+
+      const role  = u.Role;
+      const token = makeToken({
+        userId:   u.UserID,
+        email:    u.Email,
+        name:     `${u.FirstName} ${u.Surname}`.trim(),
+        role,
+        staffId:  u.UserID,
+        loginType: 'staff',
+      });
+
+      console.log(`[auth] Staff login: ${emailLower} role=${role}`);
+      return res.json({
+        success: true,
+        token,
+        user: {
+          id:        u.UserID,
+          email:     u.Email,
+          name:      `${u.FirstName} ${u.Surname}`.trim(),
+          firstName: u.FirstName,
+          surname:   u.Surname,
+          role,
+          position:  u.Position,
+          staffCode: u.StaffCode,
+          loginType: 'staff',
+          mustChangePassword: false,
+        },
+      });
+    }
+
+    // ── 2. Check Clients table ────────────────────────────────
+    const [clientRows] = await db.query(
+      `SELECT ClientID, Account_Name, Account_Number, Email_Address, First_Name,
+              Telephone_Number, Password, IsActive, MustChangePassword, BmClientId
+       FROM Clients
+       WHERE LOWER(LTRIM(RTRIM(Email_Address))) = ? AND IsActive = 1`,
+      [emailLower]
+    );
+
+    if (!clientRows.length)
+      return res.status(401).json({ success: false, message: 'Incorrect email or password' });
+
+    const c = clientRows[0];
+    if (!c.Password)
+      return res.status(401).json({
+        success: false,
+        message: 'No password set for this account. Please contact your administrator.',
+      });
+
+    const match = await bcrypt.compare(password, c.Password);
+    if (!match)
+      return res.status(401).json({ success: false, message: 'Incorrect email or password' });
+
+    const token = makeToken({
+      userId:        `client_${c.ClientID}`,
+      email:         c.Email_Address,
+      name:          c.Account_Name,
+      role:          'client',
+      clientId:      c.ClientID,
+      accountNumber: c.Account_Number,
+      loginType:     'client',
+    });
+
+    console.log(`[auth] Client login: ${emailLower} clientId=${c.ClientID}`);
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id:                `client_${c.ClientID}`,
+        email:              c.Email_Address,
+        name:               c.Account_Name,
+        companyName:        c.Account_Name,
+        contactName:        c.First_Name,
+        role:               'client',
+        clientId:           c.ClientID,
+        accountNumber:      c.Account_Number,
+        telephone:          c.Telephone_Number,
+        bmClientId:         c.BmClientId,
+        loginType:          'client',
+        mustChangePassword: !!c.MustChangePassword,
+      },
+    });
+  } catch (err) {
+    console.error('[auth] Login error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// PUT /api/auth/change-password
+//
+// Used by clients to change their password after first login,
+// or any time thereafter.
+// Accepts:  { currentPassword, newPassword }
+// Requires: valid JWT (client or staff)
+// ════════════════════════════════════════════════════════════════
+router.put('/change-password', useAuth, requireDb, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ success: false, message: 'Current and new passwords are required' });
+
+    if (newPassword.length < 8)
+      return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
+
+    if (currentPassword === newPassword)
+      return res.status(400).json({ success: false, message: 'New password must be different from current password' });
+
+    const { role, clientId, userId } = req.user;
+
+    // ── Client ────────────────────────────────────────────────
+    if (role === 'client') {
+      const [rows] = await db.query(
+        'SELECT Password FROM Clients WHERE ClientID = ? AND IsActive = 1',
+        [clientId]
+      );
+      if (!rows.length)
+        return res.status(404).json({ success: false, message: 'Account not found' });
+
+      const match = await bcrypt.compare(currentPassword, rows[0].Password || '');
+      if (!match)
+        return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+
+      await db.query(
+        'UPDATE Clients SET Password = ?, MustChangePassword = 0 WHERE ClientID = ?',
+        [await hashPassword(newPassword), clientId]
+      );
+      console.log(`[auth] Client password changed: clientId=${clientId}`);
+      return res.json({ success: true, message: 'Password changed successfully' });
+    }
+
+    // ── Staff / Admin ─────────────────────────────────────────
+    const [rows] = await db.query(
+      'SELECT Password FROM Users WHERE UserID = ? AND IsActive = 1',
+      [userId]
+    );
+    if (!rows.length)
+      return res.status(404).json({ success: false, message: 'Account not found' });
+
+    const match = await bcrypt.compare(currentPassword, rows[0].Password || '');
+    if (!match)
+      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
+
+    await db.query(
+      'UPDATE Users SET Password = ? WHERE UserID = ?',
+      [await hashPassword(newPassword), userId]
+    );
+    console.log(`[auth] Staff password changed: userId=${userId}`);
+    return res.json({ success: true, message: 'Password changed successfully' });
+  } catch (err) {
+    console.error('[auth] change-password error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// POST /api/auth/forgot-password
+//
+// Generates a new temp password, stores bcrypt hash, and emails
+// the plain-text copy.  Always returns the same generic response
+// to avoid user enumeration.
+// Accepts:  { email }
+// ════════════════════════════════════════════════════════════════
+router.post('/forgot-password', requireDb, async (req, res) => {
+  const GENERIC_OK = {
+    success: true,
+    message: 'If that email is registered, a new temporary password has been sent.',
+  };
+
+  try {
+    const { email } = req.body;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      return res.status(400).json({ success: false, message: 'A valid email address is required' });
+
+    const emailLower = email.trim().toLowerCase();
+    const tempPass   = genTempPassword();
+    const hashed     = await hashPassword(tempPass);
+
+    // ── Try Clients first ─────────────────────────────────────
+    const [clientRows] = await db.query(
+      `SELECT ClientID, Account_Name, Account_Number, First_Name
+       FROM Clients
+       WHERE LOWER(LTRIM(RTRIM(Email_Address))) = ? AND IsActive = 1`,
+      [emailLower]
+    );
+
+    if (clientRows.length) {
+      const c = clientRows[0];
+      await db.query(
+        'UPDATE Clients SET Password = ?, MustChangePassword = 1 WHERE ClientID = ?',
+        [hashed, c.ClientID]
+      );
+      await sendCredentialsEmail({
+        to:            emailLower,
+        name:          c.First_Name || c.Account_Name,
+        accountName:   c.Account_Name,
+        accountNumber: c.Account_Number,
+        email:         emailLower,
+        password:      tempPass,
+        isReset:       true,
+      });
+      console.log(`[auth] Temp password issued (client): ${emailLower}`);
+      return res.json(GENERIC_OK);
+    }
+
+    // ── Try Users (staff) ─────────────────────────────────────
+    const [staffRows] = await db.query(
+      'SELECT UserID, FirstName, Surname FROM Users WHERE Email = ? AND IsActive = 1',
+      [emailLower]
+    );
+
+    if (staffRows.length) {
+      const u = staffRows[0];
+      await db.query(
+        'UPDATE Users SET Password = ? WHERE UserID = ?',
+        [hashed, u.UserID]
+      );
+      await sendCredentialsEmail({
+        to:            emailLower,
+        name:          `${u.FirstName} ${u.Surname}`.trim(),
+        accountName:   `${u.FirstName} ${u.Surname}`.trim(),
+        accountNumber: null,
+        email:         emailLower,
+        password:      tempPass,
+        isReset:       true,
+      });
+      console.log(`[auth] Temp password issued (staff): ${emailLower}`);
+    }
+
+    // Always return generic OK to prevent user enumeration
+    return res.json(GENERIC_OK);
+  } catch (err) {
+    console.error('[auth] forgot-password error:', err);
+    return res.json({ success: true, message: 'If that email is registered, a new temporary password has been sent.' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// GET /api/auth/verify
+// Validates the JWT and returns fresh user data.
+// ════════════════════════════════════════════════════════════════
+router.get('/verify', useAuth, requireDb, async (req, res) => {
+  try {
+    const { role, clientId, userId } = req.user;
+
+    if (role === 'client') {
+      const [rows] = await db.query(
+        `SELECT ClientID, Account_Name, Account_Number, Email_Address,
+                First_Name, Telephone_Number, IsActive, MustChangePassword, BmClientId
+         FROM Clients WHERE ClientID = ? AND IsActive = 1`,
+        [clientId]
+      );
+      if (!rows.length)
+        return res.status(404).json({ success: false, message: 'Account not found or inactive' });
+
+      const c = rows[0];
+      return res.json({
+        success: true,
+        user: {
+          id:                `client_${c.ClientID}`,
+          email:              c.Email_Address,
+          name:               c.Account_Name,
+          companyName:        c.Account_Name,
+          contactName:        c.First_Name,
+          role:               'client',
+          clientId:           c.ClientID,
+          accountNumber:      c.Account_Number,
+          telephone:          c.Telephone_Number,
+          bmClientId:         c.BmClientId,
+          loginType:          'client',
+          mustChangePassword: !!c.MustChangePassword,
+        },
+      });
+    }
+
+    // Staff / admin
+    const [rows] = await db.query(
+      `SELECT UserID, FirstName, Surname, Email, Position, StaffCode, IsActive FROM Users WHERE UserID = ? AND IsActive = 1`,
+      [userId]
+    );
+    if (!rows.length)
+      return res.status(404).json({ success: false, message: 'Account not found or inactive' });
+
+    const u    = rows[0];
+    const uRole = (u.Position || '').toLowerCase() === 'admin' ? 'admin' : 'staff';
+    return res.json({
+      success: true,
+      user: {
+        id:        u.UserID,
+        email:     u.Email,
+        name:      `${u.FirstName} ${u.Surname}`.trim(),
+        role:      uRole,
+        position:  u.Position,
+        staffCode: u.StaffCode,
+        loginType: 'staff',
+        mustChangePassword: false,
+      },
+    });
+  } catch (err) {
+    console.error('[auth] verify error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+// POST /api/auth/logout
+// ════════════════════════════════════════════════════════════════
+router.post('/logout', (req, res) => {
+  // JWT is stateless; client discards token. Log for audit trail if needed.
+  const auth = req.headers.authorization?.split(' ')[1];
+  if (auth) {
+    try {
+      const decoded = jwt.decode(auth);
+      console.log(`[auth] Logout: ${decoded?.email || 'unknown'}`);
+    } catch {}
+  }
+  res.json({ success: true, message: 'Logged out successfully' });
+});
+
+module.exports = router;

@@ -2,7 +2,7 @@ const nodemailer = require("nodemailer");
 const dotenv = require("dotenv");
 //const { runDynamicReportScheduler } = require("../service/scheduler.js");
 
-dotenv.config();
+dotenv.config({ path: require('path').join(__dirname, '..', '.env') })
 
 // ✅ Define transporter (same as in scheduler.js)
 const transporter = nodemailer.createTransport({

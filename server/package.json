@@ -9,38 +9,30 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "build:frontend": "cd ../client/reports && npm run build",
-    "test": "echo \"No tests yet\" && exit 0",
     "clean": "node -e \"const fs=require('fs');if(fs.existsSync('release'))fs.rmSync('release',{recursive:true,force:true});if(fs.existsSync('dist'))fs.rmSync('dist',{recursive:true,force:true});\"",
-    "clean:all": "pnpm run clean && rm -rf node_modules package-lock.json",
+    "build": "node build.js",
     "build:automated": "node build-exe.js",
     "build:pkg:win": "pkg . --targets node18-win-x64 --output release/guard-report-server.exe --compress GZip",
     "build:pkg:linux": "pkg . --targets node18-linux-x64 --output release/guard-report-server-linux --compress GZip",
     "build:pkg:mac": "pkg . --targets node18-macos-x64 --output release/guard-report-server-macos --compress GZip",
-    "build:pkg:all": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64 --out-path release/ --compress GZip",
     "package": "pnpm run clean && pnpm run build:pkg:win",
-    "package:all": "pnpm run clean && pnpm run build:pkg:all",
     "release": "pnpm run build:frontend && pnpm run package",
-    "release:all": "pnpm run build:frontend && pnpm run package:all",
-    "release:full": "pnpm run clean && node build-exe.js",
-    "deploy:windows": "pnpm run build:frontend && pnpm run build:pkg:win && node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('../deployment/windows',{recursive:true});\" && cp release/guard-report-server.exe ../deployment/windows/ && cp -r ../client/reports/dist ../deployment/windows/ && cp .env.example ../deployment/windows/.env",
-    "deploy:linux": "pnpm run build:frontend && pnpm run build:pkg:linux && node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('../deployment/linux',{recursive:true});\" && cp release/guard-report-server-linux ../deployment/linux/ && cp -r ../client/reports/dist ../deployment/linux/ && cp .env.example ../deployment/linux/.env",
-    "deploy:all": "pnpm run deploy:windows && pnpm run deploy:linux",
     "verify": "node -e \"console.log('Node version:', process.version); console.log('Platform:', process.platform);\"",
-    "size": "node -e \"const fs=require('fs');const files=fs.readdirSync('release');files.forEach(f=>{const s=fs.statSync('release/'+f);console.log(f,':',(s.size/1024/1024).toFixed(2),'MB')});\"",
-    "build:with-ui": "node build-with-ui.js",
-    "build": "node build.js",
-    "start:auto": "node server.js"
+    "size": "node -e \"const fs=require('fs');const files=fs.readdirSync('release');files.forEach(f=>{const s=fs.statSync('release/'+f);console.log(f,':',(s.size/1024/1024).toFixed(2),'MB')});\""
   },
   "dependencies": {
     "axios": "^1.13.2",
+    "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dayjs": "^1.11.18",
     "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "express-mongo-sanitize": "^2.1.0",
     "express-rate-limit": "^8.2.1",
+    "googleapis": "^171.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "mssql": "^12.0.0",
@@ -53,7 +45,8 @@
     "p-limit": "^7.2.0",
     "pdfkit": "^0.17.2",
     "stream-buffers": "^3.0.3",
-    "tedious": "^19.2.0"
+    "tedious": "^19.2.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.2",
@@ -73,13 +66,12 @@
       "utils/**/*",
       "data/**/*",
       "dist/**/*",
+      "../client/reports/dist/**/*",
       ".env",
       ".env.example",
       "logger.js",
       "node_modules/pdfkit/js/data/**/*",
-      "node_modules/@pdfkit/js/data/**/*",
       "node_modules/pdfkit/js/afm/**/*",
-      "node_modules/@pdfkit/js/afm/**/*",
       "node_modules/fontkit/**/*",
       "node_modules/linebreak/**/*",
       "node_modules/png-js/**/*"
@@ -98,37 +90,13 @@
       "node18-linux-x64",
       "node18-macos-x64"
     ],
-    "outputPath": "release",
-    "patches": {
-      "pdfkit": {
-        "fontkit": "fontkit-lib"
-      }
-    }
+    "outputPath": "release"
   },
-  "keywords": [
-    "security",
-    "reports",
-    "guard",
-    "api",
-    "react",
-    "express",
-    "pkg",
-    "executable",
-    "auto-browser",
-    "windows",
-    "linux",
-    "macos"
-  ],
-  "author": "BM Security",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/bmsecurity/guard-report-server"
+  "config": {
+    "port": 5000,
+    "autoBrowserDelay": 1500,
+    "asciiFix": true
   },
-  "bugs": {
-    "url": "https://github.com/bmsecurity/guard-report-server/issues"
-  },
-  "homepage": "https://github.com/bmsecurity/guard-report-server#readme",
   "os": [
     "win32",
     "linux",
@@ -137,21 +105,6 @@
   "cpu": [
     "x64"
   ],
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
-  },
-  "config": {
-    "port": 5000,
-    "autoBrowserDelay": 1500,
-    "asciiFix": true
-  }
+  "author": "BM Security",
+  "license": "MIT"
 }

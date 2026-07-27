@@ -1,4 +1,4 @@
-// server/models/incidentModel.js - FIXED WITH WORKING ROUTES
+// server/models/incidentModel.js - FIXED WITH ZONE EXTRACTION AND DATE/TIME
 const dayjs = require("dayjs");
 const utc = require('dayjs/plugin/utc.js');
 const timezone = require('dayjs/plugin/timezone.js');
@@ -93,7 +93,61 @@ function parseDateSafely(dateString, timezone) {
 }
 
 /**
- * 📊 Count V03 incidents from API events
+ * 🔍 Extract zone name from incident text
+ * Uses pattern matching to identify zone mentions in the description
+ */
+function extractZoneFromText(text) {
+  if (!text) return null;
+  
+  const lowerText = text.toLowerCase();
+  
+  // Common zone patterns - add more based on your clients
+  const zonePatterns = [
+    // ABSA BISHOP GATES zones
+    { pattern: /bishop.*gate.*lobby/i, zone: 'ABSA BISHOP GATES LOBBY AREA' },
+    { pattern: /bishop.*gate.*basement/i, zone: 'ABSA BISHOP GATES BASEMENT POOL AREA' },
+    { pattern: /bishop.*gate.*generator/i, zone: 'ABSA BISHOP GATES GENERATOR AREA' },
+    { pattern: /bishop.*gate.*garbage|bishop.*gate.*gabbage/i, zone: 'ABSA BISHOP GATES GABBAGE AREA' },
+    { pattern: /bishop.*gate.*maingate|bishop.*gate.*main gate/i, zone: 'ABSA BISHOP GATES MAINGATE' },
+    { pattern: /bishop.*gate/i, zone: 'ABSA BISHOP GATES' },
+    
+    // Generic zones
+    { pattern: /\bmaingate\b|\bmain gate\b/i, zone: 'MAINGATE' },
+    { pattern: /\blobby\b/i, zone: 'LOBBY' },
+    { pattern: /\bbasement\b/i, zone: 'BASEMENT' },
+    { pattern: /\bgenerator\b/i, zone: 'GENERATOR AREA' },
+    { pattern: /\bparking\b/i, zone: 'PARKING AREA' },
+    { pattern: /\breception\b/i, zone: 'RECEPTION' },
+    { pattern: /\bperimeter\b/i, zone: 'PERIMETER' },
+    { pattern: /\bback.*gate\b/i, zone: 'BACK GATE' },
+    { pattern: /\bfront.*gate\b/i, zone: 'FRONT GATE' },
+    { pattern: /\brooftop\b/i, zone: 'ROOFTOP' },
+    { pattern: /\bstairwell\b/i, zone: 'STAIRWELL' },
+    
+    // Try to extract "at [location]" or "in [location]"
+    { pattern: /(?:at|in)\s+([a-z0-9\s]+?)(?:\s+area|\s+zone|$)/i, zone: null }, // Capture group
+  ];
+  
+  for (const { pattern, zone } of zonePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      if (zone) {
+        console.log(`   🔍 Extracted zone from text: "${zone}"`);
+        return zone;
+      } else if (match[1]) {
+        // Captured group - clean and use it
+        const extracted = match[1].trim().toUpperCase();
+        console.log(`   🔍 Extracted zone from capture: "${extracted}"`);
+        return extracted;
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * 📊 Count V03 incidents from API events - FIXED WITH ZONE EXTRACTION
  */
 async function getIncidentCount(clientId, startDate, endDate) {
   try {
@@ -195,13 +249,79 @@ async function getIncidentCount(clientId, startDate, endDate) {
           continue;
         }
         
-        // Valid V03 incident
+        // ✅ EXTRACT ZONE WITH MULTIPLE FALLBACKS
+        let zoneName = null;
+        
+        // Priority 1: Direct zone field
+        if (event.rec_czona && event.rec_czona !== '0' && event.rec_czona.trim() !== '') {
+          zoneName = event.rec_czona.trim();
+          console.log(`   Zone from rec_czona: "${zoneName}"`);
+        } else if (event.zon_ccodigo && event.zon_ccodigo !== '0') {
+          zoneName = event.zon_ccodigo.trim();
+          console.log(`   Zone from zon_ccodigo: "${zoneName}"`);
+        }
+        
+        // Priority 2: Try to extract from observations/content text
+        if (!zoneName || zoneName === 'UNKNOWN_ZONE') {
+          const incidentText = (
+            event.rec_cObservaciones || 
+            event.observaciones || 
+            event.rec_cContenido || 
+            event.content || 
+            ''
+          ).trim();
+          
+          if (incidentText) {
+            console.log(`   Incident text: "${incidentText.substring(0, 100)}..."`);
+            const extractedZone = extractZoneFromText(incidentText);
+            if (extractedZone) {
+              zoneName = extractedZone;
+            }
+          }
+        }
+        
+        // Priority 3: Use zone name if zone code was found
+        if (zoneName && zoneName.match(/^\d+$/)) {
+          // It's just a number, try to look up the name
+          // For now, keep it as "Zone [number]"
+          zoneName = `Zone ${zoneName}`;
+        }
+        
+        // Final fallback
+        if (!zoneName) {
+          zoneName = 'UNKNOWN_ZONE';
+        }
+        
+        console.log(`   ✅ Final zone: "${zoneName}"`);
+        
+        // Get incident description
+        const incidentDescription = (
+          event.rec_cObservaciones || 
+          event.observaciones || 
+          event.rec_cContenido || 
+          event.content || 
+          'No details available'
+        ).trim();
+        
+        // ✅ FIXED: Store date/time separately for PDF
         incidents.push({
           id: event.rec_iid || event.Id,
-          date: eventDate.format('DD/MM/YYYY HH:mm:ss'),
-          zone: event.rec_czona || event.zon_ccodigo || 'Unknown',
+          date: eventDate.format('DD/MM/YYYY'),  // Separate date
+          time: eventDate.format('HH:mm:ss'),    // Separate time
+          dateTime: eventDate.toISOString(),     // Full timestamp for sorting
+          zone: zoneName,
           content: event.rec_cContenido || event.content || '',
-          observations: event.rec_cObservaciones || event.observaciones || ''
+          observations: event.rec_cObservaciones || event.observaciones || '',
+          report: incidentDescription,
+          details: incidentDescription,
+          type: 'INCIDENT_REPORT'
+        });
+        
+        console.log(`   📋 Incident added:`, {
+          date: eventDate.format('DD/MM/YYYY'),
+          time: eventDate.format('HH:mm:ss'),
+          zone: zoneName,
+          description: incidentDescription.substring(0, 50) + '...'
         });
         
       } catch (error) {
@@ -212,10 +332,13 @@ async function getIncidentCount(clientId, startDate, endDate) {
     
     console.log(`📊 [INCIDENT] Found ${incidents.length} V03 incidents (processed ${allEvents.length}, skipped ${skippedEvents})`);
     
+    // Sort by date/time
+    incidents.sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+    
     // Group by date for daily breakdown
     const dailyBreakdown = {};
     for (const incident of incidents) {
-      const dateKey = incident.date.substring(0, 10); // DD/MM/YYYY
+      const dateKey = incident.date; // Already formatted as DD/MM/YYYY
       dailyBreakdown[dateKey] = (dailyBreakdown[dateKey] || 0) + 1;
     }
     
@@ -244,6 +367,7 @@ async function getIncidentCount(clientId, startDate, endDate) {
     return {
       success: false,
       totalIncidents: 0,
+      incidents: [],
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       metadata: {
@@ -345,8 +469,6 @@ async function getIncidentsForPeriod(clientId, period = 'daily') {
  */
 function createIncidentAPI(app) {
   console.log('🔧 [INCIDENT] Registering incident routes...');
-  
-  // 🔥 FIXED: Routes match test expectations (no /api prefix)
   
   // Get full incident details
   app.get('/incidents/details', async (req, res) => {
@@ -462,5 +584,6 @@ module.exports = {
   getIncidentCount,
   getIncidentSummary,
   getIncidentsForPeriod,
-  createIncidentAPI
+  createIncidentAPI,
+  extractZoneFromText  // Export for testing
 };
